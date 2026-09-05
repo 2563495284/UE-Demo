@@ -1,0 +1,27 @@
+# Unreal Engine generated files
+/ActDemo/Binaries/
+/ActDemo/DerivedDataCache/
+/ActDemo/Intermediate/
+/ActDemo/Saved/
+
+# IDE caches and generated solutions/projects
+/ActDemo/.vs/
+/ActDemo/.idea/
+/ActDemo/*.sln
+/ActDemo/*.slnx
+/ActDemo/*.suo
+/ActDemo/*.sdf
+/ActDemo/*.opensdf
+/ActDemo/*.VC.db
+/ActDemo/*.VC.opendb
+/ActDemo/*.vcxproj
+/ActDemo/*.vcxproj.filters
+/ActDemo/*.vcxproj.user
+
+# Plugin intermediate files (keep precompiled plugin binaries)
+/ActDemo/Plugins/**/Intermediate/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,12 @@
+{
+  "root": true,
+  "hlsl.preprocessorDefinitions": {},
+  "hlsl.additionalIncludeDirectories": [
+    "D:/UE_5.8/Engine/Shaders",
+    "D:/UE_5.8/Engine/Shaders/Public",
+    "D:/UE_5.8/Engine/Shaders/Private"
+  ],
+  "hlsl.virtualDirectoryMappings": {
+    "/Engine": "D:/UE_5.8/Engine/Shaders"
+  }
+}
