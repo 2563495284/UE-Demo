@@ -11,5 +11,6 @@ public class ActDemoEditorTarget : TargetRules
 		DefaultBuildSettings = BuildSettingsVersion.V7;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
 		ExtraModuleNames.Add("ActDemo");
+		ExtraModuleNames.Add("ActDemoEditor");
 	}
 }

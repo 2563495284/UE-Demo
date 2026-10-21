@@ -3,6 +3,9 @@
 /ActDemo/DerivedDataCache/
 /ActDemo/Intermediate/
 /ActDemo/Saved/
+/Builds/
+/ActDemo/Build/*/FileOpenOrder/
+/ActDemo/Build/*/*.PackageVersionCounter
 
 # IDE caches and generated solutions/projects
 /ActDemo/.vs/
