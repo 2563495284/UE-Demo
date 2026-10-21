@@ -52,6 +52,7 @@ public:
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TArray<FActAttack> LightAttacks;
  UPROPERTY(EditAnywhere, BlueprintReadOnly) FActAttack HeavyAttack;
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TObjectPtr<UAnimMontage> DodgeMontage;
+ UPROPERTY(EditAnywhere, BlueprintReadOnly) TObjectPtr<UAnimMontage> HealMontage;
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TObjectPtr<UAnimMontage> HitMontage;
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TObjectPtr<UAnimMontage> DeathMontage;
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TObjectPtr<UNiagaraSystem> HitEffect;
@@ -88,6 +89,10 @@ public:
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TObjectPtr<UActCombatConfig> Combat;
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TObjectPtr<USkeletalMesh> Mesh;
  UPROPERTY(EditAnywhere, BlueprintReadOnly) TSubclassOf<UAnimInstance> AnimClass;
+ /** Mesh-integrated weapons use these sockets instead of the graybox blade/corridor. */
+ UPROPERTY(EditAnywhere, BlueprintReadOnly) FName WeaponBaseSocket;
+ UPROPERTY(EditAnywhere, BlueprintReadOnly) FName WeaponTipSocket;
+ UPROPERTY(EditAnywhere, BlueprintReadOnly) float WeaponTraceRadius=18.f;
 };
 
 UCLASS(BlueprintType)

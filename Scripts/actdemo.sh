@@ -20,6 +20,11 @@ case "${1:-help}" in
     # macOS RequestExitWithStatus may return zero on failure; the marker is authoritative.
     grep -Eq 'ACTDEMO_SMOKE_COMPLETE checks=[0-9]+ failures=0' "$LOGS/Smoke.log"
     ;;
+  kwang)
+    shift
+    "$EDITOR" "$PROJECT" -run=ActKwang -Build -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/KwangAssets.log" "$@"
+    grep -F 'ACTDEMO_KWANG_READY' "$LOGS/KwangAssets.log"
+    ;;
   play)
     "$EDITOR" "$PROJECT" /Game/ActDemo/Maps/L_AshenCourt -game -windowed -ResX=1280 -ResY=720 -NoSplash "-abslog=$LOGS/Playtest.log"
     ;;
@@ -37,6 +42,6 @@ case "${1:-help}" in
     test -d "$ROOT/Builds/Mac/ActDemo.app/Contents/UE"
     ;;
   *)
-    printf '%s\n' 'Usage: bash Scripts/actdemo.sh {build|assets [-Force]|smoke|pie|play|package|packaged-smoke}' 'Optional UE_ROOT selects the installed Unreal Engine directory.'
+    printf '%s\n' 'Usage: bash Scripts/actdemo.sh {build|assets [-Force]|kwang|smoke|pie|play|package|packaged-smoke}' 'Optional UE_ROOT selects the installed Unreal Engine directory.'
     ;;
 esac

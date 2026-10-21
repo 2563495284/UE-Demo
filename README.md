@@ -1,6 +1,6 @@
 # ActDemo — Ashen Court
 
-UE 5.8.2 第三人称单机动作灰盒。入口是 `ActDemo/ActDemo.uproject`，默认地图为 `/Game/ActDemo/Maps/L_AshenCourt`。原有 `SampleLevel` 保留。
+UE 5.8.2 第三人称单机动作 Demo，玩家使用 Kwang，敌人和关卡保留灰盒。入口是 `ActDemo/ActDemo.uproject`，默认地图为 `/Game/ActDemo/Maps/L_AshenCourt`。原有 `SampleLevel` 保留。
 
 ## Git 与资源协作
 
@@ -89,7 +89,8 @@ StateTree 包含 Patrol、Investigate、Chase、Attack、Recover、Search、Retu
 
 内容浏览器中的 `/Game/ActDemo`：
 
-- `Data/DA_Combat`：三段轻击、重击、伤害、体力、蒙太奇、闪避与恢复参数。
+- `Kwang/DA_KwangCombat`：玩家三段轻击、重击、伤害、体力和恢复配置；`ABP_Kwang` / `BS_KwangMove` 为持剑移动和全身动作槽。
+- `Data/DA_Combat`：灰盒敌人的基础战斗配置。
 - `Data/DA_Player / DA_Scout / DA_Brute / DA_Boss / DA_Dummy`：生命、伤害倍率、速度、感知距离、巡逻与返回参数；可指定兼容骨架的 Mesh、AnimClass、Combat。
 - `Input/DA_Input`、`IMC_Gameplay`、`IMC_Menu`：Enhanced Input 资源和键位。
 - `Animation/AM_*`：每段动作使用 `DefaultSlot`、`Action` Section；NotifyState 0 为伤害窗口，1 为无敌窗口，2 为连段窗口。
@@ -103,7 +104,8 @@ StateTree 包含 Patrol、Investigate、Chase、Attack、Recover、Search、Retu
 
 ```sh
 bash Scripts/actdemo.sh assets          # 已有地图时跳过
-bash Scripts/actdemo.sh assets -Force   # 覆盖 ActDemo 生成资源，包括地图和 HUD
+bash Scripts/actdemo.sh assets -Force   # 覆盖基础生成资源，包括地图和 HUD
+bash Scripts/actdemo.sh kwang           # 重建 Kwang 适配资源，并更新 DA_Player
 ```
 
 `-Force` 不用于保留手工美术修改的场景。不要在编辑器同时修改这些资源时执行生成。
@@ -112,8 +114,20 @@ bash Scripts/actdemo.sh assets -Force   # 覆盖 ActDemo 生成资源，包括�
 
 灰盒采用随 UE 安装的 Manny、Unarmed AnimBP、基础动作、Level Prototyping 与 Combat Niagara 示例；使用范围遵循 Epic 对应许可。`SourceAudio` 中两段 WAV 为本项目合成占位音效。
 
-当前模板轻击是徒手动作，手持发光方块表示武器。命中同时使用武器轨迹及前方短距离 Sweep，保留遮挡检测和单段目标去重。正式剑动画接入后应校准武器插槽、根运动和 Notify，再去掉徒手占位用的前方补偿 Sweep。恢复道具暂用动作锁定与数值反馈。
+玩家模型采用 `/Game/ParagonKwang/Characters/Heroes/Kwang/Meshes/Kwang_GDC`。原包资源保持原样；适配资产保存于 `/Game/ActDemo/Kwang`，通过 `DA_Player` 指定 Mesh、AnimClass、Combat 和剑根/剑尖插槽。原包 AnimBP 依赖其示例角色蓝图，故复用动画序列并建立基于 `UActAnimInstance` 的可编辑 AnimBP，动作仍由 GAS 发起。
 
-Kwang 资源的下载、骨架适配和正式剑动画验收另见 `Docs/Acceptance.md` 的实际状态。没有把模型包视作完整动作包。项目尚不包括联网、格挡、弹反、装备背包或跨会话存档。
+| 动作 | Kwang 原动画 | 适配方式 |
+| --- | --- | --- |
+| 待机 / 移动 / 冲刺 | Idle、Jog 四方向、Sprint_Fwd | Direction × Speed BlendSpace；锁定时支持横移与后退 |
+| 三段轻击 | PrimaryAttack_A / B / C_Slow | 前摇、挥击、收招三段调速；伤害 26 / 30 / 38 |
+| 重击 | PrimaryAttack_D_Slow | 0.7 秒前摇，65 伤害 |
+| 闪避 | Jump_Apex | 腾空姿势配合方向滑步，占位动作；0.08–0.34 秒无敌 |
+| 恢复 | Cast | 施法式恢复占位，1.25 秒动作锁定 |
+| 受击 | Hitreact_Fwd | 在自有副本上取消 additive 提取，作为全身受击动作 |
+| 死亡 | Death_Bwd | 保持末帧，等待失败重试 |
+
+剑刃是 Kwang 模型的一部分，不再显示玩家的发光方块。命中沿 `FX_weapon_base` → `FX_weapon_tip` 扫掠，并插值覆盖相邻帧剑轨迹；玩家不使用前方补偿 Sweep。灰盒敌人仍保留原占位行为。原动画 Root Motion 未开启，移动与闪避由 CharacterMovement 控制。攻击蒙太奇已按真实挥剑时刻分段调速；调整 Duration / 窗口后要同步修改 Montage 分段与 Notify。
+
+项目尚不包括专用翻滚、喝药道具与动作、联网、格挡、弹反、装备背包或跨会话存档。Kwang 模型包不等于完整类魂动作包。
 
 编译、运行检查、PIE、独立包与人工试玩分别记录在 `Docs/Acceptance.md`；自动战斗检查不等同于玩家完整通关或手感验收。

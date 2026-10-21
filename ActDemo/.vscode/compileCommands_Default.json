@@ -1,0 +1,130 @@
+[
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/AI/ActAIController.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/ActDemo.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Character/ActAnimInstance.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Character/ActCharacter.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Character/ActPlayerController.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Combat/ActAttributeSet.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Combat/ActCombatAbility.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Combat/ActCombatNotify.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Combat/ActCombatTypes.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/Tests/ActSmokeProbe.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/UI/ActHUDWidget.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemo/World/ActGameMode.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemo.1.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemoEditor/ActDemoBuildCommandlet.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemoEditor.0.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemoEditor/ActDemoEditor.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemoEditor.0.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemoEditor/ActKwangCommandlet.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemoEditor.0.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	},
+	{
+		"file": "/Users/yijin/UE-Demo/ActDemo/Source/ActDemoEditor/ActPIETest.cpp",
+		"arguments": [
+			"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++",
+			"@/Users/yijin/UE-Demo/ActDemo/.vscode/compileCommands_Default/ActDemoEditor.0.rsp"
+		],
+		"directory": "/Users/Shared/Epic Games/UE_5.8/Engine/Source"
+	}
+]

@@ -89,6 +89,7 @@ void AActCharacter::InitializeCombat()
   if (Profile->Combat) CombatConfig=Profile->Combat;
   if (Profile->Mesh) GetMesh()->SetSkeletalMesh(Profile->Mesh);
   if (Profile->AnimClass) GetMesh()->SetAnimInstanceClass(Profile->AnimClass);
+  Weapon->SetVisibility(Profile->WeaponTipSocket.IsNone());
  }
  if (!CombatConfig) CombatConfig = LoadObject<UActCombatConfig>(nullptr, TEXT("/Game/ActDemo/Data/DA_Combat.DA_Combat"));
  if (!CombatConfig) CombatConfig = NewObject<UActCombatConfig>(this);
@@ -181,7 +182,7 @@ bool AActCharacter::BeginAction(EActAction Action, UActCombatAbility* Ability)
   ActionDuration = CombatConfig->DodgeDuration;
   DodgeDirection = DesiredMove.IsNearlyZero() ? GetActorForwardVector() : DesiredMove.GetSafeNormal2D();
  }
- else { ActionDuration = CombatConfig->HealDuration; }
+ else { ActionDuration = CombatConfig->HealDuration; Montage = CombatConfig->HealMontage; }
  GetCharacterMovement()->StopMovementImmediately();
  bActionHasMontage = Montage != nullptr;
  if (Montage && GetMesh()->GetAnimInstance())
@@ -214,7 +215,7 @@ void AActCharacter::SetCombatWindow(uint8 Window, bool bEnabled)
  if (!ActiveAbility) return;
  if (Window == 0)
  {
-  if (bEnabled && !bDamageWindow) { PreviousTip = Weapon->GetComponentLocation() + Weapon->GetUpVector() * 45.f; PreviousBase = Weapon->GetComponentLocation() - Weapon->GetUpVector() * 40.f; }
+  if (bEnabled && !bDamageWindow) GetWeaponPoints(PreviousBase, PreviousTip);
   bDamageWindow = bEnabled;
  }
  if (Window == 1) Abilities->SetLooseGameplayTagCount(ActTags::Invulnerable, bEnabled ? 1 : 0);
@@ -274,10 +275,22 @@ void AActCharacter::Tick(float Dt)
   if (Faction == EActFaction::Enemy) DrawDebugCircle(GetWorld(),GetActorLocation()-FVector(0,0,85),1200.f,48,FColor::Cyan,false,0.f,0,1.f,FVector(1,0,0),FVector(0,1,0),false);
  }
 }
+void AActCharacter::GetWeaponPoints(FVector& Base, FVector& Tip) const
+{
+ if (Profile && !Profile->WeaponTipSocket.IsNone())
+ {
+  Base=GetMesh()->GetSocketLocation(Profile->WeaponBaseSocket);
+  Tip=GetMesh()->GetSocketLocation(Profile->WeaponTipSocket);
+ }
+ else
+ {
+  Base=Weapon->GetComponentLocation()-Weapon->GetUpVector()*40.f;
+  Tip=Weapon->GetComponentLocation()+Weapon->GetUpVector()*45.f;
+ }
+}
 void AActCharacter::TraceWeapon()
 {
- const FVector Base = Weapon->GetComponentLocation() - Weapon->GetUpVector() * 40.f;
- const FVector Tip = Weapon->GetComponentLocation() + Weapon->GetUpVector() * 45.f;
+ FVector Base, Tip; GetWeaponPoints(Base,Tip);
  const FActAttack Attack = GetAttack();
  FCollisionObjectQueryParams Objects(ECC_Pawn);
  FCollisionQueryParams Params(SCENE_QUERY_STAT(ActWeapon), false, this);
@@ -297,10 +310,19 @@ void AActCharacter::TraceWeapon()
    Target->ReceiveCombatHit(this, Attack.Damage * DamageScale * (bBossPhaseTwo ? 1.15f : 1.f), Hit.ImpactPoint);
   }
  };
- Sweep(PreviousTip, Tip, 28.f);
- Sweep(Base, Tip, 28.f);
- // The template attacks are unarmed placeholders: this forward blade corridor keeps their reach readable.
- Sweep(GetActorLocation() + GetActorForwardVector() * 40.f, GetActorLocation() + GetActorForwardVector() * Attack.Reach, 35.f);
+ if (Profile && !Profile->WeaponTipSocket.IsNone())
+ {
+  // Cover the swept blade, including its middle, between animation samples.
+  const int32 Steps=FMath::Clamp(FMath::CeilToInt(FMath::Max(FVector::Dist(PreviousTip,Tip),FVector::Dist(PreviousBase,Base))/20.f),1,12);
+  for(int32 I=0;I<=Steps;++I)
+   Sweep(FMath::Lerp(PreviousBase,Base,float(I)/Steps),FMath::Lerp(PreviousTip,Tip,float(I)/Steps),Profile->WeaponTraceRadius);
+ }
+ else
+ {
+  Sweep(PreviousTip, Tip, 28.f); Sweep(Base, Tip, 28.f);
+  // Retained only for the mannequin's unarmed graybox attacks.
+  Sweep(GetActorLocation()+GetActorForwardVector()*40.f,GetActorLocation()+GetActorForwardVector()*Attack.Reach,35.f);
+ }
  PreviousTip = Tip; PreviousBase = Base;
 }
 void AActCharacter::ApplyResource(TSubclassOf<UGameplayEffect> Effect, float Amount)

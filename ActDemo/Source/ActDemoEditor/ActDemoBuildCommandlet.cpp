@@ -159,7 +159,9 @@ namespace
   auto Profile=[&](const TCHAR* Name,const TCHAR* Label,float Health,float Damage,float Speed)
   {
    auto* P=Asset<UActCharacterProfile>(FString(TEXT("/Game/ActDemo/Data/DA_"))+Name);
-   P->DisplayName=FText::FromString(Label); P->Health=Health; P->DamageScale=Damage; P->MoveSpeed=Speed; P->Combat=Config; Save(P);
+   P->DisplayName=FText::FromString(Label); P->Health=Health; P->DamageScale=Damage; P->MoveSpeed=Speed;
+   if (!P->Mesh) P->Combat=Config; // Keep an adapted mesh paired with its skeleton-compatible combat set.
+   Save(P);
   };
   Profile(TEXT("Player"),TEXT("WAYFARER"),150.f,1.f,420.f);
   Profile(TEXT("Scout"),TEXT("ASH SCOUT"),100.f,.65f,340.f);

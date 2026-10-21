@@ -78,6 +78,7 @@ private:
  void HealthChanged(const FOnAttributeChangeData& Change);
  void Die();
  void TraceWeapon();
+ void GetWeaponPoints(FVector& Base, FVector& Tip) const;
  void UpdateLock(float DeltaSeconds);
  FActAttack GetAttack() const;
  float ActionCost(EActAction Action) const;

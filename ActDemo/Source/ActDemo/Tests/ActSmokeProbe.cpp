@@ -15,6 +15,10 @@
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
 #include "Perception/AISense_Hearing.h"
+#include "Animation/AnimMontage.h"
+#include "Engine/SkeletalMesh.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Character/ActAnimInstance.h"
 
 AActSmokeProbe::AActSmokeProbe() { PrimaryActorTick.bCanEverTick=true; }
 void AActSmokeProbe::Check(bool Condition,const TCHAR* Message)
@@ -37,6 +41,17 @@ void AActSmokeProbe::Tick(float Dt)
   Hero=Cast<AActCharacter>(UGameplayStatics::GetPlayerPawn(this,0));
   Check(Hero.IsValid(),TEXT("Player spawned"));
   if (!Hero.IsValid()) { FPlatformMisc::RequestExitWithStatus(false,1); return; }
+  if(Hero->Profile && !Hero->Profile->WeaponTipSocket.IsNone())
+  {
+   const auto* Mesh=Hero->GetMesh();
+   Check(Mesh->GetAnimInstance() && Mesh->GetAnimInstance()->IsA<UActAnimInstance>(),TEXT("Kwang locomotion uses the GAS-independent animation instance"));
+   bool Compatible=true;
+   for(const auto& Attack:Hero->CombatConfig->LightAttacks) Compatible &= Attack.Montage && Attack.Montage->GetSkeleton()==Mesh->GetSkeletalMeshAsset()->GetSkeleton();
+   for(auto* M:{Hero->CombatConfig->HeavyAttack.Montage.Get(),Hero->CombatConfig->DodgeMontage.Get(),Hero->CombatConfig->HealMontage.Get(),Hero->CombatConfig->HitMontage.Get(),Hero->CombatConfig->DeathMontage.Get()})
+    Compatible &= M && M->GetSkeleton()==Mesh->GetSkeletalMeshAsset()->GetSkeleton();
+   Check(Compatible,TEXT("Every player action montage matches the player skeleton"));
+   Check(Mesh->DoesSocketExist(Hero->Profile->WeaponBaseSocket) && Mesh->DoesSocketExist(Hero->Profile->WeaponTipSocket) && FVector::Dist(Mesh->GetSocketLocation(Hero->Profile->WeaponBaseSocket),Mesh->GetSocketLocation(Hero->Profile->WeaponTipSocket))>120.f,TEXT("Real sword trace sockets span the Kwang blade"));
+  }
   int32 Running=0; for(TActorIterator<AActAIController> It(GetWorld());It;++It) if(It->StateTree->IsRunning()) ++Running;
   Check(Running==6,TEXT("Six enemy StateTrees are running"));
   FNavLocation Location; auto* Nav=FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
@@ -182,6 +197,18 @@ void AActSmokeProbe::Tick(float Dt)
  {
   Check(FMath::IsNearlyEqual(PreviousHealth-Enemy->Attributes->GetHealth(),94.f,.1f),TEXT("Three light attacks apply their three configured damage values"));
   Check(!Hero->IsBusy() && Hero->ComboIndex==0,TEXT("Third light finishes and resets chain"));
+  Hero->RestoreAtCheckpoint(); Enemy->RestoreAtCheckpoint();
+  PreviousHealth=Enemy->Attributes->GetHealth(); Hero->RequestAbility(ActTags::Heavy,false); Next(1.8f);
+ }
+ else if(Stage==20)
+ {
+  Check(FMath::IsNearlyEqual(PreviousHealth-Enemy->Attributes->GetHealth(),Hero->CombatConfig->HeavyAttack.Damage,.1f),TEXT("Heavy sword swing damages the front target exactly once"));
+  Enemy->SetActorLocation(Hero->GetActorLocation()+Hero->GetActorForwardVector()*400.f);
+  Hero->RestoreAtCheckpoint(); PreviousHealth=Enemy->Attributes->GetHealth(); Hero->RequestAbility(ActTags::Light,false); Next(1.2f);
+ }
+ else if(Stage==21)
+ {
+  Check(FMath::IsNearlyEqual(PreviousHealth,Enemy->Attributes->GetHealth()),TEXT("Sword swing misses targets outside the blade's reach"));
   UE_LOG(LogTemp,Display,TEXT("ACTDEMO_SMOKE_COMPLETE checks=%d failures=%d"),Checks,Failures);
   FPlatformMisc::RequestExitWithStatus(false,Failures?1:0); SetActorTickEnabled(false);
  }
