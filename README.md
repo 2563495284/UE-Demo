@@ -52,6 +52,10 @@ bash Scripts/actdemo.sh packaged-smoke
 
 打包后也可直接打开 `Builds/Mac/ActDemo.app`。`package` 包含 Mac 的 Cook、Stage、Package 和 Archive；`packaged-smoke` 检查实际独立包，不依赖编辑器世界。
 
+双人可挖掘地形白模的开房、加入、打包和联机复测命令见 [Voxel Playground](Docs/VoxelPlayground.md)。
+
+局域网 2v2v2 海岛寻宝的玩法、Mac 启动方式和六进程复测见 [海岛寻宝](Docs/TreasureIsland.md)。
+
 ## 操作与流程
 
 | 操作 | 键位 |
@@ -128,6 +132,6 @@ bash Scripts/actdemo.sh kwang           # 重建 Kwang 适配资源，并更新 
 
 剑刃是 Kwang 模型的一部分，不再显示玩家的发光方块。命中沿 `FX_weapon_base` → `FX_weapon_tip` 扫掠，并插值覆盖相邻帧剑轨迹；玩家不使用前方补偿 Sweep。灰盒敌人仍保留原占位行为。原动画 Root Motion 未开启，移动与闪避由 CharacterMovement 控制。攻击蒙太奇已按真实挥剑时刻分段调速；调整 Duration / 窗口后要同步修改 Montage 分段与 Notify。
 
-项目尚不包括专用翻滚、喝药道具与动作、联网、格挡、弹反、装备背包或跨会话存档。Kwang 模型包不等于完整类魂动作包。
+Ashen Court 单机关卡尚不包括专用翻滚、喝药道具与动作、联网、格挡、弹反、装备背包或跨会话存档。Kwang 模型包不等于完整类魂动作包。
 
 编译、运行检查、PIE、独立包与人工试玩分别记录在 `Docs/Acceptance.md`；自动战斗检查不等同于玩家完整通关或手感验收。
