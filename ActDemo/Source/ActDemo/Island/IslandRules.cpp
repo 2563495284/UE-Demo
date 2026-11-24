@@ -48,14 +48,16 @@ TArray<FIslandSearchCircle> IslandRules::DefaultSearchCircles()
 
 FLinearColor IslandRules::TeamColor(int32 Team)
 {
-    static const FLinearColor Colors[TeamCount] = {{.93f, .29f, .28f}, {.25f, .59f, 1.f}, {1.f, .79f, .24f}};
-    return Team >= 0 && Team < TeamCount ? Colors[Team] : FLinearColor::White;
+    static const FLinearColor Colors[] = {{.93f, .29f, .28f}, {.25f, .59f, 1.f}, {1.f, .79f, .24f},
+        {.22f, .82f, .55f}, {.72f, .49f, 1.f}, {1.f, .58f, .22f}, {.24f, .83f, .85f}, {.97f, .55f, .74f}};
+    return Team >= 0 && Team < UE_ARRAY_COUNT(Colors) ? Colors[Team] : FLinearColor::White;
 }
 
 const TCHAR* IslandRules::TeamName(int32 Team)
 {
-    static const TCHAR* Names[TeamCount] = {TEXT("Red"), TEXT("Blue"), TEXT("Yellow")};
-    return Team >= 0 && Team < TeamCount ? Names[Team] : TEXT("Waiting");
+    static const TCHAR* Names[] = {TEXT("Red"), TEXT("Blue"), TEXT("Yellow"), TEXT("Green"),
+        TEXT("Violet"), TEXT("Orange"), TEXT("Teal"), TEXT("Rose")};
+    return Team >= 0 && Team < UE_ARRAY_COUNT(Names) ? Names[Team] : TEXT("Waiting");
 }
 
 bool IslandRules::InSea(const FVector& Head)
@@ -115,7 +117,7 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArray
         if (!Surface || Depth < (bPrize ? 599.99 : 199.99) || Depth > (bPrize ? 800.01 : 400.01)
             || Center.Z - ChestExtent.Z < -700
             || (!bPrize && FVector2D::DistSquared(Point, FVector2D(Circles[Circle].Center)) > FMath::Square(Circles[Circle].Radius))
-            || VoxelPlayground::ShoreDistance(FMath::RoundToInt(Center.X), FMath::RoundToInt(Center.Y)) > -550
+            || Density.ShoreDistance(FMath::RoundToInt(Center.X), FMath::RoundToInt(Center.Y)) > -550
             || !Density.IsVolumeSolid(FBox::BuildAABB(Center, ChestExtent)))
         {
             return Reject(Message);
@@ -148,8 +150,10 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
     for (int32 Index = 0; Index < ClueCount; ++Index)
     {
         const FIslandSearchCircle& Circle = Circles[Index];
+        const FIntVector Max = Density.Grid.Origin + Density.Grid.Cells * VoxelPlayground::Spacing;
         if (Circle.Radius < MinSearchRadius || Circle.Radius > MaxSearchRadius
-            || FMath::Abs(static_cast<int64>(Circle.Center.X)) > 2400 || FMath::Abs(static_cast<int64>(Circle.Center.Y)) > 2400)
+            || Circle.Center.X < Density.Grid.Origin.X || Circle.Center.Y < Density.Grid.Origin.Y
+            || Circle.Center.X > Max.X || Circle.Center.Y > Max.Y)
         {
             if (Error)
             {

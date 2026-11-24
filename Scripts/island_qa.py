@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the archived six-player LAN prototype in independent UE processes."""
+"""Exercise LAN treasure hunts and expedition rooms in independent UE processes."""
 
 import argparse
 import json
@@ -15,6 +15,9 @@ from voxel_qa import EarlyLaunchCrash, PROJECT, ROOT, p95, read_log
 
 APP = ROOT / "Builds/TreasureIsland/Mac/ActDemo.app"
 MAP = "/Game/TreasureIsland/L_TreasureIsland"
+EXPEDITION_MAP = "/Game/TreasureIsland/L_ExpeditionIsland"
+ROOM_CASES = {"solo": (1, True), "coop": (2, True), "duel": (2, False), "crew-drop": (3, False),
+              "crew-eight": (8, True), "eight-teams": (8, False)}
 GUESTS = [f"guest{seat}" for seat in range(1, 6)]
 ROLES = ["host", *GUESTS]
 FAILURE = re.compile(r"(?:VOXEL_PROTOCOL_ERROR|ISLAND_QA_CHECK passed=0|ISLAND_QA_TIMEOUT|Fatal error:).*", re.I)
@@ -120,6 +123,35 @@ def summarize_party(logs, scenario):
     }
 
 
+def expedition_performance(logs):
+    stress = re.search(r"EXPEDITION_QA_STRESS first=(\d+) last=(\d+) frame95=([.\d]+) frames=(\d+)", logs["host"])
+    state = re.search(r"EXPEDITION_QA_TERRAIN peers=8 digest=([^\s]+)", logs["host"])
+    if not stress or not state:
+        raise RuntimeError("Missing frame measurements or eight-peer density and collision verification")
+    first, last = int(stress[1]), int(stress[2])
+    sequences = list(range(first, last + 1))
+    if len(sequences) < 300:
+        raise RuntimeError("Fewer than 300 accepted edits from eight concurrent players")
+    collision = {}
+    for role, log in logs.items():
+        samples = re.findall(r"VOXEL_SAMPLE side=\w+ seq=(\d+) action=(\d+) ms=([.\d]+)", log)
+        window = [(int(seq), int(action), float(ms)) for seq, action, ms in samples if first <= int(seq) <= last]
+        if [seq for seq, _, _ in window] != sequences or {action for _, action, _ in window} != {0, 2}:
+            raise RuntimeError(f"{role}: incomplete edit replication in stress window")
+        collision[role] = round(p95([ms for _, _, ms in window]), 3)
+    result = {"stress_edits": len(sequences), "host_frame_p95_ms": float(stress[3]), "host_frame_samples": int(stress[4]),
+              "edit_to_collision_p95_ms": collision, "eight_peer_density_and_floor_digest": state[1]}
+    clocks = re.findall(r"EXPEDITION_QA_CLOCK source=(\w+) p95=([-\d.]+) valid=(\d+) wall_frames=(\d+)", logs["host"])
+    if clocks:
+        if any(int(wall) != result["host_frame_samples"] for _, _, _, wall in clocks):
+            raise RuntimeError("Engine timing and wall-frame measurement windows differ")
+        result["host_engine_clocks"] = {
+            name: {"p95_ms": float(timing) if int(valid) else None, "nonzero_samples": int(valid)}
+            for name, timing, valid, _ in clocks
+        }
+    return result
+
+
 def run(args, ip, mode, directory):
     directory.mkdir(parents=True, exist_ok=True)
     summary = directory / "summary.json"
@@ -132,7 +164,23 @@ def run(args, ip, mode, directory):
         base = [str(args.app / "Contents/MacOS/ActDemo")]
     shared = ["-IslandQA", "-unattended", "-nosound", "-NoSplash", "-NoTrace", "-stdout", "-FullStdOutLogOutput",
               "-ExecCmds=t.MaxFPS 60", "-windowed", "-ResX=1280", "-ResY=720"]
-    if args.scenario != "hunt":
+    if args.profile:
+        shared.append("-VoxelProfile")
+    room = ROOM_CASES.get(args.scenario)
+    guests = GUESTS
+    if room:
+        count, together = room
+        guests = [f"guest{seat}" for seat in range(1, count)]
+        shared.append(f"-ExpeditionPlayers={count}")
+        if together:
+            shared.append("-ExpeditionTogether")
+        if args.stress:
+            shared.append("-ExpeditionStress")
+        if args.repro_dig:
+            shared.extend(["-ExpeditionRepro", "-ExpeditionSeed=7319"])
+        if args.scenario == "crew-drop":
+            shared.append("-ExpeditionDrop")
+    elif args.scenario != "hunt":
         shared.append("-IslandPartyQA")
     if args.scenario == "party-timeout":
         shared.append("-IslandPartyTimeout")
@@ -157,20 +205,45 @@ def run(args, ip, mode, directory):
         try:
             launch("host", args.map + "?listen")
             wait_for(processes, lambda logs: "VOXEL_INITIAL crc=" in logs["host"], 120, "Host map did not initialize")
-            for guest in GUESTS:
+            for guest in guests:
                 launch(guest, address)
                 wait_for(processes, lambda logs: "VOXEL_INITIAL crc=" in logs[guest], 100, f"{guest} did not join and load terrain")
-            print(f"{mode}: six independent processes joined {address}", flush=True)
+            print(f"{mode}: {len(guests) + 1} independent processes joined {address}", flush=True)
             allow_exit = ()
             if args.scenario == "party-drop":
                 wait_for(processes, lambda logs: "PARTY_START round=2" in logs["host"] and "PARTY_PAWN_READY round=2" in logs["guest5"],
                          180, "The second party did not start")
                 os.killpg(processes["guest5"][0].pid, signal.SIGTERM)
                 allow_exit = ("guest5",)
-            done_marker = "ISLAND_QA_DONE peers=6 reopened=1" if args.scenario == "hunt" else "PARTY_QA_DONE"
+            done_marker = "EXPEDITION_QA_DONE" if room else ("ISLAND_QA_DONE peers=6 reopened=1" if args.scenario == "hunt" else "PARTY_QA_DONE")
+            if args.repro_dig:
+                done_marker = "EXPEDITION_QA_REPRO_DONE"
+            if args.scenario == "crew-drop":
+                wait_for(processes, lambda logs: "EXPEDITION_QA_DROP_READY" in logs["host"], 45, "Three crews did not launch")
+                os.killpg(processes[guests[-1]][0].pid, signal.SIGTERM)
+                allow_exit = (guests[-1],)
+                done_marker = "EXPEDITION_QA_DROP_DONE launched=3 remaining=2"
             logs = wait_for(processes, lambda logs: done_marker in logs["host"], 300,
-                            "Six-player scenario did not complete", allow_exit)
-            result = summarize(logs) if args.scenario == "hunt" else summarize_party(logs, args.scenario)
+                            "The multiplayer scenario did not complete", allow_exit)
+            if args.repro_dig:
+                result = {"scenario": "d-shaft-repro", "position": [1830, -4673, 423], "exposed_and_opened": True}
+            elif args.scenario == "crew-drop":
+                result = {"scenario": args.scenario, "launched_crews": 3, "remaining_players": 2, "original_berths_preserved": True}
+            elif room:
+                teams = 1 if together else count
+                expected = f"EXPEDITION_QA_DONE players={count} teams={teams} returned=1"
+                reports = re.findall(r"EXPEDITION_QA_PRIVATE box=(\d+) peers=(\d+)", logs["host"])
+                winners = re.findall(r"ISLAND_WINNER team=(\d+)", logs["host"])
+                if expected not in logs["host"] or reports != [(str(box), str(count)) for box in range(5)] or winners != [str(teams - 1)]:
+                    raise RuntimeError("Incomplete party membership, privacy or winner verification")
+                result = {"scenario": args.scenario, "processes": count, "teams": teams, "winner": int(winners[0]),
+                          "peer_inspections": 5 * count, "returned_to_same_room": True, "ordinary_room_decoys": 0}
+                if args.stress:
+                    result.update(expedition_performance(logs))
+                    if not args.headless_host:
+                        result["performance_targets_met"] = result["host_frame_p95_ms"] <= 33.3 and max(result["edit_to_collision_p95_ms"].values()) <= 150
+            else:
+                result = summarize(logs) if args.scenario == "hunt" else summarize_party(logs, args.scenario)
             if options and not all("PktLag set to 40" in log and "PktLoss set to 2" in log for log in logs.values()):
                 raise RuntimeError("Missing runtime packet simulation settings")
             result.update(mode=mode, ip=ip, host_render="NullRHI" if args.headless_host else "Metal", guest_render="NullRHI",
@@ -210,15 +283,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ip", help="LAN IP assigned to this Mac, default is en0")
     parser.add_argument("--port", type=int, default=7792)
-    parser.add_argument("--scenario", choices=("hunt", "party", "party-drop", "party-timeout"), default="hunt")
+    parser.add_argument("--scenario", choices=("hunt", "party", "party-drop", "party-timeout", *ROOM_CASES), default="hunt")
     parser.add_argument("--mode", choices=("normal", "emulated", "both"), default="both")
     parser.add_argument("--editor", action="store_true", help="Use editor game processes during iteration")
     parser.add_argument("--headless-host", action="store_true", help="Disable Metal for iteration only")
+    parser.add_argument("--stress", action="store_true", help="Exercise 300 concurrent authoritative edits in an eight-player expedition")
+    parser.add_argument("--profile", action="store_true", help="Add terrain edit preparation, geometry and collision profiling to all processes")
+    parser.add_argument("--repro-dig", action="store_true", help="Replay the recorded D excavation and trace actual cross-sections and occluders")
     parser.add_argument("--screenshot", action="store_true", help="Capture the completed chart or the party prompt on the host")
     parser.add_argument("--app", type=Path, default=APP)
-    parser.add_argument("--map", default=MAP, help="Level package to host, including authored test levels")
+    parser.add_argument("--map", help="Level package to host, defaults to the scenario's corresponding island")
     parser.add_argument("--output", type=Path, default=ROOT / "ActDemo/Saved/IslandQA")
     args = parser.parse_args()
+    if args.stress and args.scenario not in ("eight-teams", "crew-eight"):
+        parser.error("--stress requires --scenario eight-teams or crew-eight")
+    if args.repro_dig and args.scenario not in ("solo", "crew-eight"):
+        parser.error("--repro-dig uses a solo or eight-person cooperative expedition")
+    args.map = args.map or (EXPEDITION_MAP if args.scenario in ROOM_CASES else MAP)
     ip = args.ip or subprocess.check_output(["/usr/sbin/ipconfig", "getifaddr", "en0"], text=True).strip()
     modes = ("normal", "emulated") if args.mode == "both" else (args.mode,)
     missed_targets = []

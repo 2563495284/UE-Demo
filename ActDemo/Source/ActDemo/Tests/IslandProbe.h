@@ -18,6 +18,7 @@ public:
 
     UFUNCTION(Client, Reliable) void ClientInspect(int32 Epoch, bool bDigest);
     UFUNCTION(Client, Reliable) void ClientOpenChest();
+    UFUNCTION(Client, Reliable) void ClientJoinCrew(int32 Team, bool bReady);
     UFUNCTION(Client, Reliable) void ClientStress(int32 Stage);
     UFUNCTION(Client, Reliable) void ClientShowChart();
     UFUNCTION(Client, Reliable) void ClientStrike(FVector Target);
@@ -42,6 +43,7 @@ class AIslandProbe : public AActor
 
 public:
     AIslandProbe();
+    static bool TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FVector& Target, bool& Exposed);
     void Tick(float DeltaSeconds) override;
     void Record(int32 Seat, int32 Epoch, const FIslandClues& Clues, int32 Boxes, int32 Winner, uint32 Sequence, const FString& Digest);
     void RequestStress(int32 Seat, int32 Stage);
@@ -57,6 +59,14 @@ private:
     void PrepareOpen(int32 Team);
     void StartStress(int32 Stage);
     void TickParty(double Now);
+    void TickExpedition(double Now);
+    int32 ExpeditionPlayers = 0;
+    bool bOneCrew = false;
+    enum class ERoomCheck : uint8 { Join, Ready, Withdraw, Depart, Dig, Open, Inspect, Return, Stress, Drain, VerifyEdits };
+    ERoomCheck RoomCheck = ERoomCheck::Join;
+    int32 ExpeditionOpener = 0;
+    TMap<FGuid, FTransform> DepartureBerths;
+    TArray<int32> DepartureTeams;
     bool OnPrize() const { return NextDig == IslandRules::PrizeIndex; }
 
     UPROPERTY() TObjectPtr<AIslandGameMode> Mode;
@@ -66,6 +76,9 @@ private:
     EStep AfterInspection = EStep::Waiting;
     TSet<int32> Reports;
     TArray<double> FrameTimes;
+    enum class EProfileClock : uint8 { Game, Render, GPU, GameWait, RenderWait, Present, Count };
+    TArray<double> ProfileFrames[static_cast<int32>(EProfileClock::Count)];
+    bool bProfileFrames = false;
     FString ExpectedDigest;
     FString BeforePartyDigest;
     TArray<TWeakObjectPtr<APawn>> OriginalPawns;

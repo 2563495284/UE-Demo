@@ -15,7 +15,8 @@ UENUM()
 enum class EVoxelLayout : uint8
 {
     Playground,
-    Island
+    Island,
+    Expedition
 };
 
 USTRUCT()
@@ -49,6 +50,10 @@ namespace VoxelPlayground
     int32 RadiusFor(uint8 BrushId);
     ACTDEMO_API FIntVector QuantizeCenter(const FVector& Position);
     int32 ShoreDistance(int32 X, int32 Y);
+    ACTDEMO_API int32 ShoreDistance(EVoxelLayout Layout, int32 X, int32 Y);
+    ACTDEMO_API int32 BaseHeight(EVoxelLayout Layout, int32 X, int32 Y);
+    ACTDEMO_API int32 ShoreExtent(EVoxelLayout Layout);
+    ACTDEMO_API TArray<FVector2D> CoastOutline(EVoxelLayout Layout);
     ACTDEMO_API int32 IslandSurfaceHeight(int32 X, int32 Y);
 }
 
@@ -80,9 +85,12 @@ struct FVoxelDensity
     FVoxelDensityPatch PrepareBrush(const FVoxelBrushStamp& Stamp) const;
     void Apply(const FVoxelDensityPatch& Patch);
     int16 Sample(const FIntVector& GridPoint, const FVoxelDensityPatch* Patch = nullptr) const;
+    void CopySampleRow(FIntVector Start, int32 Count, int16* Destination) const;
     bool IsVolumeClear(const FBox& Box) const;
     bool IsVolumeSolid(const FBox& Box) const;
     ACTDEMO_API TOptional<double> SurfaceAt(FVector2D Position) const;
+    int32 ShoreDistance(int32 X, int32 Y) const { return VoxelPlayground::ShoreDistance(Layout, X, Y); }
+    const TSet<int32>& EditedColumns() const { return PromotedColumns; }
     ACTDEMO_API uint32 Checksum() const;
     FString ChunkChecksums() const;
 
@@ -92,4 +100,13 @@ struct FVoxelDensity
 private:
     bool VolumeMatches(const FBox& Box, bool bSolid) const;
     TArray<int16> Samples;
+    // The expedition base is a cooked height surface. Retain only column boundaries and changed samples.
+    TArray<FIntPoint> BaseColumns;
+    // Only edited blocks allocate the full field. Meshing can then read a contiguous row at a time.
+    TMap<int32, TArray<int16>> EditedBlocks;
+    int32 BlockKey(const FIntVector& Point) const;
+    TArray<int16>& GetOrCreateBlock(const FIntVector& Point);
+    TSet<int32> PromotedColumns;
+    uint32 SparseChecksum = 0;
+    int16 BaseSample(const FIntVector& Point) const;
 };

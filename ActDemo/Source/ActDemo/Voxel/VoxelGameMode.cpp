@@ -28,7 +28,7 @@ void AVoxelGameMode::BeginPlay()
     Terrain = AVoxelTerrain::Find(GetWorld());
     ensureMsgf(Terrain, TEXT("Voxel playground map requires a voxel terrain actor"));
 #if !UE_BUILD_SHIPPING
-    if (RoomCapacity() == 2 && FParse::Param(FCommandLine::Get(), TEXT("VoxelQA")))
+    if (GetClass() == StaticClass() && FParse::Param(FCommandLine::Get(), TEXT("VoxelQA")))
     {
         GetWorld()->SpawnActor<AVoxelPlaygroundProbe>();
     }
@@ -37,7 +37,7 @@ void AVoxelGameMode::BeginPlay()
 
 bool AVoxelGameMode::RoomFull() const
 {
-    return bLocked || Players.Num() >= RoomCapacity();
+    return bLocked || IsAdmissionLocked() || Players.Num() >= RoomCapacity();
 }
 
 void AVoxelGameMode::PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage)
@@ -45,7 +45,7 @@ void AVoxelGameMode::PreLogin(const FString& Options, const FString& Address, co
     Super::PreLogin(Options, Address, UniqueId, ErrorMessage);
     if (ErrorMessage.IsEmpty() && RoomFull())
     {
-        ErrorMessage = TEXT("The voxel room is full or already started.");
+        ErrorMessage = AdmissionError();
     }
 }
 
@@ -55,7 +55,7 @@ APlayerController* AVoxelGameMode::Login(UPlayer* NewPlayer, ENetRole InRemoteRo
     // Recheck after PreLogin because two connections can begin the handshake together.
     if (RoomFull())
     {
-        ErrorMessage = TEXT("The voxel room is full or already started.");
+        ErrorMessage = AdmissionError();
         return nullptr;
     }
     return Super::Login(NewPlayer, InRemoteRole, Portal, Options, UniqueId, ErrorMessage);
@@ -114,7 +114,7 @@ void AVoxelGameMode::ReceiveReady(AVoxelPlayerController& Player, uint32 Checksu
 
 void AVoxelGameMode::TryStartRound()
 {
-    if (bLocked || bRoundSetupFailed || Players.Num() != RoomCapacity() || !Terrain || !Terrain->IsReady())
+    if (bLocked || bRoundSetupFailed || !IsStartRequested() || !Terrain || !Terrain->IsReady())
     {
         return;
     }
@@ -137,6 +137,7 @@ void AVoxelGameMode::TryStartRound()
     if (!PrepareRound(Error))
     {
         bRoundSetupFailed = true;
+        RoundSetupFailed(Error);
         UE_LOG(LogTemp, Error, TEXT("VOXEL_ROUND_INVALID %s"), *Error);
         for (AVoxelPlayerController* Player : Players)
         {
@@ -185,7 +186,8 @@ void AVoxelGameMode::RequestEdit(AVoxelPlayerController& Player, EVoxelAction Ac
 
 void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, TOptional<FIntVector> ProbeCenter)
 {
-    if (!CanPlayerAct(Player) || Action > EVoxelAction::Fill || Aim.ContainsNaN())
+    const AVoxelCharacter* Hero = Player.GetHero();
+    if (!Hero || !CanPlayerAct(Player) || Action > EVoxelAction::Fill || Aim.ContainsNaN())
     {
         return;
     }
@@ -196,15 +198,25 @@ void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Ac
         return;
     }
     Player.LastRequestAt = Now;
-    Requests.Add({&Player, Action, Aim.GetSafeNormal(), Now, ProbeCenter});
+    // A sliding capsule can leave the lip of a shaft while another edit is cooking.
+    // Use the pose the server observed at input time and recheck reach on resolution.
+    const FVector Origin = Action == EVoxelAction::DigDown ? Hero->GetActorLocation() : Hero->GetAimOrigin();
+    Requests.Add({&Player, Action, Origin, Aim.GetSafeNormal(), Now, ProbeCenter});
+    StartNextEdit();
 }
 
 void AVoxelGameMode::StartNextEdit()
 {
-    if (Requests.IsEmpty() || Terrain->IsBusy())
+    if (bPumpingEdits) return;
+    TGuardValue<bool> Guard(bPumpingEdits, true);
+    while (bPlaying && !Requests.IsEmpty() && !Terrain->IsBusy())
     {
-        return;
+        StartFrontRequest();
     }
+}
+
+void AVoxelGameMode::StartFrontRequest()
+{
     const FRequest Request = Requests[0];
     Requests.RemoveAt(0, 1, EAllowShrinking::No);
     AVoxelPlayerController* Player = Request.Player.Get();
@@ -238,6 +250,7 @@ void AVoxelGameMode::StartNextEdit()
     }
 
     const TWeakObjectPtr<AVoxelGameMode> WeakMode(this);
+    WorkingPlayer = Player;
     const bool bStarted = Terrain->BuildEdit(Edit, [WeakMode, Edit, PlayerRef = Request.Player]()
     {
         const AVoxelGameMode* Mode = WeakMode.Get();
@@ -257,6 +270,7 @@ void AVoxelGameMode::StartNextEdit()
             {
                 Sender->ClientEditRejected(TEXT("Someone moved into the fill area"));
             }
+            Mode->StartNextEdit();
             return;
         }
         UE_LOG(LogTemp, Display, TEXT("VOXEL_SAMPLE side=host seq=%u action=%u ms=%.3f"), Edit.Sequence,
@@ -266,13 +280,11 @@ void AVoxelGameMode::StartNextEdit()
             Peer->ClientReceiveEdit(Edit);
         }
         Mode->OnTerrainCommitted(Edit);
+        Mode->StartNextEdit();
     });
-    if (bStarted)
+    if (!bStarted)
     {
-        WorkingPlayer = Player;
-    }
-    else
-    {
+        WorkingPlayer.Reset();
         Player->ClientEditRejected(TEXT("No rock changed"));
     }
 }
@@ -289,11 +301,21 @@ bool AVoxelGameMode::ResolveEdit(const FRequest& Request, AVoxelCharacter& Hero,
     }
     const bool bDown = Request.Action == EVoxelAction::DigDown;
     const bool bFill = Request.Action == EVoxelAction::Fill;
-    const FVector Start = bDown ? Hero.GetActorLocation() : Hero.GetAimOrigin();
+    const FVector& Start = Request.Origin;
+    const FVector CurrentOrigin = bDown ? Hero.GetActorLocation() : Hero.GetAimOrigin();
     const FVector Direction = bDown ? -FVector::UpVector : Request.Aim;
     FHitResult Rock;
-    if (!Terrain->TraceRock(Start, Start + Direction * AimReach, &Hero, Rock))
+    if (!Terrain->TraceRock(Start, Start + Direction * AimReach, &Hero, Rock)
+        || FVector::DistSquared(CurrentOrigin, Rock.ImpactPoint) > FMath::Square(AimReach))
     {
+#if !UE_BUILD_SHIPPING
+        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("EXPEDITION_QA_REJECTED_RAY origin=%s footZ=%.1f direction=%s actor=%s component=%s impact=%s"),
+                *Start.ToCompactString(), Hero.GetActorLocation().Z - Hero.GetCapsuleComponent()->GetScaledCapsuleHalfHeight(),
+                *Direction.ToCompactString(), *GetNameSafe(Rock.GetActor()), *GetNameSafe(Rock.GetComponent()), *Rock.ImpactPoint.ToCompactString());
+        }
+#endif
         return false;
     }
 

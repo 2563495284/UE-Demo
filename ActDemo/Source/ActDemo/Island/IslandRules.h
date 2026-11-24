@@ -12,7 +12,8 @@ enum class EIslandPhase : uint8
     Finished,
     PartyLoading,
     PartyPlaying,
-    PartyReturning
+    PartyReturning,
+    Starting
 };
 
 USTRUCT()

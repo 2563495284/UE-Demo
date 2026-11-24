@@ -1,10 +1,12 @@
 #pragma once
 
 #include "Island/IslandRules.h"
+#include "Island/IslandRoomSettings.h"
 #include "Voxel/VoxelPlayerController.h"
 #include "IslandPlayerController.generated.h"
 
 class APartySession;
+class AIslandChest;
 struct FStreamableHandle;
 
 UCLASS()
@@ -14,6 +16,11 @@ class AIslandPlayerController : public AVoxelPlayerController
 
 public:
     int32 GetTeam() const;
+    UFUNCTION(Server, Reliable) void ServerChooseTeam(int32 Team);
+    UFUNCTION(Server, Reliable) void ServerSetRoomReady(bool bReady);
+    UFUNCTION(Server, Reliable) void ServerStartExpedition();
+    UFUNCTION(Server, Reliable) void ServerConfigureRoom(const FIslandRoomSettings& Settings);
+    UFUNCTION(Server, Reliable) void ServerReturnToRoom();
     bool IsMapOpen() const { return bMapOpen; }
     const FIslandClues& GetLocalClues() const { return LocalClues; }
     FString WaterStatus() const;
@@ -62,4 +69,14 @@ private:
     double WaterChangedAt = 0.0;
     uint8 WaterState = 0;
     bool bMapOpen = false;
+    bool bHelpOpen = false;
+    void ToggleMenu();
+    void OpenHelp();
+    void CloseHelp();
+    bool CanUseIslandWorld() const;
+public:
+    AIslandChest* GetReachableChest() const;
+    void ClearHeldIslandActions();
+    bool ShowControlHelp() const { return bHelpOpen; }
+
 };

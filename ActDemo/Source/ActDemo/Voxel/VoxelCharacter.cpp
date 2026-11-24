@@ -24,6 +24,10 @@ AVoxelCharacter::AVoxelCharacter()
     GetMesh()->SetRelativeLocation(FVector(0, 0, -90));
     GetMesh()->SetRelativeRotation(FRotator(0, -90, 0));
     GetMesh()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    // Movement, climbing and chest traces all use the authoritative capsule. Offscreen bodies
+    // have no animation-driven gameplay and can resume their cosmetic pose when visible.
+    GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+    GetMesh()->bEnableUpdateRateOptimizations = true;
     static ConstructorHelpers::FObjectFinder<USkeletalMesh> Manny(TEXT("/Game/Characters/Mannequins/Meshes/SKM_Manny_Simple"));
     static ConstructorHelpers::FClassFinder<UAnimInstance> Anim(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/ABP_Unarmed"));
     static ConstructorHelpers::FObjectFinder<UAnimSequence> Swing(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_01"));

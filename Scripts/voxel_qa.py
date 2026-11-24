@@ -113,7 +113,7 @@ def run(args, ip, mode, directory):
                 wait_for({"third": processes["third"]}, lambda current: "voxel room is full or already started" in current["third"],
                          60, "A third connection was not rejected")
                 result["third_connection_rejected"] = True
-                os.killpg(processes["host"][0].pid, signal.SIGTERM)
+                processes["host"][0].terminate()
                 wait_for({"client": processes["client"]}, lambda current: "Host closed the connection" in current["client"],
                          25, "Guest did not observe the host closing the session")
                 result["host_exit_ends_session"] = True
@@ -122,12 +122,12 @@ def run(args, ip, mode, directory):
         finally:
             for process, _ in reversed(list(processes.values())):
                 if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    process.terminate()
             for process, _ in processes.values():
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    process.kill()
                     process.wait()
 
 

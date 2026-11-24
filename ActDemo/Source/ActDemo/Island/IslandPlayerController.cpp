@@ -1,6 +1,10 @@
 #include "Island/IslandPlayerController.h"
 
 #include "Components/InputComponent.h"
+#include "Engine/GameViewportClient.h"
+#include "Island/IslandHUD.h"
+#include "Island/IslandWorld.h"
+#include "Voxel/VoxelCharacter.h"
 #include "Engine/AssetManager.h"
 #include "Engine/Engine.h"
 #include "Engine/StreamableManager.h"
@@ -25,6 +29,9 @@ void AIslandPlayerController::SetupInputComponent()
         InputComponent->BindKey(EKeys::E, IE_Pressed, this, &AIslandPlayerController::Interact);
         InputComponent->BindKey(EKeys::Tab, IE_Pressed, this, &AIslandPlayerController::OpenMap);
         InputComponent->BindKey(EKeys::Tab, IE_Released, this, &AIslandPlayerController::CloseMap);
+        InputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &AIslandPlayerController::ToggleMenu);
+        InputComponent->BindKey(EKeys::F1, IE_Pressed, this, &AIslandPlayerController::OpenHelp);
+        InputComponent->BindKey(EKeys::F1, IE_Released, this, &AIslandPlayerController::CloseHelp);
         InputComponent->BindKey(EKeys::Enter, IE_Pressed, this, &AIslandPlayerController::RestartIsland);
     }
 }
@@ -35,10 +42,79 @@ int32 AIslandPlayerController::GetTeam() const
     return IslandState ? IslandState->Team : -1;
 }
 
-void AIslandPlayerController::OpenMap() { bMapOpen = IsVoxelInputEnabled() && GetTeam() >= 0; }
-void AIslandPlayerController::CloseMap() { bMapOpen = false; }
-void AIslandPlayerController::Interact() { if (IsVoxelInputEnabled() && IsPlaying() && WaterState < 2) { ServerInteract(); } }
-void AIslandPlayerController::RestartIsland() { if (IsVoxelInputEnabled()) { ServerRestartIsland(); } }
+bool AIslandPlayerController::CanUseIslandWorld() const
+{
+    const auto* HUD=GetHUD<AIslandHUD>();
+    return IsPlaying() && (!HUD || HUD->IsAcceptingWorldInput());
+}
+
+void AIslandPlayerController::ToggleMenu()
+{
+    if (auto* HUD=GetHUD<AIslandHUD>()) HUD->ToggleMenu();
+}
+
+void AIslandPlayerController::OpenHelp() { bHelpOpen=CanUseIslandWorld() && !bMapOpen; }
+void AIslandPlayerController::CloseHelp() { bHelpOpen=false; }
+
+void AIslandPlayerController::OpenMap()
+{
+    if (bMapOpen || !CanUseIslandWorld() || !IsVoxelInputEnabled() || GetTeam()<0) return;
+    StopRecover();
+    StopClimb();
+    bHelpOpen=false;
+    bMapOpen=true;
+    SetVoxelInputEnabled(false);
+}
+
+void AIslandPlayerController::CloseMap()
+{
+    if (!bMapOpen) return;
+    bMapOpen=false;
+    const auto* HUD=GetHUD<AIslandHUD>();
+    if (!HUD || !HUD->IsMenuOpen()) SetVoxelInputEnabled(true);
+}
+
+void AIslandPlayerController::ClearHeldIslandActions()
+{
+    CloseMap();
+    bHelpOpen=false;
+    StopRecover();
+    if (GetHero()) StopClimb();
+}
+
+void AIslandPlayerController::Interact()
+{
+    if (CanUseIslandWorld() && IsVoxelInputEnabled() && WaterState < 2) ServerInteract();
+}
+
+void AIslandPlayerController::RestartIsland()
+{
+    const auto* GS=GetWorld()->GetGameState<AIslandGameState>();
+    if (GS && !GS->bRoomLobby && IsVoxelInputEnabled()) ServerRestartIsland();
+}
+
+AIslandChest* AIslandPlayerController::GetReachableChest() const
+{
+    const AVoxelCharacter* Hero=GetHero();
+    if (!Hero) return nullptr;
+    const FVector Origin=Hero->GetAimOrigin();
+    const FCollisionQueryParams Params(SCENE_QUERY_STAT(IslandReachableChest), false, Hero);
+    double Nearest=FMath::Square(IslandRules::OpenReach);
+    AIslandChest* Target=nullptr;
+    for (TActorIterator<AIslandChest> It(GetWorld()); It; ++It)
+    {
+        AIslandChest* Chest=*It;
+        const FVector Center=Chest->GetActorLocation();
+        const double Distance=FVector::DistSquared(Origin,Center);
+        FHitResult Hit;
+        if (Distance<=Nearest && GetWorld()->LineTraceSingleByChannel(Hit,Origin,Center,ECC_Visibility,Params) && Hit.GetActor()==Chest)
+        {
+            Target=Chest;
+            Nearest=Distance;
+        }
+    }
+    return Target;
+}
 
 void AIslandPlayerController::ServerInteract_Implementation()
 {
@@ -62,7 +138,7 @@ void AIslandPlayerController::ServerRestartIsland_Implementation()
 void AIslandPlayerController::ClientUpdateClues_Implementation(const FIslandClues& Snapshot)
 {
     LocalClues = Snapshot;
-    ClientEditRejected(FString::Printf(TEXT("Clues %d/4"), LocalClues.Count()));
+    if (Snapshot.Count() > 0) ClientEditRejected(FString::Printf(TEXT("获得线索  %d / 4"), LocalClues.Count()));
 }
 
 void AIslandPlayerController::ClientWaterState_Implementation(uint8 State)
@@ -75,12 +151,12 @@ FString AIslandPlayerController::WaterStatus() const
 {
     if (WaterState == 2)
     {
-        return TEXT("Drowned. Returning to your dock");
+        return TEXT("已溺水，即将返回本队码头");
     }
     if (WaterState == 1)
     {
         const int32 Left = FMath::Max(1, FMath::CeilToInt(IslandRules::DrownTime - (FPlatformTime::Seconds() - WaterChangedAt)));
-        return FString::Printf(TEXT("Drowning  %ds"), Left);
+        return FString::Printf(TEXT("深水 · %d 秒后溺水"), Left);
     }
     return FString();
 }
@@ -309,5 +385,48 @@ void AIslandPlayerController::ServerPartyUnloaded_Implementation(uint32 RoundId,
     if (AIslandGameMode* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
     {
         Mode->PartyUnloaded(*this, RoundId, bSuccess);
+    }
+}
+
+void AIslandPlayerController::ServerChooseTeam_Implementation(int32 Team)
+{
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+    {
+        Mode->ChooseTeam(*this, Team);
+    }
+}
+
+void AIslandPlayerController::ServerSetRoomReady_Implementation(bool bReady)
+{
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+    {
+        Mode->SetRoomReady(*this, bReady);
+    }
+}
+
+void AIslandPlayerController::ServerStartExpedition_Implementation()
+{
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+    {
+        Mode->StartExpedition(*this);
+    }
+}
+
+void AIslandPlayerController::ServerConfigureRoom_Implementation(const FIslandRoomSettings& Settings)
+{
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+    {
+        Mode->ConfigureRoom(*this, Settings);
+    }
+}
+
+void AIslandPlayerController::ServerReturnToRoom_Implementation()
+{
+    if (IsLocalController())
+    {
+        if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+        {
+            Mode->RestartIsland();
+        }
     }
 }

@@ -180,7 +180,7 @@ void FActVoxelEditorMode::EnsurePreview()
     }
     ReleasePreview();
     AVoxelTerrain* Candidate = AVoxelTerrain::Find(World);
-    if (Candidate && Candidate->Layout == EVoxelLayout::Island)
+    if (Candidate && Candidate->Layout != EVoxelLayout::Playground)
     {
         Terrain = Candidate;
         Terrain->RebuildEditorPreview();
@@ -349,7 +349,7 @@ void FActVoxelEditorMode::UpdateCursor(const FViewportCursorLocation& Ray)
         const double Height = bHasCircle ? CircleWorld(CircleIndex).Z : 0.0;
         const double Distance = (Height - Start.Z) / Ray.GetDirection().Z;
         const FVector Point = Start + Ray.GetDirection() * Distance;
-        if (Distance >= 0 && FMath::Abs(Point.X) <= 2400 && FMath::Abs(Point.Y) <= 2400)
+        if (Distance >= 0 && FMath::Abs(Point.X) <= Terrain->GetShoreExtent()+100 && FMath::Abs(Point.Y) <= Terrain->GetShoreExtent()+100)
         {
             Cursor = Point;
         }
@@ -368,8 +368,9 @@ void FActVoxelEditorMode::ApplyStrokePoint()
     {
         FIslandSearchCircle Circle = Terrain->GetSearchCircles()[CircleIndex];
         const FVector2D Dragged = FVector2D(Point) + CircleGrabOffset;
-        const FIntPoint Center(FMath::Clamp(FMath::RoundToInt(Dragged.X), -2400, 2400),
-            FMath::Clamp(FMath::RoundToInt(Dragged.Y), -2400, 2400));
+        const int32 Extent = Terrain->GetShoreExtent()+100;
+        const FIntPoint Center(FMath::Clamp(FMath::RoundToInt(Dragged.X), -Extent, Extent),
+            FMath::Clamp(FMath::RoundToInt(Dragged.Y), -Extent, Extent));
         if (Circle.Center != Center)
         {
             Circle.Center = Center;
@@ -433,6 +434,7 @@ void FActVoxelEditorMode::ValidateMap()
         FIslandTreasureLayout Layout;
         int32 Decoys = 4;
         GConfig->GetInt(TEXT("/Script/ActDemo.IslandGameMode"), TEXT("DecoyChestCount"), Decoys, GGameIni);
+        if (Terrain->Layout == EVoxelLayout::Expedition) Decoys = 0;
         IslandRules::GenerateLayout(0, Decoys, Terrain->GetSearchCircles(), *Terrain->GetEditorDensity(), Layout, &ValidationError, true);
     }
 }
@@ -527,7 +529,7 @@ void FActVoxelEditorMode::FrameIsland()
     {
         if (Client && Client->IsPerspective() && Client->GetWorld() == Terrain->GetWorld())
         {
-            Client->SetViewLocation(FVector(-3100, -3100, 5000));
+            Client->SetViewLocation(FVector(-3100, -3100, 5000) * (Terrain->GetShoreExtent() / 2300.0));
             Client->SetViewRotation(FRotator(-46, 45, 0));
             Client->Invalidate();
         }

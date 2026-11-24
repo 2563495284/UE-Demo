@@ -1,6 +1,7 @@
 #include "Island/IslandWorld.h"
 
 #include "Components/StaticMeshComponent.h"
+#include "Voxel/VoxelTerrain.h"
 #include "Island/IslandRules.h"
 #include "Materials/MaterialInterface.h"
 #include "Net/UnrealNetwork.h"
@@ -57,14 +58,13 @@ AIslandWater::AIslandWater()
 void AIslandWater::BeginPlay()
 {
     Super::BeginPlay();
-    // The opening follows the same octagonal shore used by the authoritative water test.
-    const FVector Shore[] = {{2300, 950, 0}, {950, 2300, 0}, {-950, 2300, 0}, {-2300, 950, 0},
-                             {-2300, -950, 0}, {-950, -2300, 0}, {950, -2300, 0}, {2300, -950, 0}};
+    const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
+    const TArray<FVector2D> Shore = VoxelPlayground::CoastOutline(Terrain ? Terrain->Layout : EVoxelLayout::Island);
     TArray<FVector> Vertices;
     TArray<int32> Triangles;
-    for (int32 Index = 0; Index < UE_ARRAY_COUNT(Shore); ++Index)
+    for (int32 Index = 0; Index < Shore.Num(); ++Index)
     {
-        const FVector A = Shore[Index], B = Shore[(Index + 1) % UE_ARRAY_COUNT(Shore)];
+        const FVector A(Shore[Index],0.0), B(Shore[(Index + 1) % Shore.Num()],0.0);
         const int32 Base = Vertices.Num();
         Vertices.Append({A, B, B * 18.0, A * 18.0});
         Triangles.Append({Base, Base + 1, Base + 2, Base, Base + 2, Base + 3});

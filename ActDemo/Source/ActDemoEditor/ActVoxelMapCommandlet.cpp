@@ -1,6 +1,7 @@
 #include "ActVoxelMapCommandlet.h"
 
 #include "Island/IslandBreakable.h"
+#include "ExpeditionMapBuilder.h"
 
 #include "Components/DirectionalLightComponent.h"
 #include "Components/PointLightComponent.h"
@@ -218,6 +219,7 @@ UActVoxelMapCommandlet::UActVoxelMapCommandlet()
 
 int32 UActVoxelMapCommandlet::Main(const FString& Params)
 {
+    if (FParse::Param(*Params, TEXT("Expedition"))) return BuildExpeditionMap(Params);
     const bool bIsland = FParse::Param(*Params, TEXT("Island"));
     const TCHAR* MapPath = bIsland ? TEXT("/Game/TreasureIsland/L_TreasureIsland") : TEXT("/Game/VoxelPlayground/L_VoxelPlayground");
     if (bIsland && FParse::Param(*Params, TEXT("VerifyAuthoring")))

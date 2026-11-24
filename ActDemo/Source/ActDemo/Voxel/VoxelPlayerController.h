@@ -20,8 +20,10 @@ public:
     bool IsPlaying() const { return bPlaying; }
     bool IsVoxelInputEnabled() const { return bVoxelInputEnabled; }
     void SetVoxelInputEnabled(bool bEnabled);
+    void SetIslandUIInput(bool bOpen);
     double GetRecoverProgress() const;
     const FString& GetNotice() const { return Notice; }
+    const FString& GetDisplayNotice() const;
     bool IsNoticeVisible() const;
 
     // The same input-to-RPC entry points are exercised by the multiplayer acceptance probe.
@@ -74,6 +76,7 @@ private:
     UPROPERTY() TObjectPtr<UActInputConfig> InputConfig;
     TWeakObjectPtr<AVoxelTerrain> Terrain;
     TArray<FIncomingEdit> Incoming;
+    bool bApplyingEdits = false;
     uint32 LastReceivedSequence = 0;
     FTimerHandle RecoverTimer;
     double RecoverStartedAt = -1.0;

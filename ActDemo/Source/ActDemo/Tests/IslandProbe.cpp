@@ -1,11 +1,18 @@
 #include "Tests/IslandProbe.h"
 
 #include "Components/StaticMeshComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Algo/AllOf.h"
+#include "Algo/Count.h"
+#include "DynamicRHI.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "InputKeyEventArgs.h"
+#include "TimerManager.h"
 #include "PartyMinigame.h"
+#include "RenderTimer.h"
 #include "Island/IslandGameMode.h"
+#include "Island/ExpeditionDock.h"
 #include "Island/IslandBreakable.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
@@ -17,8 +24,24 @@
 namespace
 {
     TOptional<FVector> PreviousFirstChest;
+    TMap<FGuid, int32> ReturningExpeditionMembers;
     constexpr int32 EditsPerStage = 150;
     const FIntPoint StressSites[] = {{-400, -400}, {800, 800}, {-800, 800}};
+    // Away from the four search areas, the prize intersection, starting docks and landmarks.
+    const FIntPoint ExpeditionStressSites[] = {{2000,2000}, {-2000,2000}, {-2000,-2000}, {2000,-2000}};
+
+    FString ExpeditionDigest(const AVoxelTerrain& Terrain)
+    {
+        FString Result = FString::Printf(TEXT("%08x"), Terrain.GetChecksum());
+        for (const FIntPoint& Site : ExpeditionStressSites)
+        {
+            FHitResult Floor;
+            const FVector Start(Site.X + 12, Site.Y + 12, 2000.0);
+            Result += Terrain.TraceRock(Start, Start - FVector(0,0,3000), nullptr, Floor)
+                ? FString::Printf(TEXT(":%d"), FMath::RoundToInt(Floor.ImpactPoint.Z)) : TEXT(":missing");
+        }
+        return Result;
+    }
 
     AIslandBreakable* FindBreakable(UWorld* World, EIslandBreakEffect Effect, bool bRedDock = false)
     {
@@ -32,8 +55,101 @@ namespace
         return nullptr;
     }
 
+    // Look for a walkable lip with an unobstructed, in-range view of a buried corner.
+    // If the central shaft has broken through, open an adjacent shallow shaft first.
+    bool TrySideApproach(AIslandPlayerController& Player, AVoxelTerrain& Terrain, const FVector& Target)
+    {
+        AVoxelCharacter& Hero = *Player.GetHero();
+        const UCapsuleComponent& Capsule = *Hero.GetCapsuleComponent();
+        const double HalfHeight = Capsule.GetScaledCapsuleHalfHeight();
+        const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule.GetScaledCapsuleRadius(), HalfHeight);
+        const FCollisionResponseParams Responses(Capsule.GetCollisionResponseToChannels());
+        const FCollisionQueryParams Query(SCENE_QUERY_STAT(ExpeditionQAStand), false, &Hero);
+        const FVector EyeOffset = Hero.GetAimOrigin() - Hero.GetActorLocation();
+        const auto& Density = *Terrain.GetDensity();
+        const FVector Low = (Target - IslandRules::ChestExtent - FVector(Density.Grid.Origin)) / VoxelPlayground::Spacing;
+        const FVector High = (Target + IslandRules::ChestExtent - FVector(Density.Grid.Origin)) / VoxelPlayground::Spacing;
+        TArray<FVector> Residual;
+        for (int32 Z = FMath::FloorToInt(Low.Z); Z <= FMath::CeilToInt(High.Z); ++Z)
+            for (int32 Y = FMath::FloorToInt(Low.Y); Y <= FMath::CeilToInt(High.Y); ++Y)
+                for (int32 X = FMath::FloorToInt(Low.X); X <= FMath::CeilToInt(High.X); ++X)
+                    if (Density.Sample({X,Y,Z}) < 0)
+                        Residual.Add(FVector(Density.Grid.Origin + FIntVector(X,Y,Z) * VoxelPlayground::Spacing));
+
+        TOptional<FVector> Approach, SideStand;
+        FVector SideAim = FVector::ZeroVector;
+        int32 MostResidualReached = 0;
+        double BestDepth = TNumericLimits<double>::Max();
+        for (const double Radius : {85.0, 125.0, 165.0})
+        {
+            for (int32 Heading = 0; Heading < 12; ++Heading)
+            {
+                const double Angle = Heading * UE_TWO_PI / 12.0;
+                const FVector Column = Target + Radius * FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0);
+                FHitResult Floor;
+                if (!Terrain.TraceRock(Column + FVector(0,0,1600), Column - FVector(0,0,1300), &Hero, Floor))
+                {
+                    continue;
+                }
+                const FVector Stand = Floor.ImpactPoint + FVector(0,0,HalfHeight + 8.0);
+                if (Floor.ImpactNormal.Z < .70 || Terrain.GetWorld()->OverlapBlockingTestByChannel(
+                    Stand, FQuat::Identity, Capsule.GetCollisionObjectType(), Shape, Query, Responses))
+                {
+                    continue;
+                }
+                const double Depth = Floor.ImpactPoint.Z - Target.Z;
+                if (Depth > -180.0 && FMath::Abs(Depth + 100.0) < BestDepth)
+                {
+                    BestDepth = FMath::Abs(Depth + 100.0);
+                    Approach = Stand;
+                }
+                const FVector Eye = Stand + EyeOffset;
+                for (const FVector& Residue : Residual)
+                {
+                    const FVector Aim = (Residue - Eye).GetSafeNormal();
+                    FHitResult Side;
+                    if (!Terrain.TraceRock(Eye, Eye + Aim * 235.0, &Hero, Side))
+                    {
+                        continue;
+                    }
+                    // Use the actual punch brush center and radius to pick a wall that reaches the chest.
+                    const FVector Center = Side.ImpactPoint + Aim * 44.0 - FVector(0,0,37.0);
+                    const int32 Reached = Algo::CountIf(Residual, [&Center](const FVector& P)
+                        { return FVector::DistSquared(P, Center) < FMath::Square(118.0); });
+                    if (Reached > MostResidualReached)
+                    {
+                        MostResidualReached = Reached;
+                        SideStand = Stand;
+                        SideAim = Aim;
+                    }
+                }
+            }
+        }
+        const TOptional<FVector>& Stand = SideStand ? SideStand : Approach;
+        if (!Stand || !Hero.TeleportTo(*Stand, FRotator::ZeroRotator))
+        {
+            return false;
+        }
+        Hero.GetCharacterMovement()->StopMovementImmediately();
+        if (SideStand)
+        {
+            Player.SubmitEdit(EVoxelAction::Punch, SideAim);
+        }
+        else
+        {
+            Player.SubmitEdit(EVoxelAction::DigDown, -FVector::UpVector);
+        }
+        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_SIDE_APPROACH action=%s stand=%s aim=%s"),
+            SideStand ? TEXT("punch") : TEXT("dig"), *Stand->ToCompactString(), *SideAim.ToCompactString());
+        return true;
+    }
+
     FString TerrainDigest(const AVoxelTerrain& Terrain)
     {
+        if (Terrain.Layout == EVoxelLayout::Expedition)
+        {
+            return ExpeditionDigest(Terrain);
+        }
         FString Result = FString::Printf(TEXT("%08x:%s"), Terrain.GetChecksum(), *Terrain.GetChunkChecksums());
         for (const FIntPoint& Site : StressSites)
         {
@@ -95,6 +211,15 @@ void AIslandProbePeer::ClientOpenChest_Implementation()
     }
 }
 
+void AIslandProbePeer::ClientJoinCrew_Implementation(int32 Team, bool bReady)
+{
+    if (auto* Player = Cast<AIslandPlayerController>(GetOwner()))
+    {
+        Player->ServerChooseTeam(Team);
+        Player->ServerSetRoomReady(bReady);
+    }
+}
+
 void AIslandProbePeer::ClientStrike_Implementation(FVector Target)
 {
     if (AIslandPlayerController* Player = Cast<AIslandPlayerController>(GetOwner()); Player && Player->GetHero())
@@ -109,6 +234,11 @@ void AIslandProbePeer::ClientShowChart_Implementation()
     {
         Player->OpenMap();
         FScreenshotRequest::RequestScreenshot(TEXT("TreasureIslandQA"), true, true);
+        FTimerHandle CloseTimer;
+        GetWorldTimerManager().SetTimer(CloseTimer, FTimerDelegate::CreateWeakLambda(Player, [Player]
+        {
+            Player->CloseMap();
+        }), .5f, false);
     }
 }
 
@@ -168,9 +298,27 @@ void AIslandProbePeer::ServerStress_Implementation(int32 Stage)
     }
 }
 
+bool AIslandProbe::TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FVector& Target, bool& Exposed)
+{
+#if !UE_BUILD_SHIPPING
+    if (Mode && Mode->HasAuthority() && Mode->IsPlaying()
+        && FParse::Param(FCommandLine::Get(),TEXT("ExpeditionTreasureWalkQA"))
+        && Index>=0 && Index<=IslandRules::PrizeIndex && Mode->Exposed.IsValidIndex(Index))
+    {
+        Target = Mode->HiddenLayout.GetCenter(Index);
+        Exposed = IsValid(Mode->Exposed[Index]);
+        return true;
+    }
+#endif
+    return false;
+}
+
 AIslandProbe::AIslandProbe()
 {
     PrimaryActorTick.bCanEverTick = true;
+    FParse::Value(FCommandLine::Get(), TEXT("ExpeditionPlayers="), ExpeditionPlayers);
+    bOneCrew = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionTogether"));
+    bProfileFrames = FParse::Param(FCommandLine::Get(), TEXT("VoxelProfile"));
 }
 
 void AIslandProbe::Require(bool bSuccess, const TCHAR* Message)
@@ -204,6 +352,10 @@ void AIslandProbe::PrepareDig(int32 Index)
     const FVector Point = Mode->HiddenLayout.GetCenter(Index);
     const double Top = Mode->GetTerrain()->GetDensity()->SurfaceAt(FVector2D(Point)).Get(
         VoxelPlayground::IslandSurfaceHeight(FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y)));
+    if (ExpeditionPlayers > 0)
+    {
+        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_EXCAVATE box=%d x=%.0f y=%.0f z=%.0f surface=%.0f"), Index, Point.X, Point.Y, Point.Z, Top);
+    }
     Place(0, {Point.X, Point.Y, Top + (bPartyScenario ? 165.0 : 97.0)});
     Advance(EStep::Dig);
 }
@@ -294,6 +446,15 @@ void AIslandProbe::StartStress(int32 Stage)
 
 void AIslandProbe::RequestStress(int32 Seat, int32 Stage)
 {
+    if (Stage == 3 && RoomCheck == ERoomCheck::Stress && Mode->GetPlayers().IsValidIndex(Seat))
+    {
+        const FIntPoint Site = ExpeditionStressSites[Seat / 2];
+        const bool bFill = (Seat % 2) == 0;
+        const int32 Z = VoxelPlayground::BaseHeight(EVoxelLayout::Expedition, Site.X, Site.Y);
+        Mode->EnqueueEdit(*Mode->GetPlayers()[Seat], bFill ? EVoxelAction::Fill : EVoxelAction::Punch,
+            FVector::ForwardVector, FIntVector(Site.X, Site.Y, Z - (bFill ? 130 : 65)));
+        return;
+    }
     if ((Stage == 1 && Step != EStep::StressShared) || (Stage == 2 && Step != EStep::StressApart)
         || Stage < 1 || Stage > 2)
     {
@@ -310,6 +471,361 @@ void AIslandProbe::RequestStress(int32 Seat, int32 Stage)
         FVector::ForwardVector, FIntVector(Position.X, Position.Y, Z - (bFill ? 130 : 65)));
 }
 
+void AIslandProbe::TickExpedition(double Now)
+{
+    Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>();
+    if (!Mode || !Mode->GetTerrain() || !Mode->GetTerrain()->IsReady())
+    {
+        return;
+    }
+    auto* Round = Mode->GetGameState<AIslandGameState>();
+    const auto& Players = Mode->GetPlayers();
+    if (RoomCheck == ERoomCheck::Join)
+    {
+        if (Players.Num() != ExpeditionPlayers || !Algo::AllOf(Players, [](const AVoxelPlayerController* P)
+            { return P->GetPlayerState<AIslandPlayerState>()->bMapReady && P->GetHero(); }))
+        {
+            return;
+        }
+        Require(Round->Phase == EIslandPhase::Waiting && !Mode->IsPlaying(), TEXT("room waits for the host at every occupancy"));
+        if (!ReturningExpeditionMembers.IsEmpty())
+        {
+            for (const AVoxelPlayerController* Player : Players)
+            {
+                const auto* Member = Player->GetPlayerState<AIslandPlayerState>();
+                const int32* OldTeam = ReturningExpeditionMembers.Find(Member->MemberId);
+                Require(OldTeam && *OldTeam == Member->Team && !Member->bRoomReady, TEXT("return preserves team and clears ready"));
+            }
+            Require(Round->Winner == INDEX_NONE && Mode->GetTerrain()->GetAppliedSequence() == 0
+                && Round->RoomSettings.RoomName == TEXT("Expedition QA") && Mode->Exposed.IsEmpty(), TEXT("return restores settings and pristine island"));
+            UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_DONE players=%d teams=%d returned=1"), ExpeditionPlayers, bOneCrew ? 1 : ExpeditionPlayers);
+            Advance(EStep::Done);
+            return;
+        }
+        auto* Host = CastChecked<AIslandPlayerController>(Players[0]);
+        FIslandRoomSettings Settings = Round->RoomSettings;
+        Require(Settings.MaxPlayers == 8 && Settings.MaxTeams == 8 && Settings.TeamCapacity == 8, TEXT("default expedition supports eight players and crews"));
+        Settings.RoomName = TEXT("Expedition QA");
+        Host->ServerConfigureRoom(Settings);
+        if (Players.Num() > 1)
+        {
+            Host->ServerStartExpedition();
+            Require(Round->Phase == EIslandPhase::Waiting, TEXT("host cannot start while a guest is unready"));
+        }
+        for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
+        {
+            auto* Peer = GetWorld()->SpawnActor<AIslandProbePeer>();
+            Peer->SetOwner(Players[Seat]);
+            Peer->Seat = Seat;
+            Peer->Coordinator = this;
+            Peers.Add(Peer);
+            Peer->ClientJoinCrew(bOneCrew ? 0 : Seat, true);
+        }
+        RoomCheck = ERoomCheck::Ready;
+        StepAt = Now;
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Return && !DepartureTeams.IsEmpty() && Players.Num() == ExpeditionPlayers - 1)
+    {
+        Require(Mode->IsPlaying() && Round->ActiveTeams == DepartureTeams.Num() && Round->LaunchedTeams == DepartureTeams,
+            TEXT("an empty crew keeps its launch slot in the map"));
+        for (const AVoxelPlayerController* Existing : Players)
+        {
+            const auto* Member = Existing->GetPlayerState<AIslandPlayerState>();
+            const FTransform* Before = DepartureBerths.Find(Member->MemberId);
+            FTransform Mapped;
+            Require(Before && Before->Equals(Existing->StartTransform) &&
+                AExpeditionDock::FindStart(GetWorld(), Round->LaunchedTeams, Member->Team, 0, Mapped) && Mapped.Equals(*Before),
+                TEXT("remaining player's return point and chart still identify the original berth"));
+        }
+        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_DROP_DONE launched=%d remaining=%d"), ExpeditionPlayers, Players.Num());
+        Advance(EStep::Done);
+        return;
+    }
+    if (Players.Num() != ExpeditionPlayers)
+    {
+        return;
+    }
+    if (Now - StepAt > (RoomCheck == ERoomCheck::Stress ? 240.0 : 100.0))
+    {
+        UE_LOG(LogTemp, Error, TEXT("ISLAND_QA_TIMEOUT room=%d index=%d phase=%d"), int32(RoomCheck), NextDig, int32(Round->Phase));
+        Require(false, TEXT("expedition timed out"));
+        return;
+    }
+    auto* Host = CastChecked<AIslandPlayerController>(Players[0]);
+    if (RoomCheck == ERoomCheck::Ready && Round->CanLaunch())
+    {
+        TArray<FVector> Starts;
+        for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
+        {
+            Require(Players[Seat]->GetPlayerState<AIslandPlayerState>()->Team == (bOneCrew ? 0 : Seat), TEXT("requested team assignment applied"));
+            const FVector Position = Players[Seat]->StartTransform.GetLocation();
+            for (const FVector& Previous : Starts)
+            {
+                Require(FVector::DistSquared(Previous, Position) >= FMath::Square(70.0), TEXT("spawn berths do not overlap"));
+            }
+            Starts.Add(Position);
+        }
+        Host->ServerStartExpedition();
+        Require(Round->Phase == EIslandPhase::Starting, TEXT("host starts synchronized countdown"));
+        if (Players.Num() > 1)
+        {
+            Peers.Last()->ClientJoinCrew(bOneCrew ? 0 : Players.Num() - 1, false);
+            RoomCheck = ERoomCheck::Withdraw;
+        }
+        else
+        {
+            RoomCheck = ERoomCheck::Depart;
+        }
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Withdraw)
+    {
+        if (Round->Phase == EIslandPhase::Waiting && !bIssued)
+        {
+            Require(!Round->CanLaunch(), TEXT("guest withdrawing cancels departure and unlocks the room"));
+            Peers.Last()->ClientJoinCrew(bOneCrew ? 0 : Players.Num() - 1, true);
+            bIssued = true;
+        }
+        if (Round->CanLaunch() && bIssued)
+        {
+            Host->ServerStartExpedition();
+            RoomCheck = ERoomCheck::Depart;
+        }
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Depart && Mode->IsPlaying())
+    {
+        Require(Round->ActiveTeams == (bOneCrew ? 1 : ExpeditionPlayers) && Mode->HiddenLayout.Num() == 5
+            && Mode->HiddenLayout.Decoys.IsEmpty(), TEXT("occupied crews depart with exactly four clues and one prize"));
+        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDrop")))
+        {
+            DepartureTeams = Round->LaunchedTeams;
+            for (const AVoxelPlayerController* Existing : Players)
+            {
+                const auto* Member = Existing->GetPlayerState<AIslandPlayerState>();
+                DepartureBerths.Add(Member->MemberId, Existing->StartTransform);
+            }
+            UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_DROP_READY"));
+            RoomCheck = ERoomCheck::Return;
+            return;
+        }
+        if (ExpeditionPlayers == 8 && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionStress")))
+        {
+            RoomCheck = ERoomCheck::Stress;
+            StepAt = LastFrame = Now;
+            StressStart = Mode->GetTerrain()->GetAppliedSequence();
+            for (AIslandProbePeer* Peer : Peers) Peer->ClientStress(3);
+            return;
+        }
+        RoomCheck = ERoomCheck::Dig;
+        PrepareDig(FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")) ? 3 : 0);
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Stress)
+    {
+        FrameTimes.Add((Now - LastFrame) * 1000.0);
+        LastFrame = Now;
+        if (bProfileFrames)
+        {
+            // Match stat unit's raw clocks. RHI reports the most recently completed GPU frame.
+            const uint32 Cycles[] = { GGameThreadTime, GRenderThreadTime, RHIGetGPUFrameCycles(),
+                GGameThreadWaitTime, GRenderThreadWaitTime, GSwapBufferTime };
+            static_assert(UE_ARRAY_COUNT(Cycles) == static_cast<int32>(EProfileClock::Count));
+            for (int32 Clock = 0; Clock < UE_ARRAY_COUNT(Cycles); ++Clock)
+            {
+                if (Cycles[Clock] != 0)
+                    ProfileFrames[Clock].Add(FPlatformTime::ToMilliseconds(Cycles[Clock]));
+            }
+        }
+        if (Mode->GetTerrain()->GetAppliedSequence() - StressStart >= 300)
+        {
+            for (AIslandProbePeer* Peer : Peers) Peer->ClientStress(0);
+            RoomCheck = ERoomCheck::Drain;
+            StepAt = Now;
+        }
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Drain && !Mode->GetTerrain()->IsBusy() && Mode->Requests.IsEmpty())
+    {
+        FrameTimes.Sort();
+        const auto& Terrain = *Mode->GetTerrain();
+        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_STRESS first=%u last=%u frame95=%.3f frames=%d"),
+            StressStart + 1, Terrain.GetAppliedSequence(), FrameTimes[FMath::CeilToInt(FrameTimes.Num() * .95) - 1], FrameTimes.Num());
+        if (bProfileFrames)
+        {
+            const TCHAR* ClockNames[] = { TEXT("game"), TEXT("render"), TEXT("gpu"), TEXT("game_wait"), TEXT("render_wait"), TEXT("present") };
+            static_assert(UE_ARRAY_COUNT(ClockNames) == static_cast<int32>(EProfileClock::Count));
+            for (int32 Clock = 0; Clock < UE_ARRAY_COUNT(ClockNames); ++Clock)
+            {
+                TArray<double>& Samples = ProfileFrames[Clock];
+                Samples.Sort();
+                const double P95 = Samples.IsEmpty() ? -1.0 : Samples[FMath::CeilToInt(Samples.Num() * .95) - 1];
+                UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_CLOCK source=%s p95=%.3f valid=%d wall_frames=%d"),
+                    ClockNames[Clock], P95, Samples.Num(), FrameTimes.Num());
+            }
+        }
+        InspectThen(EStep::Dig, true);
+        RoomCheck = ERoomCheck::VerifyEdits;
+        return;
+    }
+    if (RoomCheck == ERoomCheck::VerifyEdits && Now - LastAction >= .65)
+    {
+        LastAction = Now;
+        if (Reports.Num() == Players.Num())
+        {
+            UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_TERRAIN peers=%d digest=%s"), Reports.Num(), *ExpectedDigest);
+            RoomCheck = ERoomCheck::Dig;
+            PrepareDig(0);
+        }
+        else
+        {
+            for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
+                if (!Reports.Contains(Seat)) Peers[Seat]->ClientInspect(Epoch, true);
+        }
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Dig && Now - LastAction > .65 && !Mode->GetTerrain()->IsBusy())
+    {
+        if (!Mode->Exposed[NextDig])
+        {
+            // A buried corner can remain above a deep vertical shaft on a slope. Walk the
+            // probe around the target's footprint and dig the highest remaining column.
+            const FVector Target = Mode->HiddenLayout.GetCenter(NextDig);
+            TOptional<FVector> Highest;
+            for (double X : {-58.0, 0.0, 58.0})
+            {
+                for (double Y : {-48.0, 0.0, 48.0})
+                {
+                    const FVector Column = Target + FVector(X, Y, 0);
+                    FHitResult Rock;
+                    if (Mode->GetTerrain()->TraceRock(Column + FVector(0, 0, 1500), Column - FVector(0, 0, 1100), Host->GetHero(), Rock)
+                        && (!Highest || Rock.ImpactPoint.Z > Highest->Z))
+                    {
+                        Highest = Rock.ImpactPoint;
+                    }
+                }
+            }
+            if ((!Highest || Highest->Z < Target.Z - 60.0 || Now - StepAt > 10.0)
+                && TrySideApproach(*Host, *Mode->GetTerrain(), Target))
+            {
+                LastAction = Now;
+                return;
+            }
+            if (Highest)
+            {
+                Host->GetHero()->TeleportTo(Highest.GetValue() + FVector(0, 0, 105), FRotator::ZeroRotator, false, true);
+                Host->GetHero()->GetCharacterMovement()->StopMovementImmediately();
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("EXPEDITION_QA_NO_SURFACE box=%d hero=%s"), NextDig, *Host->GetHero()->GetActorLocation().ToCompactString());
+            }
+            if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")))
+            {
+                const auto& Density = *Mode->GetTerrain()->GetDensity();
+                const FVector Min = (Target - IslandRules::ChestExtent - FVector(Density.Grid.Origin)) / VoxelPlayground::Spacing;
+                const FVector Max = (Target + IslandRules::ChestExtent - FVector(Density.Grid.Origin)) / VoxelPlayground::Spacing;
+                FString Residue;
+                int32 Solid = 0, Inside = 0;
+                const FBox Box = FBox::BuildAABB(Target, IslandRules::ChestExtent);
+                for (int32 Z = FMath::FloorToInt(Min.Z); Z <= FMath::CeilToInt(Max.Z); ++Z)
+                {
+                    for (int32 Y = FMath::FloorToInt(Min.Y); Y <= FMath::CeilToInt(Max.Y); ++Y)
+                    {
+                        for (int32 X = FMath::FloorToInt(Min.X); X <= FMath::CeilToInt(Max.X); ++X)
+                        {
+                            const FIntVector Grid(X,Y,Z);
+                            if (Density.Sample(Grid) >= 0) continue;
+                            const FVector P(Density.Grid.Origin + Grid * VoxelPlayground::Spacing);
+                            Inside += Box.IsInsideOrOn(P);
+                            if (Solid < 8) Residue += (P - Target).ToCompactString() + TEXT(" ");
+                            ++Solid;
+                        }
+                    }
+                }
+                const FVector HeroPos = Host->GetHero()->GetActorLocation();
+                FHitResult Aim;
+                FCollisionQueryParams Params(SCENE_QUERY_STAT(ExpeditionShaftDiagnostic), false, Host->GetHero());
+                GetWorld()->LineTraceSingleByChannel(Aim, HeroPos, HeroPos - FVector(0,0,235), ECC_Visibility, Params);
+                UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_SHAFT box=%d target=%s footZ=%.1f character=%s rockSurface=%s actor=%s component=%s impact=%s remainingSolid=%d samplesInBox=%d residualOffsets=%s"),
+                    NextDig, *Target.ToCompactString(), HeroPos.Z - Host->GetHero()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight(), *HeroPos.ToCompactString(),
+                    Highest ? *Highest->ToCompactString() : TEXT("none"), *GetNameSafe(Aim.GetActor()), *GetNameSafe(Aim.GetComponent()),
+                    *Aim.ImpactPoint.ToCompactString(), Solid, Inside, *Residue);
+            }
+            Host->SubmitEdit(EVoxelAction::DigDown, -FVector::UpVector);
+            LastAction = Now;
+            return;
+        }
+        // Cooperative players alternate discoveries. In a race, the final crew wins.
+        ExpeditionOpener = bOneCrew ? NextDig % Players.Num() : Players.Num() - 1;
+        if (ExpeditionOpener != 0)
+        {
+            Mode->RecoverPlayer(*Host);
+        }
+        auto* Opener = Players[ExpeditionOpener]->GetHero();
+        Opener->TeleportTo(Mode->HiddenLayout.GetCenter(NextDig) + FVector(0, 0, 98), FRotator::ZeroRotator, false, true);
+        Opener->GetCharacterMovement()->StopMovementImmediately();
+        RoomCheck = ERoomCheck::Open;
+        StepAt = LastAction = Now;
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Open && Now - LastAction > .55)
+    {
+        const int32 Team = Players[ExpeditionOpener]->GetPlayerState<AIslandPlayerState>()->Team;
+        if (OnPrize() ? Round->Winner == Team : (Mode->TeamClues[Team].Mask & (1u << NextDig)) != 0)
+        {
+            ExpectedDigest.Reset();
+            Reports.Reset();
+            ++Epoch;
+            Step = EStep::Inspect;
+            RoomCheck = ERoomCheck::Inspect;
+            StepAt = Now;
+        }
+        else
+        {
+            Peers[ExpeditionOpener]->ClientOpenChest();
+        }
+        LastAction = Now;
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Inspect && Now - LastAction > .50)
+    {
+        LastAction = Now;
+        if (Reports.Num() < Players.Num())
+        {
+            for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
+            {
+                if (!Reports.Contains(Seat)) Peers[Seat]->ClientInspect(Epoch, false);
+            }
+            return;
+        }
+        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_PRIVATE box=%d peers=%d"), NextDig, Reports.Num());
+        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")))
+        {
+            UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_REPRO_DONE"));
+            Advance(EStep::Done);
+            return;
+        }
+        if (!OnPrize())
+        {
+            Mode->RecoverPlayer(*Players[ExpeditionOpener]);
+            RoomCheck = ERoomCheck::Dig;
+            PrepareDig(NextDig + 1);
+            return;
+        }
+        for (const AVoxelPlayerController* Existing : Players)
+        {
+            const auto* Member = Existing->GetPlayerState<AIslandPlayerState>();
+            ReturningExpeditionMembers.Add(Member->MemberId, Member->Team);
+        }
+        Require(Round->Phase == EIslandPhase::Finished && Round->Winner == (bOneCrew ? 0 : Players.Num() - 1),
+            TEXT("all peers see the eligible treasure winner"));
+        Host->ServerReturnToRoom();
+        RoomCheck = ERoomCheck::Return;
+    }
+}
+
 void AIslandProbe::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
@@ -318,6 +834,11 @@ void AIslandProbe::Tick(float DeltaSeconds)
         return;
     }
     const double Now = FPlatformTime::Seconds();
+    if (ExpeditionPlayers > 0)
+    {
+        TickExpedition(Now);
+        return;
+    }
     if (Step == EStep::Waiting)
     {
         Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>();

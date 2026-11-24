@@ -1,5 +1,9 @@
 #include "Island/IslandGameMode.h"
 #include "Island/IslandBreakable.h"
+#include "Island/ExpeditionDock.h"
+#include "Island/IslandLocalPlayer.h"
+#include "Island/IslandRoomSession.h"
+#include "Kismet/GameplayStatics.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
 
@@ -36,10 +40,138 @@ void AIslandGameMode::BeginPlay()
 #endif
 }
 
+void AIslandGameMode::InitGame(const FString& MapName, const FString& Options, FString& Error)
+{
+    Super::InitGame(MapName, Options, Error);
+    UIslandRoomSession* Session = GetGameInstance()->GetSubsystem<UIslandRoomSession>();
+    bExpeditionRoom = MapName.EndsWith(TEXT("L_ExpeditionIsland")) || Session->IsManagedRoom();
+    if (bExpeditionRoom)
+    {
+        Settings = Session->HostSettings;
+        UIslandRoomRoster* Roster = GetGameInstance()->GetSubsystem<UIslandRoomRoster>();
+        FGuid TravelId;
+        if (FGuid::Parse(UGameplayStatics::ParseOption(Options, TEXT("RoomRound")), TravelId)
+            && TravelId.IsValid() && TravelId == Roster->ReturnRound)
+        {
+            ReturningTeams = MoveTemp(Roster->ReturningTeams);
+            ReturnDeadline = FPlatformTime::Seconds() + 45.0;
+        }
+        Roster->ReturningTeams.Reset();
+        Roster->ReturnRound.Invalidate();
+    }
+}
+
+void AIslandGameMode::InitGameState()
+{
+    Super::InitGameState();
+    AIslandGameState* Round = GetGameState<AIslandGameState>();
+    Round->bRoomLobby = bExpeditionRoom;
+    Round->bRoomBlocked = !ReturningTeams.IsEmpty();
+    if (Round->bRoomBlocked)
+    {
+        Round->RoomNotice = TEXT("正在等待原房间成员返回。");
+    }
+    Round->RoomSettings = Settings;
+    if (!bExpeditionRoom)
+    {
+        Round->RoomSettings.MaxPlayers = IslandRules::Seats;
+        Round->RoomSettings.MaxTeams = IslandRules::TeamCount;
+        Round->RoomSettings.TeamCapacity = 2;
+    }
+}
+
+FString AIslandGameMode::InitNewPlayer(APlayerController* Player, const FUniqueNetIdRepl& UniqueId, const FString& Options, const FString& Portal)
+{
+    const FString Error = Super::InitNewPlayer(Player, UniqueId, Options, Portal);
+    if (bExpeditionRoom && Error.IsEmpty())
+    {
+        auto* State = Player->GetPlayerState<AIslandPlayerState>();
+        FGuid::Parse(UGameplayStatics::ParseOption(Options, TEXT("RoomMember")), State->MemberId);
+        if (!State->MemberId.IsValid())
+        {
+            State->MemberId = FGuid::NewGuid();
+        }
+        if (!ReturningTeams.IsEmpty() && !ReturningTeams.Contains(State->MemberId) && FPlatformTime::Seconds() < ReturnDeadline)
+        {
+            return TEXT("ISLAND_RETURNING");
+        }
+        for (const AVoxelPlayerController* Existing : GetPlayers())
+        {
+            if (Existing->GetPlayerState<AIslandPlayerState>()->MemberId == State->MemberId)
+            {
+                return TEXT("Duplicate room member.");
+            }
+        }
+    }
+    return Error;
+}
+
+void AIslandGameMode::Tick(float DeltaSeconds)
+{
+    if (bExpeditionRoom && GetGameState<AIslandGameState>()->Phase == EIslandPhase::Waiting && GetTerrain() && GetTerrain()->IsReady())
+    {
+        if (!ReturningTeams.IsEmpty() && FPlatformTime::Seconds() >= ReturnDeadline)
+        {
+            ReturningTeams.Reset();
+            GetGameState<AIslandGameState>()->bRoomBlocked = false;
+            GetGameState<AIslandGameState>()->RoomNotice = TEXT("未返回成员的预留席位已开放。");
+            UpdateRoom();
+        }
+        for (AVoxelPlayerController* Player : GetPlayers())
+        {
+            auto* Member = Player->GetPlayerState<AIslandPlayerState>();
+            if (!Member || Member->bMapReady || !Player->InitialTerrainChecksum.IsSet() || !Player->GetHero())
+            {
+                continue;
+            }
+            Member->bMapReady = Player->InitialTerrainChecksum.GetValue() == GetTerrain()->GetInitialChecksum();
+            if (!Member->bMapReady)
+            {
+                Player->InitialTerrainChecksum.Reset();
+                GetGameState<AIslandGameState>()->RoomNotice = TEXT("地图版本不一致，请使用同一版本后重新加入。");
+            }
+            Member->ForceNetUpdate();
+        }
+    }
+    Super::Tick(DeltaSeconds);
+}
+
+bool AIslandGameMode::IsStartRequested() const
+{
+    const auto* Round = GetGameState<AIslandGameState>();
+    return bExpeditionRoom ? Round && Round->Phase == EIslandPhase::Starting
+        && Round->GetServerWorldTimeSeconds() >= Round->StartAtServerTime : Super::IsStartRequested();
+}
+
+bool AIslandGameMode::IsAdmissionLocked() const
+{
+    const auto* Round = GetGameState<AIslandGameState>();
+    return bExpeditionRoom && Round && Round->Phase != EIslandPhase::Waiting;
+}
+
+FString AIslandGameMode::AdmissionError() const
+{
+    return bExpeditionRoom ? (IsAdmissionLocked() ? TEXT("ISLAND_STARTED") : TEXT("ISLAND_FULL")) : Super::AdmissionError();
+}
+
+void AIslandGameMode::RoundSetupFailed(const FString& Error)
+{
+    if (bExpeditionRoom)
+    {
+        GetGameState<AIslandGameState>()->bRoomBlocked = true;
+        CancelStart(Error);
+    }
+}
+
 bool AIslandGameMode::PrepareRound(FString& Error)
 {
-    const int32 Decoys = FMath::Clamp(DecoyChestCount, 0, IslandRules::MaxDecoys);
-    if (Decoys != DecoyChestCount)
+    if (bExpeditionRoom && !PositionCrews())
+    {
+        Error = TEXT("这张地图没有足够的独立出生位，请检查码头布局。");
+        return false;
+    }
+    const int32 Decoys = bExpeditionRoom ? 0 : FMath::Clamp(DecoyChestCount, 0, IslandRules::MaxDecoys);
+    if (!bExpeditionRoom && Decoys != DecoyChestCount)
     {
         UE_LOG(LogTemp, Warning, TEXT("DecoyChestCount %d clamped to %d"), DecoyChestCount, Decoys);
     }
@@ -51,19 +183,60 @@ bool AIslandGameMode::PrepareRound(FString& Error)
         return false;
     }
     FIslandTreasureLayout RandomLayout;
-    if (IslandRules::GenerateLayout(static_cast<int32>(FPlatformTime::Cycles64()), Decoys, Circles, Density, RandomLayout))
+    int32 LayoutSeed = static_cast<int32>(FPlatformTime::Cycles64());
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
+        FParse::Value(FCommandLine::Get(), TEXT("ExpeditionSeed="), LayoutSeed);
+#endif
+    if (IslandRules::GenerateLayout(LayoutSeed, Decoys, Circles, Density, RandomLayout))
     {
         HiddenLayout = MoveTemp(RandomLayout);
     }
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")) && bExpeditionRoom)
+    {
+        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_SEED %d"), LayoutSeed);
+        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")))
+        {
+            // Captured D shelf from crew-eight. Recompute the puzzle's actual line intersection.
+            HiddenLayout.Centers[3] = FVector(1830,-4673,423);
+            FVector Intersection;
+            if (!FMath::SegmentIntersection2D(HiddenLayout.Centers[0], HiddenLayout.Centers[2],
+                HiddenLayout.Centers[1], HiddenLayout.Centers[3], Intersection))
+            {
+                Error = TEXT("Invalid reproduction fixture");
+                return false;
+            }
+            HiddenLayout.Crossing = FVector2D(Intersection);
+            HiddenLayout.Centers[IslandRules::PrizeIndex] = FVector(HiddenLayout.Crossing, Density.SurfaceAt(HiddenLayout.Crossing).Get(0.0) - 700.0);
+            if (!IslandRules::IsValidLayout(HiddenLayout, Circles, Density, &Error)) return false;
+        }
+    }
+#endif
     Exposed.SetNum(HiddenLayout.Num());
+    TeamClues.SetNum(bExpeditionRoom ? Settings.MaxTeams : IslandRules::TeamCount);
     return true;
 }
 
 void AIslandGameMode::PostLogin(APlayerController* NewPlayer)
 {
     Super::PostLogin(NewPlayer);
-    GetGameState<AIslandGameState>()->JoinedCount = GetPlayers().Num();
-    CastChecked<AIslandPlayerController>(NewPlayer)->ClientSetRoundActive(false, FString());
+    auto* Player = CastChecked<AIslandPlayerController>(NewPlayer);
+    auto* Member = Player->GetPlayerState<AIslandPlayerState>();
+    Member->bHost = NewPlayer->IsLocalController();
+    if (bExpeditionRoom)
+    {
+        int32 Preferred = INDEX_NONE;
+        if (ReturningTeams.RemoveAndCopyValue(Member->MemberId, Preferred) && ReturningTeams.IsEmpty())
+        {
+            GetGameState<AIslandGameState>()->bRoomBlocked = false;
+            GetGameState<AIslandGameState>()->RoomNotice.Reset();
+        }
+        Member->Team = AvailableTeam(Preferred, Player);
+        PositionCrews();
+    }
+    Player->ClientSetRoundActive(false, FString());
+    UpdateRoom();
 }
 
 void AIslandGameMode::Logout(AController* Exiting)
@@ -74,7 +247,15 @@ void AIslandGameMode::Logout(AController* Exiting)
         SeaStates.Remove(Player);
     }
     Super::Logout(Exiting);
-    GetGameState<AIslandGameState>()->JoinedCount = GetPlayers().Num();
+    if (bExpeditionRoom && !bRestarting)
+    {
+        CancelStart(TEXT("有成员离开，请重新确认出航。"));
+        if (GetGameState<AIslandGameState>()->Phase == EIslandPhase::Waiting)
+        {
+            PositionCrews();
+        }
+    }
+    UpdateRoom();
     if (IsPlaying())
     {
         UE_LOG(LogTemp, Display, TEXT("ISLAND_GUEST_LEFT players=%d active=1"), GetPlayers().Num());
@@ -94,6 +275,183 @@ AActor* AIslandGameMode::FindDock(int32 Seat) const
     return nullptr;
 }
 
+int32 AIslandGameMode::AvailableTeam(int32 Preferred, const AIslandPlayerController* Except) const
+{
+    TArray<int32> Counts;
+    Counts.Init(0, Settings.MaxTeams);
+    for (const AVoxelPlayerController* Existing : GetPlayers())
+    {
+        const auto* Crew = CastChecked<AIslandPlayerController>(Existing);
+        if (Crew != Except && Counts.IsValidIndex(Crew->GetTeam()))
+        {
+            ++Counts[Crew->GetTeam()];
+        }
+    }
+    if (Preferred != INDEX_NONE)
+    {
+        return Counts.IsValidIndex(Preferred) && Counts[Preferred] < Settings.TeamCapacity ? Preferred : INDEX_NONE;
+    }
+    int32 Best = INDEX_NONE;
+    for (int32 Team = 0; Team < Counts.Num(); ++Team)
+    {
+        if (Counts[Team] < Settings.TeamCapacity && (Best == INDEX_NONE || Counts[Team] < Counts[Best]))
+        {
+            Best = Team;
+        }
+    }
+    return Best;
+}
+
+bool AIslandGameMode::PositionCrews()
+{
+    TArray<int32> Occupied;
+    TMap<int32, int32> NextSlot;
+    TArray<FVector> Starts;
+    for (const AVoxelPlayerController* Player : GetPlayers())
+    {
+        Occupied.AddUnique(Player->GetPlayerState<AIslandPlayerState>()->Team);
+    }
+    for (AVoxelPlayerController* Player : GetPlayers())
+    {
+        const int32 Team = Player->GetPlayerState<AIslandPlayerState>()->Team;
+        FTransform Start;
+        if (AExpeditionDock::FindStart(GetWorld(), Occupied, Team, NextSlot.FindOrAdd(Team)++, Start))
+        {
+            const FVector Location = Start.GetLocation();
+            if (Starts.ContainsByPredicate([&Location](const FVector& Existing)
+                { return FVector::DistSquared(Existing, Location) < FMath::Square(70.0); }))
+            {
+                return false;
+            }
+            Starts.Add(Location);
+            AVoxelCharacter* Hero = Player->GetHero();
+            if (Hero && (!Player->StartTransform.Equals(Start) || FVector::DistSquared(Hero->GetActorLocation(), Start.GetLocation()) > 10000))
+            {
+                Hero->ReturnToStart(Start);
+                Player->ClientResetView(Start.Rotator());
+            }
+            Player->StartTransform = Start;
+        }
+    }
+    return Starts.Num() == GetPlayers().Num();
+}
+
+void AIslandGameMode::UpdateRoom()
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    if (!Round)
+    {
+        return;
+    }
+    Round->JoinedCount = GetPlayers().Num();
+    if (bExpeditionRoom && !bRestarting && !GetWorld()->bIsTearingDown)
+    {
+        Round->RoomSettings = Settings;
+        GetGameInstance()->GetSubsystem<UIslandRoomSession>()->UpdateAdvertisement(Settings, GetPlayers().Num(), IsAdmissionLocked() || !ReturningTeams.IsEmpty());
+    }
+    Round->ForceNetUpdate();
+}
+
+void AIslandGameMode::CancelStart(const FString& Reason)
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    if (Round && Round->Phase == EIslandPhase::Starting)
+    {
+        Round->Phase = EIslandPhase::Waiting;
+        Round->StartAtServerTime = 0.0;
+        Round->RoomNotice = Reason;
+        UpdateRoom();
+    }
+}
+
+void AIslandGameMode::ChooseTeam(AIslandPlayerController& Player, int32 Team)
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    auto* Member = Player.GetPlayerState<AIslandPlayerState>();
+    if (!bExpeditionRoom || !Member || Round->Phase != EIslandPhase::Waiting || Team < 0 || Member->Team == Team)
+    {
+        return;
+    }
+    if (AvailableTeam(Team, &Player) == INDEX_NONE)
+    {
+        Player.ClientEditRejected(TEXT("该队已满或已关闭。"));
+        return;
+    }
+    Member->Team = Team;
+    Member->bRoomReady = false;
+    Member->ForceNetUpdate();
+    PositionCrews();
+}
+
+void AIslandGameMode::SetRoomReady(AIslandPlayerController& Player, bool bReady)
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    auto* Member = Player.GetPlayerState<AIslandPlayerState>();
+    if (!bExpeditionRoom || !Member || Member->bHost || (Round->Phase != EIslandPhase::Waiting
+        && !(Round->Phase == EIslandPhase::Starting && !bReady)))
+    {
+        return;
+    }
+    Member->bRoomReady = bReady;
+    Member->ForceNetUpdate();
+    if (!bReady)
+    {
+        CancelStart(TEXT("有成员取消准备。"));
+    }
+}
+
+void AIslandGameMode::StartExpedition(AIslandPlayerController& Player)
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    if (Player.IsLocalController() && Round->CanLaunch())
+    {
+        Round->Phase = EIslandPhase::Starting;
+        Round->StartAtServerTime = Round->GetServerWorldTimeSeconds() + 3.0;
+        Round->RoomNotice.Reset();
+        UpdateRoom();
+    }
+}
+
+void AIslandGameMode::ConfigureRoom(AIslandPlayerController& Player, const FIslandRoomSettings& NewSettings)
+{
+    if (!bExpeditionRoom || !Player.IsLocalController() || GetGameState<AIslandGameState>()->Phase != EIslandPhase::Waiting)
+    {
+        return;
+    }
+    if (!NewSettings.IsValid() || NewSettings.MaxPlayers < GetPlayers().Num())
+    {
+        Player.ClientEditRejected(TEXT("房间设置必须能容纳当前所有玩家。"));
+        return;
+    }
+    TArray<int32> Counts;
+    Counts.Init(0, NewSettings.MaxTeams);
+    for (const AVoxelPlayerController* Existing : GetPlayers())
+    {
+        const int32 Team = Existing->GetPlayerState<AIslandPlayerState>()->Team;
+        if (!Counts.IsValidIndex(Team) || ++Counts[Team] > NewSettings.TeamCapacity)
+        {
+            Player.ClientEditRejected(TEXT("请先调整队伍，当前席位超出新设置。"));
+            return;
+        }
+    }
+    const bool bSeatsChanged = Settings.MaxPlayers != NewSettings.MaxPlayers || Settings.MaxTeams != NewSettings.MaxTeams
+        || Settings.TeamCapacity != NewSettings.TeamCapacity;
+    Settings = NewSettings;
+    Settings.RoomName.TrimStartAndEndInline();
+    GetGameInstance()->GetSubsystem<UIslandRoomSession>()->HostSettings = Settings;
+    if (bSeatsChanged)
+    {
+        for (AVoxelPlayerController* Existing : GetPlayers())
+        {
+            auto* Member = Existing->GetPlayerState<AIslandPlayerState>();
+            Member->bRoomReady = false;
+            Member->ForceNetUpdate();
+        }
+        GetGameState<AIslandGameState>()->RoomNotice = TEXT("房间设置已更新，请重新准备。");
+    }
+    UpdateRoom();
+}
+
 AActor* AIslandGameMode::ChoosePlayerStart_Implementation(AController* Player)
 {
     const int32 ExistingSeat = GetPlayers().IndexOfByKey(Cast<AVoxelPlayerController>(Player));
@@ -107,7 +465,22 @@ AActor* AIslandGameMode::ChoosePlayerStart_Implementation(AController* Player)
 
 void AIslandGameMode::OnRoundStarted()
 {
-    GetGameState<AIslandGameState>()->Phase = EIslandPhase::Hunting;
+    auto* Round = GetGameState<AIslandGameState>();
+    Round->Phase = EIslandPhase::Hunting;
+    if (bExpeditionRoom)
+    {
+        for (const AVoxelPlayerController* Player : GetPlayers())
+        {
+            Round->LaunchedTeams.AddUnique(Player->GetPlayerState<AIslandPlayerState>()->Team);
+        }
+        Round->LaunchedTeams.Sort();
+        Round->ActiveTeams = Round->LaunchedTeams.Num();
+        PositionCrews();
+        UpdateRoom();
+        return;
+    }
+    Round->LaunchedTeams = {0, 1, 2};
+    Round->ActiveTeams = IslandRules::TeamCount;
     for (int32 Seat = 0; Seat < GetPlayers().Num(); ++Seat)
     {
         auto& Player = *GetPlayers()[Seat];
@@ -179,35 +552,14 @@ bool AIslandGameMode::CanPlayerAct(const AVoxelPlayerController& Player) const
 
 int32 AIslandGameMode::FindReachableChest(const AIslandPlayerController& Player) const
 {
-    const AVoxelCharacter* Hero = Player.GetHero();
-    const FVector Start = Hero->GetAimOrigin();
-    FCollisionQueryParams Params(SCENE_QUERY_STAT(IslandChest), false, Hero);
-    double Nearest = FMath::Square(IslandRules::OpenReach);
-    int32 Selected = INDEX_NONE;
-    for (int32 Index = 0; Index < Exposed.Num(); ++Index)
-    {
-        const AIslandChest* Chest = Exposed[Index];
-        if (!Chest)
-        {
-            continue;
-        }
-        const FVector Target = Chest->GetActorLocation();
-        const double Distance = FVector::DistSquared(Start, Target);
-        FHitResult Hit;
-        if (Distance <= Nearest && GetWorld()->LineTraceSingleByChannel(Hit, Start, Target, ECC_Visibility, Params)
-            && Hit.GetActor() == Chest)
-        {
-            Selected = Index;
-            Nearest = Distance;
-        }
-    }
-    return Selected;
+    const AIslandChest* Chest = Player.GetReachableChest();
+    return Chest ? Exposed.IndexOfByKey(Chest) : INDEX_NONE;
 }
 
 void AIslandGameMode::TryOpen(AIslandPlayerController& Player)
 {
     const int32 Team = Player.GetTeam();
-    if (!CanPlayerAct(Player) || Team < 0 || Team >= IslandRules::TeamCount)
+    if (!CanPlayerAct(Player) || !TeamClues.IsValidIndex(Team))
     {
         return;
     }
@@ -280,6 +632,7 @@ void AIslandGameMode::PublishWinner(int32 Team)
     Round->Phase = EIslandPhase::Finished;
     Round->ForceNetUpdate();
     FinishRound(FString());
+    UpdateRoom();
     UE_LOG(LogTemp, Display, TEXT("ISLAND_WINNER team=%d"), Team);
 }
 
@@ -289,7 +642,34 @@ void AIslandGameMode::RestartIsland()
     {
         bRestarting = true;
         const FString Level = UWorld::RemovePIEPrefix(GetWorld()->GetOutermost()->GetName());
-        GetWorld()->ServerTravel(Level + TEXT("?listen"));
+        FString URL = Level + TEXT("?listen");
+        if (bExpeditionRoom)
+        {
+            auto* Round = GetGameState<AIslandGameState>();
+            Round->RoomNotice = TEXT("正在返回房间…");
+            Round->bRoomBlocked = true;
+            Round->ForceNetUpdate();
+            auto* Roster = GetGameInstance()->GetSubsystem<UIslandRoomRoster>();
+            Roster->ReturningTeams.Reset();
+            for (const AVoxelPlayerController* Player : GetPlayers())
+            {
+                const auto* Member = Player->GetPlayerState<AIslandPlayerState>();
+                Roster->ReturningTeams.Add(Member->MemberId, Member->Team);
+            }
+            Roster->ReturnRound = FGuid::NewGuid();
+            URL += TEXT("?RoomRound=") + Roster->ReturnRound.ToString();
+        }
+        if (!GetWorld()->ServerTravel(URL))
+        {
+            bRestarting = false;
+            if (bExpeditionRoom)
+            {
+                auto* Round = GetGameState<AIslandGameState>();
+                Round->bRoomBlocked = false;
+                Round->RoomNotice = TEXT("返回房间失败，请重试。");
+                Round->ForceNetUpdate();
+            }
+        }
     }
 }
 
@@ -302,6 +682,7 @@ FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player)
     const double HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
     const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), HalfHeight);
     const FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandSafeReturn), false, Hero);
+    const FCollisionResponseParams Responses(Capsule->GetCollisionResponseToChannels());
     const auto FindFloor = [&](const FVector& Start, double Reach) -> TOptional<FTransform>
     {
         FHitResult Hit;
@@ -313,7 +694,7 @@ FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player)
             return {};
         }
         const FVector Location = Hit.ImpactPoint + FVector(0, 0, HalfHeight + 4.0);
-        if (GetWorld()->OverlapBlockingTestByProfile(Location, FQuat::Identity, Capsule->GetCollisionProfileName(), Shape, Query))
+        if (GetWorld()->OverlapBlockingTestByChannel(Location, FQuat::Identity, Capsule->GetCollisionObjectType(), Shape, Query, Responses))
         {
             return {};
         }
@@ -323,8 +704,8 @@ FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player)
     if (const TOptional<FTransform> Result = FindFloor(Original.GetLocation(), HalfHeight + 80.0))
     {
         if (Original.GetLocation().Z >= Result->GetLocation().Z - 4.0
-            && !GetWorld()->OverlapBlockingTestByProfile(Original.GetLocation(), FQuat::Identity,
-                Capsule->GetCollisionProfileName(), Shape, Query))
+            && !GetWorld()->OverlapBlockingTestByChannel(Original.GetLocation(), FQuat::Identity,
+                Capsule->GetCollisionObjectType(), Shape, Query, Responses))
         {
             return Original;
         }
@@ -344,9 +725,11 @@ FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player)
         }
     }
 
-    for (int32 X = -2100; X <= 2100; X += 300)
+    const int32 InlandExtent = FMath::Max(0, GetTerrain()->GetShoreExtent() - 200);
+    const int32 RecoveryStep = FMath::Max(300, FMath::DivideAndRoundUp(2 * InlandExtent, 14));
+    for (int32 X = -InlandExtent; X <= InlandExtent; X += RecoveryStep)
     {
-        for (int32 Y = -2100; Y <= 2100; Y += 300)
+        for (int32 Y = -InlandExtent; Y <= InlandExtent; Y += RecoveryStep)
         {
             if (const TOptional<FTransform> Result = FindFloor(FVector(X, Y, 1000), 1100.0))
             {
@@ -360,7 +743,7 @@ FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player)
     {
         Outward = FVector::ForwardVector;
     }
-    const FVector Escape = Outward * FMath::Max(Original.GetLocation().Size2D() + 650.0, 3100.0);
+    const FVector Escape = Outward * FMath::Max(Original.GetLocation().Size2D() + 650.0, GetTerrain()->GetShoreExtent() + 800.0);
     if (const TOptional<FTransform> Result = FindFloor(Escape + FVector(0, 0, 500), 550))
     {
         return Result.GetValue();
@@ -423,7 +806,7 @@ void AIslandGameMode::UpdateEnvironment()
             }
             continue;
         }
-        if (IslandRules::InSea(Position + FVector(0, 0, 80.0)))
+        if (GetTerrain()->IsInSea(Position + FVector(0, 0, 80.0)))
         {
             if (FSeaState* Sea = SeaStates.Find(&Player))
             {
@@ -644,8 +1027,9 @@ void AIslandGameMode::ReturnFromParty()
             }
             const UCapsuleComponent* Capsule = Hero->GetCapsuleComponent();
             const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight());
-            const bool bBlocked = GetWorld()->OverlapBlockingTestByProfile(Hero->GetActorLocation(),
-                Hero->GetActorQuat(), Capsule->GetCollisionProfileName(), Shape, FCollisionQueryParams(SCENE_QUERY_STAT(IslandPartyReturn), false, Hero));
+            const bool bBlocked = GetWorld()->OverlapBlockingTestByChannel(Hero->GetActorLocation(),
+                Hero->GetActorQuat(), Capsule->GetCollisionObjectType(), Shape, FCollisionQueryParams(SCENE_QUERY_STAT(IslandPartyReturn), false, Hero),
+                FCollisionResponseParams(Capsule->GetCollisionResponseToChannels()));
             if (Entry.bReturnToDock || bBlocked)
             {
                 ReturnToSafeGround(Player);

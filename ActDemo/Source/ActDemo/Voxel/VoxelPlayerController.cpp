@@ -33,8 +33,12 @@ void AVoxelPlayerController::BeginPlay()
     {
         return;
     }
-    SetInputMode(FInputModeGameOnly());
-    bShowMouseCursor = false;
+    // A front-end HUD can already own focus when the controller receives BeginPlay.
+    if (bVoxelInputEnabled)
+    {
+        SetInputMode(FInputModeGameOnly());
+        bShowMouseCursor = false;
+    }
     if (PlayerCameraManager)
     {
         PlayerCameraManager->ViewPitchMin = -82.f;
@@ -52,10 +56,21 @@ void AVoxelPlayerController::SetVoxelInputEnabled(bool bEnabled)
     bVoxelInputEnabled = bEnabled;
     if (!bEnabled)
     {
-        RecoverStartedAt = -1.0;
+        StopRecover();
+        if (IsLocalController()) StopClimb();
         GetWorldTimerManager().ClearTimer(RecoverTimer);
     }
     UpdateVoxelMapping();
+}
+
+void AVoxelPlayerController::SetIslandUIInput(bool bOpen)
+{
+    SetVoxelInputEnabled(!bOpen);
+    if (auto* Subsystem=ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()); Subsystem && InputConfig && InputConfig->Menu)
+    {
+        if (bOpen) Subsystem->AddMappingContext(InputConfig->Menu, 10);
+        else Subsystem->RemoveMappingContext(InputConfig->Menu);
+    }
 }
 
 void AVoxelPlayerController::UpdateVoxelMapping()
@@ -194,7 +209,7 @@ void AVoxelPlayerController::StopClimb() { ServerSetClimb(false); }
 
 void AVoxelPlayerController::StartRecover()
 {
-    if (bVoxelInputEnabled && GetHero() && RecoverStartedAt < 0.0)
+    if (bPlaying && bVoxelInputEnabled && GetHero() && RecoverStartedAt < 0.0)
     {
         RecoverStartedAt = FPlatformTime::Seconds();
         ServerSetRecover(true);
@@ -208,6 +223,22 @@ void AVoxelPlayerController::StopRecover()
         RecoverStartedAt = -1.0;
         ServerSetRecover(false);
     }
+}
+
+const FString& AVoxelPlayerController::GetDisplayNotice() const
+{
+    static const TMap<FString,FString> Messages{
+        {TEXT("Aim at rock within reach"),TEXT("请靠近并瞄准岩面")},
+        {TEXT("Cannot fill over a chest"),TEXT("宝箱周围不能回填")},
+        {TEXT("Someone is in the way"),TEXT("有玩家站在回填区域")},
+        {TEXT("Someone moved into the fill area"),TEXT("有玩家进入回填区域，本次回填已取消")},
+        {TEXT("No rock changed"),TEXT("这里没有可改变的岩面")},
+        {TEXT("Reach an exposed chest"),TEXT("请靠近已露出且无遮挡的箱子")},
+        {TEXT("Collect all four clues to open the prize"),TEXT("集齐四条线索才能打开宝藏")},
+        {TEXT("Your crew already has this clue"),TEXT("本队已经取得这条线索")}
+    };
+    const FString* Translation=Messages.Find(Notice);
+    return Translation ? *Translation : Notice;
 }
 
 bool AVoxelPlayerController::IsNoticeVisible() const
@@ -261,13 +292,14 @@ void AVoxelPlayerController::ServerSetRecover_Implementation(bool bEnabled)
     {
         Timers.ClearTimer(RecoverTimer);
     }
-    else if (bVoxelInputEnabled && GetHero() && !Timers.IsTimerActive(RecoverTimer))
+    else if (const auto* Mode = GetWorld()->GetAuthGameMode<AVoxelGameMode>();
+        Mode && Mode->CanPlayerAct(*this) && !Timers.IsTimerActive(RecoverTimer))
     {
         Timers.SetTimer(RecoverTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
         {
-            if (AVoxelGameMode* Mode = GetWorld()->GetAuthGameMode<AVoxelGameMode>())
+            if (auto* ActiveMode = GetWorld()->GetAuthGameMode<AVoxelGameMode>(); ActiveMode && ActiveMode->CanPlayerAct(*this))
             {
-                Mode->RecoverPlayer(*this);
+                ActiveMode->RecoverPlayer(*this);
             }
         }), RecoverHoldSeconds, false);
     }
@@ -315,34 +347,34 @@ void AVoxelPlayerController::ClientReceiveEdit_Implementation(const FVoxelEdit& 
 
 void AVoxelPlayerController::ApplyNextEdit()
 {
-    if (Incoming.IsEmpty() || !Terrain.IsValid() || Terrain->IsBusy())
+    if (bApplyingEdits) return;
+    TGuardValue<bool> Guard(bApplyingEdits, true);
+    while (!Incoming.IsEmpty() && Terrain.IsValid() && !Terrain->IsBusy())
     {
-        return;
-    }
-
-    const FIncomingEdit Next = Incoming[0];
-    Incoming.RemoveAt(0, 1, EAllowShrinking::No);
-    const TWeakObjectPtr<AVoxelPlayerController> WeakPlayer(this);
-    if (!Terrain->BuildEdit(Next.Edit, {}, [WeakPlayer, Next](bool bCommitted)
-    {
-        if (AVoxelPlayerController* Player = WeakPlayer.Get())
+        const FIncomingEdit Next = Incoming[0];
+        Incoming.RemoveAt(0, 1, EAllowShrinking::No);
+        const TWeakObjectPtr<AVoxelPlayerController> WeakPlayer(this);
+        if (!Terrain->BuildEdit(Next.Edit, {}, [WeakPlayer, Next](bool bCommitted)
         {
-            if (bCommitted)
+            if (AVoxelPlayerController* Player = WeakPlayer.Get())
             {
-                UE_LOG(LogTemp, Display, TEXT("VOXEL_SAMPLE side=client seq=%u action=%u ms=%.3f"), Next.Edit.Sequence,
-                    static_cast<uint32>(Next.Edit.Action), (FPlatformTime::Seconds() - Next.ReceivedAt) * 1000.0);
-                // Reliable RPCs can arrive in a burst after retransmission. Start the next ordered build
-                // as soon as the previous collision is committed, without waiting for PlayerTick.
-                Player->ApplyNextEdit();
+                if (bCommitted)
+                {
+                    UE_LOG(LogTemp, Display, TEXT("VOXEL_SAMPLE side=client seq=%u action=%u ms=%.3f"), Next.Edit.Sequence,
+                        static_cast<uint32>(Next.Edit.Action), (FPlatformTime::Seconds() - Next.ReceivedAt) * 1000.0);
+                    // Reliable RPCs can arrive in a burst after retransmission. Start the next ordered build
+                    // as soon as the previous collision is committed, without waiting for PlayerTick.
+                    Player->ApplyNextEdit();
+                }
+                else
+                {
+                    Player->TerrainProtocolError();
+                }
             }
-            else
-            {
-                Player->TerrainProtocolError();
-            }
+        }))
+        {
+            TerrainProtocolError();
         }
-    }))
-    {
-        TerrainProtocolError();
     }
 }
 
@@ -350,6 +382,6 @@ void AVoxelPlayerController::TerrainProtocolError()
 {
     Incoming.Reset();
     bPlaying = false;
-    Notice = TEXT("Terrain sync failed. Reopen the room with the same build.");
+    Notice = TEXT("地形同步失败，请使用同一版本重新加入房间");
     UE_LOG(LogTemp, Error, TEXT("VOXEL_PROTOCOL_ERROR received=%u"), LastReceivedSequence);
 }

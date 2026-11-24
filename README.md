@@ -1,20 +1,21 @@
 # ActDemo · 体素海岛寻宝
 
-UE 5.8 项目，入口为 `ActDemo/ActDemo.uproject`，默认打开 `/Game/TreasureIsland/L_TreasureIsland`。房主可启动局域网 2v2v2 对局，六名玩家分队挖掘地形、收集线索并抢夺大奖。
+UE 5.8 项目，入口为 `ActDemo/ActDemo.uproject`。游戏从白模码头启动。在同一局域网内创建或搜索房间，1–8 名玩家自由组队，在远征岛上挖掘、收集线索、争夺大奖。单人可以直接开局。
 
-- [海岛寻宝](Docs/TreasureIsland.md)包含玩法、Mac 开房加入、打包和六进程复测命令。
+- [远征岛与房间](Docs/Expedition.md)包含新玩家流程、设计分工和地图调试入口。
+- [原六人寻宝场](Docs/TreasureIsland.md)包含经典 2v2v2、体素编辑器、Mac 打包和六进程回归命令。
 - [双人可挖掘地形原型](Docs/VoxelPlayground.md)包含 `L_VoxelPlayground` 地图、操作和双进程复测命令。
 
 ## Mac 构建与启动
 
-安装 Unreal Engine 5.8 和 Xcode，运行以下命令编译编辑器目标，再从源码启动海岛房主。也可打开工程，在编辑器中选择关卡和 PIE 联机设置。
+安装 Unreal Engine 5.8 和 Xcode，运行以下命令编译编辑器目标，再从源码启动游戏前台。也可打开工程，在编辑器中选择关卡和 PIE 联机设置。
 
 ```sh
 bash Scripts/actdemo.sh build
 bash Scripts/actdemo.sh play
 ```
 
-引擎路径可通过 `UE_ROOT` 覆盖。`island-package` 和 `voxel-package` 都会 Cook 两张联机地图，分别归档到对应的 `Builds` 目录。
+引擎路径可通过 `UE_ROOT` 覆盖。`island-package` 将前台、远征岛及原型关卡一同 Cook，归档到 `Builds/TreasureIsland/Mac/ActDemo.app`。在 Finder 里双击即可进入开始页面。
 
 ## Git 与资源协作
 

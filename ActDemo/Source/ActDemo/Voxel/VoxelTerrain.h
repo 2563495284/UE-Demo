@@ -7,6 +7,7 @@
 
 class UProceduralMeshComponent;
 class UStaticMesh;
+class UInstancedStaticMeshComponent;
 struct FHitResult;
 struct FVoxelMeshBuild;
 
@@ -18,6 +19,9 @@ class ACTDEMO_API AVoxelTerrain : public AActor
 public:
     AVoxelTerrain();
     static AVoxelTerrain* Find(UWorld* World);
+    int32 GetShoreExtent() const { return VoxelPlayground::ShoreExtent(Layout); }
+    TArray<FVector2D> GetCoastOutline() const { return VoxelPlayground::CoastOutline(Layout); }
+    bool IsInSea(const FVector& Head) const { return Head.Z < 0 && VoxelPlayground::ShoreDistance(Layout, FMath::RoundToInt(Head.X), FMath::RoundToInt(Head.Y)) >= 0; }
 
     bool IsReady() const { return bReady; }
     bool IsBusy() const { return bBuilding; }
@@ -36,6 +40,7 @@ public:
     bool BuildEdit(const FVoxelEdit& Edit, TFunction<bool()> CanCommit, TFunction<void(bool)> Completion);
 
 #if WITH_EDITOR
+    void BakeExpeditionSurface();
     void RebuildEditorPreview();
     void ClearEditorPreview();
     bool TraceEditorPreview(const FVector& Start, const FVector& End, FHitResult& Hit) const;
@@ -45,6 +50,7 @@ public:
 #endif
 
 protected:
+    void PostLoad() override;
     void BeginPlay() override;
     void Tick(float DeltaSeconds) override;
 
@@ -60,25 +66,34 @@ private:
     UPROPERTY() TArray<FIslandSearchCircle> SearchCircles;
 
 #if WITH_EDITORONLY_DATA
+    UPROPERTY(Transient, DuplicateTransient) TArray<TObjectPtr<UProceduralMeshComponent>> PreviewTiles;
     UPROPERTY(Transient, DuplicateTransient) TArray<TObjectPtr<UProceduralMeshComponent>> PreviewChunks;
 #endif
 #if WITH_EDITOR
     void RefreshPreviewChunk(int32 Index);
+    void UpdatePreviewTile(int32 Tile);
     TSharedPtr<FVoxelDensity, ESPMode::ThreadSafe> PreviewDensity;
 #endif
 
     UPROPERTY() TArray<TObjectPtr<UProceduralMeshComponent>> MeshChunks;
+    UPROPERTY() TArray<TObjectPtr<UProceduralMeshComponent>> BakedTiles;
+    UProceduralMeshComponent* MakeSurfaceComponent(bool bPersistent);
     UPROPERTY() TObjectPtr<UStaticMesh> FragmentMesh;
+    UPROPERTY() TObjectPtr<UMaterialInterface> ExpeditionRockMaterial;
 
     struct FFragment
     {
-        TWeakObjectPtr<UStaticMeshComponent> Mesh;
+        FTransform Transform;
         FVector Velocity;
         float Age = 0.f;
     };
+    UPROPERTY(Transient) TObjectPtr<UInstancedStaticMeshComponent> Debris;
     TArray<FFragment> Fragments;
+    TArray<FTransform> DebrisTransforms;
     TSharedPtr<FVoxelDensity, ESPMode::ThreadSafe> Density;
     uint32 AppliedSequence = 0;
+    uint64 ImmediateFrame = MAX_uint64;
+    double ImmediateMs = 0.;
     bool bReady = false;
     bool bBuilding = false;
 };
