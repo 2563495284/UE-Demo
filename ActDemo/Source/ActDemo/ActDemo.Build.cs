@@ -8,9 +8,9 @@ public class ActDemo : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "GameplayAbilities", "GameplayTags", "GameplayTasks", "AIModule", "NavigationSystem", "StateTreeModule", "GameplayStateTreeModule", "UMG", "Niagara" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore", "GeometryCore", "ProceduralMeshComponent" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "GeometryCore", "ProceduralMeshComponent" });
 		PublicIncludePaths.Add(ModuleDirectory);
 
 		// Uncomment if you are using Slate UI

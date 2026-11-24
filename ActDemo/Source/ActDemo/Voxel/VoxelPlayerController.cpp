@@ -1,13 +1,13 @@
 #include "Voxel/VoxelPlayerController.h"
 
 #include "Camera/PlayerCameraManager.h"
-#include "Combat/ActCombatTypes.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelGameMode.h"
+#include "Voxel/VoxelInputConfig.h"
 #include "Voxel/VoxelTerrain.h"
 
 namespace

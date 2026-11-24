@@ -47,5 +47,3 @@ python3 Scripts/voxel_qa.py --render --mode normal --output ActDemo/Saved/VoxelQ
 | 普通连接 · Metal | 19.03 ms | 35.98 ms | 19.89 ms |
 
 两列碰撞耗时从各自进程的消息入口起算，不含消息在网络中的传输时间。原始日志和 JSON 位于 `ActDemo/Saved/VoxelQA/PackagedFinal` 和 `ActDemo/Saved/VoxelQA/PackagedMetalFinal`，Metal 目录中保留了砸穿岩壁后的截图。
-
-同一归档包中的 Ashen Court 单机关卡通过原有 43 项功能回归。

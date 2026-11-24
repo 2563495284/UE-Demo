@@ -10,6 +10,8 @@
 # IDE caches and generated solutions/projects
 /ActDemo/.vs/
 /ActDemo/.idea/
+/ActDemo/.vscode/
+/ActDemo/ActDemo.code-workspace
 /ActDemo/*.sln
 /ActDemo/*.slnx
 /ActDemo/*.suo
