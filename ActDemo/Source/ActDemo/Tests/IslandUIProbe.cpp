@@ -1,5 +1,6 @@
 #include "Tests/IslandUIProbe.h"
 #if !UE_BUILD_SHIPPING
+#include "Island/ExpeditionDock.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandRoomPanel.h"
 #include "Island/IslandRoomSession.h"
@@ -207,24 +208,21 @@ namespace
         if (Stage>=4) return true;
         auto* Hero=Cast<AVoxelCharacter>(PC.GetPawn());
         if (!Hero) return false;
-        // The first replication burst can include an opposing player as they spawn,
-        // then cull them on the next frame. Move both pawns well inside 150 m.
-        static bool WalkingInland=false;
+        // The two-team spawn docks are outside pawn relevancy. Set up this camera-only
+        // check at adjacent berths so both clients continuously observe the other pawn.
+        static bool bAtOtherDock=false;
         const auto* State=PC.GetWorld()->GetGameState<AIslandGameState>();
-        if (Stage==0 && State && State->ActiveTeams>1 && Hero->GetActorLocation().Size2D()>6700.)
+        if (PC.HasAuthority() && !bAtOtherDock && State && State->LaunchedTeams.Num()==2)
         {
-            if (!WalkingInland)
-            {
-                PC.SetControlRotation((-Hero->GetActorLocation().GetSafeNormal2D()).Rotation());
-                Key(PC,EKeys::W,true);
-                WalkingInland=true;
-            }
-            return false;
-        }
-        if (WalkingInland)
-        {
-            Key(PC,EKeys::W,false);
-            WalkingInland=false;
+            const int32 FirstTeam=State->LaunchedTeams[0];
+            const int32 GuestTeam=FirstTeam==PC.GetTeam() ? State->LaunchedTeams[1] : FirstTeam;
+            FTransform Berth;
+            if (!AExpeditionDock::FindStart(PC.GetWorld(),State->LaunchedTeams,GuestTeam,1,Berth)
+                || !Hero->TeleportTo(Berth.GetLocation(),Berth.Rotator())) return false;
+            PC.SetControlRotation(Berth.Rotator());
+            Hero->ForceNetUpdate();
+            bAtOtherDock=true;
+            UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_VIEW_SITE opposing_team=%d"),GuestTeam);
             return false;
         }
         int32 Body=0, Paws=0, Others=0;
