@@ -20,6 +20,7 @@ public:
     UFUNCTION(Client, Reliable) void ClientOpenChest();
     UFUNCTION(Client, Reliable) void ClientStress(int32 Stage);
     UFUNCTION(Client, Reliable) void ClientShowChart();
+    UFUNCTION(Client, Reliable) void ClientStrike(FVector Target);
     UFUNCTION(Client, Reliable) void ClientPartySpace(bool bPressed, bool bCheckJump);
     UFUNCTION(Server, Reliable) void ServerMeasure(int32 Epoch, FIslandClues Clues, int32 Boxes, int32 Winner,
         uint32 Sequence, const FString& Digest);
@@ -46,7 +47,7 @@ public:
     void RequestStress(int32 Seat, int32 Stage);
 
 private:
-    enum class EStep : uint8 { Waiting, Inspect, Dig, Open, ExpectDenied, Drown, StressShared, StressApart, Drain, Race, Restart, PartyOpen, PartyPlay, PartyJump, PartyDone, Done };
+    enum class EStep : uint8 { Waiting, Inspect, Dig, Open, ExpectDenied, Drown, BreakTree, BreakDock, ReturnAfterBreak, StressShared, StressApart, Drain, Race, Restart, PartyOpen, PartyPlay, PartyJump, PartyDone, Done };
 
     void Advance(EStep Step);
     void Require(bool bSuccess, const TCHAR* Message);

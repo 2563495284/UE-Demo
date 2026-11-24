@@ -19,6 +19,16 @@ struct FVoxelMeshBuild
 
 namespace
 {
+    TSharedPtr<FVoxelDensity, ESPMode::ThreadSafe> BuildDensity(EVoxelLayout Layout, TConstArrayView<FVoxelBrushStamp> Stamps)
+    {
+        auto Result = MakeShared<FVoxelDensity, ESPMode::ThreadSafe>(Layout);
+        for (const FVoxelBrushStamp& Stamp : Stamps)
+        {
+            Result->Apply(Result->PrepareBrush(Stamp));
+        }
+        return Result;
+    }
+
     struct FChunkSamples
     {
         static constexpr int32 Width = VoxelPlayground::CellsPerChunk + 5;
@@ -130,6 +140,7 @@ namespace
 }
 
 AVoxelTerrain::AVoxelTerrain()
+    : SearchCircles(IslandRules::DefaultSearchCircles())
 {
     PrimaryActorTick.bCanEverTick = true;
     PrimaryActorTick.bStartWithTickEnabled = false;
@@ -171,6 +182,120 @@ AVoxelTerrain* AVoxelTerrain::Find(UWorld* World)
     return Terrain ? *Terrain : nullptr;
 }
 
+uint32 AVoxelTerrain::GetInitialChecksum() const
+{
+    uint32 Hash = GetChecksum();
+    if (Layout == EVoxelLayout::Island)
+    {
+        for (const FIslandSearchCircle& Circle : SearchCircles)
+        {
+            Hash = (Hash ^ static_cast<uint32>(Circle.Center.X)) * 16777619u;
+            Hash = (Hash ^ static_cast<uint32>(Circle.Center.Y)) * 16777619u;
+            Hash = (Hash ^ static_cast<uint32>(Circle.Radius)) * 16777619u;
+        }
+    }
+    return Hash;
+}
+
+#if WITH_EDITOR
+void AVoxelTerrain::RebuildEditorPreview()
+{
+    ClearEditorPreview();
+    PreviewDensity = BuildDensity(Layout, AuthoredStamps);
+    PreviewChunks.SetNum(PreviewDensity->Grid.NumChunks());
+    for (int32 Index = 0; Index < PreviewChunks.Num(); ++Index)
+    {
+        RefreshPreviewChunk(Index);
+    }
+}
+
+void AVoxelTerrain::ClearEditorPreview()
+{
+    for (UProceduralMeshComponent* Chunk : PreviewChunks)
+    {
+        if (Chunk)
+        {
+            Chunk->DestroyComponent();
+        }
+    }
+    PreviewChunks.Reset();
+    PreviewDensity.Reset();
+}
+
+void AVoxelTerrain::RefreshPreviewChunk(int32 Index)
+{
+    const FProcMeshSection Section = MeshChunk(*PreviewDensity, Index, nullptr);
+    UProceduralMeshComponent* Chunk = PreviewChunks[Index];
+    if (!Section.bEnableCollision)
+    {
+        if (Chunk)
+        {
+            Chunk->ClearAllMeshSections();
+        }
+        return;
+    }
+    if (!Chunk)
+    {
+        Chunk = NewObject<UProceduralMeshComponent>(this, NAME_None, RF_Transient | RF_DuplicateTransient);
+        ConfigureChunk(*Chunk);
+        Chunk->SetHiddenInGame(true);
+        Chunk->RegisterComponent();
+        PreviewChunks[Index] = Chunk;
+    }
+    Chunk->SetProcMeshSection(0, Section);
+}
+
+bool AVoxelTerrain::TraceEditorPreview(const FVector& Start, const FVector& End, FHitResult& Hit) const
+{
+    bool bFound = false;
+    const FCollisionQueryParams Query(SCENE_QUERY_STAT(VoxelEditor), true);
+    for (UProceduralMeshComponent* Chunk : PreviewChunks)
+    {
+        if (!Chunk || Chunk->GetNumSections() == 0 || !FMath::LineBoxIntersection(Chunk->Bounds.GetBox(), Start, End, End - Start))
+        {
+            continue;
+        }
+        FHitResult Candidate;
+        if (Chunk->LineTraceComponent(Candidate, Start, End, Query) && (!bFound || Candidate.Time < Hit.Time))
+        {
+            Hit = Candidate;
+            bFound = true;
+        }
+    }
+    return bFound;
+}
+
+bool AVoxelTerrain::ApplyEditorStamps(TConstArrayView<FVoxelBrushStamp> Stamps)
+{
+    if (!PreviewDensity)
+    {
+        return false;
+    }
+    TSet<int32> DirtyChunks;
+    for (const FVoxelBrushStamp& Stamp : Stamps)
+    {
+        const FVoxelDensityPatch Patch = PreviewDensity->PrepareBrush(Stamp);
+        if (!Patch.Samples.IsEmpty())
+        {
+            PreviewDensity->Apply(Patch);
+            AuthoredStamps.Add(Stamp);
+            DirtyChunks.Append(Patch.Chunks);
+        }
+    }
+    for (int32 Index : DirtyChunks)
+    {
+        RefreshPreviewChunk(Index);
+    }
+    return !DirtyChunks.IsEmpty();
+}
+
+void AVoxelTerrain::SetSearchCircle(int32 Index, FIslandSearchCircle Circle)
+{
+    SearchCircles[Index] = Circle;
+    MarkPackageDirty();
+}
+#endif
+
 void AVoxelTerrain::BeginPlay()
 {
     Super::BeginPlay();
@@ -204,7 +329,8 @@ void AVoxelTerrain::StartBuild(FVoxelDensityPatch Patch, TOptional<FVoxelEdit> E
 {
     bBuilding = true;
     const TWeakObjectPtr<AVoxelTerrain> WeakTerrain(this);
-    Async(EAsyncExecution::ThreadPool, [WeakTerrain, Layout = Layout, Source = Density, Edit, Patch = MoveTemp(Patch),
+    TArray<FVoxelBrushStamp> Stamps = Density ? TArray<FVoxelBrushStamp>() : AuthoredStamps;
+    Async(EAsyncExecution::ThreadPool, [WeakTerrain, Layout = Layout, Source = Density, Stamps = MoveTemp(Stamps), Edit, Patch = MoveTemp(Patch),
         CanCommit = MoveTemp(CanCommit), Completion = MoveTemp(Completion)]() mutable
     {
         FVoxelMeshBuild Build;
@@ -212,7 +338,7 @@ void AVoxelTerrain::StartBuild(FVoxelDensityPatch Patch, TOptional<FVoxelEdit> E
         Build.Density = MoveTemp(Source);
         if (!Build.Density)
         {
-            Build.Density = MakeShared<FVoxelDensity, ESPMode::ThreadSafe>(Layout);
+            Build.Density = BuildDensity(Layout, Stamps);
         }
         Build.Patch = MoveTemp(Patch);
         if (Edit.IsSet())
@@ -253,7 +379,7 @@ void AVoxelTerrain::StartBuild(FVoxelDensityPatch Patch, TOptional<FVoxelEdit> E
                 else
                 {
                     Terrain->bReady = true;
-                    UE_LOG(LogTemp, Display, TEXT("VOXEL_INITIAL crc=%08x"), Terrain->GetChecksum());
+                    UE_LOG(LogTemp, Display, TEXT("VOXEL_INITIAL crc=%08x map=%08x"), Terrain->GetChecksum(), Terrain->GetInitialChecksum());
                 }
             }
             Terrain->bBuilding = false;

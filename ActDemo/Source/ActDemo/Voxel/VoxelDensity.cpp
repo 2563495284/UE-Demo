@@ -166,10 +166,15 @@ int16 FVoxelDensity::Sample(const FIntVector& GridPoint, const FVoxelDensityPatc
 
 FVoxelDensityPatch FVoxelDensity::PrepareEdit(const FVoxelEdit& Edit) const
 {
+    return PrepareBrush({Edit.Center, VoxelPlayground::RadiusFor(Edit.BrushId), Edit.Action == EVoxelAction::Fill});
+}
+
+FVoxelDensityPatch FVoxelDensity::PrepareBrush(const FVoxelBrushStamp& Stamp) const
+{
     using namespace VoxelPlayground;
-    const int32 Radius = RadiusFor(Edit.BrushId);
+    const int32 Radius = Stamp.Radius;
     const int32 Reach = Radius + Band;
-    const FIntVector Relative = Edit.Center - Grid.Origin;
+    const FIntVector Relative = Stamp.Center - Grid.Origin;
     const FIntVector Extent(Reach);
     const FIntVector Low = ((Relative - Extent) / Spacing).ComponentMax(FIntVector(1));
     const FIntVector High = ((Relative + Extent) / Spacing).ComponentMin(Grid.Cells - FIntVector(1));
@@ -184,14 +189,14 @@ FVoxelDensityPatch FVoxelDensity::PrepareEdit(const FVoxelEdit& Edit) const
             {
                 const FIntVector Point(X, Y, Z);
                 const FIntVector World = Grid.Origin + Point * Spacing;
-                if (Layout == EVoxelLayout::Island && Edit.Action == EVoxelAction::Fill && ShoreDistance(World.X, World.Y) >= 0)
+                if (Layout == EVoxelLayout::Island && Stamp.bAdd && ShoreDistance(World.X, World.Y) >= 0)
                 {
                     continue;
                 }
                 const int32 Distance = FMath::Clamp(IntegerSqrt(LengthSquared(Point * Spacing - Relative)) - Radius, -Band, Band);
                 const int32 Index = Grid.SampleIndex(Point);
                 const int16 Value = Samples[Index];
-                const int16 Updated = Edit.Action == EVoxelAction::Fill
+                const int16 Updated = Stamp.bAdd
                     ? FMath::Min<int16>(Value, Distance) : FMath::Max<int16>(Value, -Distance);
                 if (Updated != Value)
                 {
@@ -234,6 +239,16 @@ void FVoxelDensity::Apply(const FVoxelDensityPatch& Patch)
 
 bool FVoxelDensity::IsVolumeClear(const FBox& Box) const
 {
+    return VolumeMatches(Box, false);
+}
+
+bool FVoxelDensity::IsVolumeSolid(const FBox& Box) const
+{
+    return VolumeMatches(Box, true);
+}
+
+bool FVoxelDensity::VolumeMatches(const FBox& Box, bool bSolid) const
+{
     using namespace VoxelPlayground;
     const FVector Min = (Box.Min - FVector(Grid.Origin)) / Spacing;
     const FVector Max = (Box.Max - FVector(Grid.Origin)) / Spacing;
@@ -243,7 +258,7 @@ bool FVoxelDensity::IsVolumeClear(const FBox& Box) const
         {
             for (int32 X = FMath::FloorToInt(Min.X); X <= FMath::CeilToInt(Max.X); ++X)
             {
-                if (Sample({X, Y, Z}) < 0)
+                if ((Sample({X, Y, Z}) < 0) != bSolid)
                 {
                     return false;
                 }
@@ -251,6 +266,36 @@ bool FVoxelDensity::IsVolumeClear(const FBox& Box) const
         }
     }
     return true;
+}
+
+TOptional<double> FVoxelDensity::SurfaceAt(FVector2D Position) const
+{
+    using namespace VoxelPlayground;
+    const FVector2D Local = (Position - FVector2D(Grid.Origin.X, Grid.Origin.Y)) / Spacing;
+    const int32 X = FMath::FloorToInt(Local.X);
+    const int32 Y = FMath::FloorToInt(Local.Y);
+    if (X < 0 || X >= Grid.Cells.X || Y < 0 || Y >= Grid.Cells.Y)
+    {
+        return {};
+    }
+
+    const auto Column = [&](int32 Z)
+    {
+        const double A = FMath::Lerp<double>(Sample({X, Y, Z}), Sample({X + 1, Y, Z}), Local.X - X);
+        const double B = FMath::Lerp<double>(Sample({X, Y + 1, Z}), Sample({X + 1, Y + 1, Z}), Local.X - X);
+        return FMath::Lerp(A, B, Local.Y - Y);
+    };
+    double Above = Column(Grid.Cells.Z);
+    for (int32 Z = Grid.Cells.Z - 1; Z >= 0; --Z)
+    {
+        const double Below = Column(Z);
+        if (Below < 0.0 && Above >= 0.0)
+        {
+            return Grid.Origin.Z + (Z - Below / (Above - Below)) * Spacing;
+        }
+        Above = Below;
+    }
+    return {};
 }
 
 uint32 FVoxelDensity::Checksum() const

@@ -12,7 +12,6 @@
 namespace
 {
     constexpr double EditCooldown = .5;
-    constexpr double AimReach = 235.0;
 }
 
 AVoxelGameMode::AVoxelGameMode()
@@ -115,11 +114,11 @@ void AVoxelGameMode::ReceiveReady(AVoxelPlayerController& Player, uint32 Checksu
 
 void AVoxelGameMode::TryStartRound()
 {
-    if (bLocked || Players.Num() != RoomCapacity() || !Terrain || !Terrain->IsReady())
+    if (bLocked || bRoundSetupFailed || Players.Num() != RoomCapacity() || !Terrain || !Terrain->IsReady())
     {
         return;
     }
-    const uint32 Checksum = Terrain->GetChecksum();
+    const uint32 Checksum = Terrain->GetInitialChecksum();
     for (AVoxelPlayerController* Player : Players)
     {
         if (!Player->InitialTerrainChecksum.IsSet() || !Player->GetHero())
@@ -133,6 +132,17 @@ void AVoxelGameMode::TryStartRound()
             Player->ClientSetRoundActive(false, TEXT("Terrain mismatch. Both players need the same build."));
             return;
         }
+    }
+    FString Error;
+    if (!PrepareRound(Error))
+    {
+        bRoundSetupFailed = true;
+        UE_LOG(LogTemp, Error, TEXT("VOXEL_ROUND_INVALID %s"), *Error);
+        for (AVoxelPlayerController* Player : Players)
+        {
+            Player->ClientSetRoundActive(false, Error);
+        }
+        return;
     }
     bLocked = true;
     bPlaying = true;
@@ -200,6 +210,11 @@ void AVoxelGameMode::StartNextEdit()
     AVoxelPlayerController* Player = Request.Player.Get();
     AVoxelCharacter* Hero = Player && Players.Contains(Player) ? Player->GetHero() : nullptr;
     if (!Hero || !CanPlayerAct(*Player))
+    {
+        return;
+    }
+
+    if (!Request.ProbeCenter.IsSet() && Request.Action == EVoxelAction::Punch && TryStrikeProp(*Hero, Request.Aim))
     {
         return;
     }

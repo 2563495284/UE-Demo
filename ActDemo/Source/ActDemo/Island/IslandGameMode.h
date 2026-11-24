@@ -31,6 +31,8 @@ protected:
     AActor* ChoosePlayerStart_Implementation(AController* Player) override;
     int32 RoomCapacity() const override { return IslandRules::Seats; }
     bool StopOnGuestExit() const override { return false; }
+    bool PrepareRound(FString& Error) override;
+    bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim) override;
     void OnRoundStarted() override;
     void OnTerrainCommitted(const FVoxelEdit& Edit) override;
     void UpdateEnvironment() override;
@@ -64,6 +66,8 @@ private:
     FPartyPlayer* FindPartyPlayer(AIslandPlayerController& Player, uint32 RoundId);
 
     AActor* FindDock(int32 Seat) const;
+    void ReturnToSafeGround(AVoxelPlayerController& Player);
+    FTransform FindSafeReturn(const AVoxelPlayerController& Player);
     int32 FindReachableChest(const AIslandPlayerController& Player) const;
     void GiveClue(int32 Team, int32 Index);
     void PublishWinner(int32 Team);

@@ -22,6 +22,25 @@ WASD 移动，鼠标控制镜头，空格跳，左键凿岩，右键挖脚下，
 
 四个搜索圈公开。每只线索箱可被红、蓝、黄三队各开一次，精确平面坐标只下发给开过箱子的队伍。集齐才显示 A–C 与 B–D 的交点。大奖须挖露并打开，最先满足条件的队伍获胜。挖露的实体箱与地形变化对六端可见。
 
+## 地图编辑
+
+在 UE 打开 `L_TreasureIsland`。从顶部模式菜单选择 **Voxel Map**，也可以在编辑器底部的 Cmd 输入框执行 `Act.VoxelMap`。点击 **Frame Island** 可快速切到海岛鸟瞰。
+
+1. 选择 **Add Rock** 或 **Carve Rock**，在面板设置半径。用左键在视口拖动笔刷，一次拖动对应一次撤销。
+2. 选择 **Search Circles**。拖动视口里 A–D 对应的圆心，在面板填写半径并按回车。编辑后面板会提示无法埋箱的区域或交点。可以随时保存草稿，布局合法后才能开局。
+3. 用普通的 **保存当前关卡** 写入 `.umap`。联机测试时，六端使用带有同一版保存关卡的工程或打包版本。
+4. 在大纲选中普通 Static Mesh Actor，点击 **Make Selection Breakable**。用 Details 里的 **Destruction → Effect** 选择碎裂或树倒下。桥和建筑可用多件这样的 Actor 拼装。三个码头和示例树已经支持破坏。对局里左键攻击物件，宝箱沿用 E 键交互。
+
+地图编辑限定在现有体素网格及海岸边界内。选中 **Voxel Map** 模式时才显示编辑预览。复活默认尝试原出生点，码头拆掉后会搜索安全地面。重开从保存的关卡重新加载地形和物件。
+
+跨区块挖填、搜索圈保存和埋箱诊断可以通过 `bash Scripts/actdemo.sh island-map -VerifyAuthoring` 检查。它生成独立的 `QA_Authoring` 关卡供联机回归使用。打开该关卡后，可运行 UE 自动化测试 `ActDemo.Editor.VoxelStroke` 检查整笔撤销、重做和搜索圈编辑。使用以下命令跑编辑后的关卡。
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --editor --map /Game/TreasureIsland/QA_Authoring --mode both
+```
+
+修改后的测试关卡在同一台 Mac 上用六个独立进程跑通了寻宝、同时砸树、拆码头后复活及重开恢复。正常网络接受 304 次压力挖填，模拟约 80 ms 往返及 2% 丢包时接受 300 次。两局六端的 576 个区块均一致。只改搜索圈、地形校验值相同的客户端也被开局校验拦下。 [正常网络](../ActDemo/Saved/VoxelAuthoringQA/AuthoredHunt/normal/summary.json) · [模拟弱网](../ActDemo/Saved/VoxelAuthoringQA/AuthoredHunt/emulated/summary.json) · [圈位不一致](../ActDemo/Saved/VoxelAuthoringQA/Mismatch/summary.json)
+
 ## 假箱与派对玩法
 
 房主读 `ActDemo/Config/DefaultGame.ini` 的 `[/Script/ActDemo.IslandGameMode]`。将 `DecoyChestCount` 设为 0–24，默认四个。假箱分散在各线索箱的搜索圈内，外观与线索箱相同，按 E 打开后触发全房间派对。成功开局后该假箱消失。小玩法期间按提示用空格确认，结束后全员返回海岛。已挖地形和队内线索会保留。Mac Development 包也可以用房主启动参数 `-ini:Game:[/Script/ActDemo.IslandGameMode]:DecoyChestCount=0` 临时关闭假箱。

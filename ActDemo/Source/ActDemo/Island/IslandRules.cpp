@@ -29,10 +29,11 @@ namespace
         return T > 0.0 && T < 1.0 && U > 0.0 && U < 1.0;
     }
 
-    int32 SurfaceAt(const FVector2D& Point)
+    FString CircleError(int32 Index)
     {
-        return VoxelPlayground::IslandSurfaceHeight(FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y));
+        return FString::Printf(TEXT("Search circle %c needs more buried rock or clearance"), 'A' + Index);
     }
+
 }
 
 int32 FIslandClues::Count() const
@@ -40,10 +41,9 @@ int32 FIslandClues::Count() const
     return FPlatformMath::CountBits(static_cast<uint32>(Mask));
 }
 
-FVector2D IslandRules::SearchCenter(int32 Index)
+TArray<FIslandSearchCircle> IslandRules::DefaultSearchCircles()
 {
-    static const FVector2D Centers[ClueCount] = {{0, -1150}, {1150, 0}, {0, 1150}, {-1150, 0}};
-    return Centers[Index];
+    return {{{0, -1150}, 300}, {{1150, 0}, 300}, {{0, 1150}, 300}, {{-1150, 0}, 300}};
 }
 
 FLinearColor IslandRules::TeamColor(int32 Team)
@@ -63,34 +63,42 @@ bool IslandRules::InSea(const FVector& Head)
     return Head.Z < 0 && VoxelPlayground::ShoreDistance(FMath::RoundToInt(Head.X), FMath::RoundToInt(Head.Y)) >= 0;
 }
 
-bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout)
+bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArrayView<FIslandSearchCircle> Circles,
+    const FVoxelDensity& Density, FString* Error)
 {
+    const auto Reject = [Error](const FString& Message)
+    {
+        if (Error)
+        {
+            *Error = Message;
+        }
+        return false;
+    };
     FVector2D Crossing;
     if (!FindCrossing(Layout, Crossing) || !Crossing.Equals(Layout.Crossing, .01)
         || !Crossing.Equals(FVector2D(Layout.Centers[PrizeIndex]), .01))
     {
-        return false;
+        return Reject(TEXT("A-C and B-D need an intersection inside both segments"));
+    }
+    if (Circles.Num() != ClueCount || Layout.Decoys.Num() > MaxDecoys)
+    {
+        return Reject(TEXT("Expected four search circles and at most 24 decoys"));
     }
     TStaticArray<int32, ClueCount> PerCircle(InPlace, 0);
     const int32 BaseCount = Layout.Decoys.Num() / ClueCount;
-    if (Layout.Decoys.Num() > MaxDecoys)
-    {
-        return false;
-    }
     for (const FIslandDecoy& Decoy : Layout.Decoys)
     {
-        if (Decoy.ClueIndex < 0 || Decoy.ClueIndex >= ClueCount
-            || FVector2D::DistSquared(FVector2D(Decoy.Center), FVector2D(Layout.Centers[Decoy.ClueIndex])) < FMath::Square(DecoyClearance))
+        if (Decoy.ClueIndex < 0 || Decoy.ClueIndex >= ClueCount)
         {
-            return false;
+            return Reject(TEXT("Invalid decoy search circle"));
         }
         ++PerCircle[Decoy.ClueIndex];
     }
-    for (int32 Count : PerCircle)
+    for (int32 Index = 0; Index < ClueCount; ++Index)
     {
-        if (Count < BaseCount || Count > BaseCount + 1)
+        if (PerCircle[Index] < BaseCount || PerCircle[Index] > BaseCount + 1)
         {
-            return false;
+            return Reject(CircleError(Index));
         }
     }
 
@@ -100,14 +108,17 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout)
         const bool bPrize = Index == PrizeIndex;
         const FVector& Center = Layout.GetCenter(Index);
         const FVector2D Point(Center);
-        const double Depth = SurfaceAt(Point) - Center.Z;
+        const TOptional<double> Surface = Density.SurfaceAt(Point);
+        const double Depth = Surface.Get(0.0) - Center.Z;
         const int32 Circle = bDecoy ? Layout.Decoys[Index - Layout.Centers.Num()].ClueIndex : Index;
-        if (Depth < (bPrize ? 600 : 200) || Depth > (bPrize ? 800 : 400)
+        const FString Message = bPrize ? TEXT("The prize intersection needs deeper solid rock") : CircleError(Circle);
+        if (!Surface || Depth < (bPrize ? 599.99 : 199.99) || Depth > (bPrize ? 800.01 : 400.01)
             || Center.Z - ChestExtent.Z < -700
-            || (!bPrize && FVector2D::DistSquared(Point, SearchCenter(Circle)) > FMath::Square(SearchRadius))
-            || VoxelPlayground::ShoreDistance(FMath::RoundToInt(Center.X), FMath::RoundToInt(Center.Y)) > -550)
+            || (!bPrize && FVector2D::DistSquared(Point, FVector2D(Circles[Circle].Center)) > FMath::Square(Circles[Circle].Radius))
+            || VoxelPlayground::ShoreDistance(FMath::RoundToInt(Center.X), FMath::RoundToInt(Center.Y)) > -550
+            || !Density.IsVolumeSolid(FBox::BuildAABB(Center, ChestExtent)))
         {
-            return false;
+            return Reject(Message);
         }
         const double Clearance = bDecoy ? DecoyClearance : 300.0;
         for (int32 Other = 0; Other < Index; ++Other)
@@ -116,63 +127,107 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout)
             const double Distance = bDecoy ? FVector::DistSquaredXY(Center, OtherCenter) : FVector::DistSquared(Center, OtherCenter);
             if (Distance < FMath::Square(Clearance))
             {
-                return false;
+                return Reject(Message);
             }
         }
     }
     return true;
 }
 
-FIslandTreasureLayout IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount)
+bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<FIslandSearchCircle> Circles,
+    const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error, bool bFixedOnly)
 {
-    FRandomStream Random(Seed);
-    FIslandTreasureLayout Layout;
-    DecoyCount = FMath::Clamp(DecoyCount, 0, MaxDecoys);
-    TStaticArray<int32, ClueCount> PerCircle(InPlace, DecoyCount / ClueCount);
-    if (const int32 Remainder = DecoyCount % ClueCount; Remainder > 0)
+    if (Circles.Num() != ClueCount)
     {
-        int32 Circles[ClueCount] = {0, 1, 2, 3};
-        for (int32 Index = 0; Index < Remainder; ++Index)
+        if (Error)
         {
-            Swap(Circles[Index], Circles[Random.RandRange(Index, ClueCount - 1)]);
-            ++PerCircle[Circles[Index]];
+            *Error = TEXT("Expected exactly four search circles");
+        }
+        return false;
+    }
+    for (int32 Index = 0; Index < ClueCount; ++Index)
+    {
+        const FIslandSearchCircle& Circle = Circles[Index];
+        if (Circle.Radius < MinSearchRadius || Circle.Radius > MaxSearchRadius
+            || FMath::Abs(static_cast<int64>(Circle.Center.X)) > 2400 || FMath::Abs(static_cast<int64>(Circle.Center.Y)) > 2400)
+        {
+            if (Error)
+            {
+                *Error = FString::Printf(TEXT("Search circle %c is outside the editable bounds"), 'A' + Index);
+            }
+            return false;
         }
     }
-    Layout.Decoys.Reserve(DecoyCount);
-    for (int32 Attempt = 0; Attempt <= 64; ++Attempt)
+
+    DecoyCount = FMath::Clamp(DecoyCount, 0, MaxDecoys);
+    FRandomStream Random(Seed);
+    FRandomStream Fixed(7319);
+    constexpr int32 RandomAttempts = 64;
+    constexpr int32 TotalAttempts = RandomAttempts + 64;
+    const auto Place = [&Density](FVector2D Point, int32 Depth)
     {
-        const bool bFallback = Attempt == 64;
-        Layout.Decoys.Reset();
+        return FVector(Point, Density.SurfaceAt(Point).Get(-10000.0) - Depth);
+    };
+
+    for (int32 Attempt = bFixedOnly ? RandomAttempts : 0; Attempt < TotalAttempts; ++Attempt)
+    {
+        const bool bFixed = Attempt >= RandomAttempts;
+        const bool bCentered = Attempt == RandomAttempts;
+        FRandomStream& Stream = bFixed ? Fixed : Random;
+        TStaticArray<int32, ClueCount> PerCircle(InPlace, DecoyCount / ClueCount);
+        int32 Order[ClueCount] = {0, 1, 2, 3};
+        for (int32 Index = 0; Index < DecoyCount % ClueCount; ++Index)
+        {
+            if (!bCentered)
+            {
+                Swap(Order[Index], Order[Stream.RandRange(Index, ClueCount - 1)]);
+            }
+            ++PerCircle[Order[Index]];
+        }
+
+        Layout.Decoys.Reset(DecoyCount);
         for (int32 Index = 0; Index < ClueCount; ++Index)
         {
-            FVector2D Point = SearchCenter(Index);
-            const FVector2D Offset(Random.RandRange(-300, 300), Random.RandRange(-300, 300));
-            if (!bFallback)
+            const FIslandSearchCircle& Circle = Circles[Index];
+            FVector2D Point(Circle.Center);
+            if (!bCentered)
             {
-                const double Radius = PerCircle[Index] > 0 ? ClueOffsetWithDecoys : SearchRadius - 1.0;
-                Point += Offset.GetClampedToMaxSize(Radius);
+                const double Radius = PerCircle[Index] > 0
+                    ? FMath::Min(ClueOffsetWithDecoys, Circle.Radius - DecoyRadius - 1.0)
+                    : Circle.Radius - 1.0;
+                const double Angle = Stream.FRand() * UE_TWO_PI;
+                const double Distance = FMath::Sqrt(Stream.FRand()) * Radius;
+                Point += FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Distance;
             }
-            Layout.Centers[Index] = FVector(Point, SurfaceAt(Point) - (bFallback ? 300 : Random.RandRange(200, 400)));
+            Layout.Centers[Index] = Place(Point, bCentered ? 300 : Stream.RandRange(200, 400));
         }
-        if (FindCrossing(Layout, Layout.Crossing))
+        if (!FindCrossing(Layout, Layout.Crossing))
         {
-            Layout.Centers[PrizeIndex] = FVector(Layout.Crossing, SurfaceAt(Layout.Crossing) - (bFallback ? 700 : Random.RandRange(600, 800)));
-            for (int32 Index = 0; Index < ClueCount; ++Index)
+            if (Error)
             {
-                const double Rotation = PerCircle[Index] > 0 ? Random.FRand() * UE_TWO_PI : 0.0;
-                for (int32 Slot = 0; Slot < PerCircle[Index]; ++Slot)
-                {
-                    const double Angle = Rotation + Slot * UE_TWO_PI / PerCircle[Index];
-                    const FVector2D Point = FVector2D(Layout.Centers[Index]) + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * DecoyRadius;
-                    Layout.Decoys.Add({FVector(Point, SurfaceAt(Point) - Random.RandRange(200, 400)), Index});
-                }
+                *Error = TEXT("A-C and B-D need an intersection inside both segments");
             }
-            if (IsValidLayout(Layout))
+            continue;
+        }
+        Layout.Centers[PrizeIndex] = Place(Layout.Crossing, bCentered ? 700 : Stream.RandRange(600, 800));
+        for (int32 Index = 0; Index < ClueCount; ++Index)
+        {
+            const double Rotation = PerCircle[Index] > 0 && !bCentered ? Stream.FRand() * UE_TWO_PI : 0.0;
+            for (int32 Slot = 0; Slot < PerCircle[Index]; ++Slot)
             {
-                return Layout;
+                const double Angle = Rotation + Slot * UE_TWO_PI / PerCircle[Index];
+                const FVector2D Point = FVector2D(Layout.Centers[Index]) + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * DecoyRadius;
+                Layout.Decoys.Add({Place(Point, bCentered ? 300 : Stream.RandRange(200, 400)), Index});
             }
+        }
+        if (IsValidLayout(Layout, Circles, Density, Error))
+        {
+            if (Error)
+            {
+                Error->Reset();
+            }
+            return true;
         }
     }
-    checkf(false, TEXT("The fixed island treasure layout must be reachable"));
-    return Layout;
+    return false;
 }

@@ -29,6 +29,16 @@ struct FVoxelEdit
     UPROPERTY() uint8 BrushId = 0;
 };
 
+USTRUCT()
+struct FVoxelBrushStamp
+{
+    GENERATED_BODY()
+
+    UPROPERTY() FIntVector Center = FIntVector::ZeroValue;
+    UPROPERTY() int32 Radius = 125;
+    UPROPERTY() bool bAdd = false;
+};
+
 namespace VoxelPlayground
 {
     inline constexpr int32 Spacing = 25;
@@ -37,9 +47,9 @@ namespace VoxelPlayground
 
     uint8 BrushFor(EVoxelAction Action);
     int32 RadiusFor(uint8 BrushId);
-    FIntVector QuantizeCenter(const FVector& Position);
+    ACTDEMO_API FIntVector QuantizeCenter(const FVector& Position);
     int32 ShoreDistance(int32 X, int32 Y);
-    int32 IslandSurfaceHeight(int32 X, int32 Y);
+    ACTDEMO_API int32 IslandSurfaceHeight(int32 X, int32 Y);
 }
 
 struct FVoxelGrid
@@ -67,15 +77,19 @@ struct FVoxelDensity
 {
     explicit FVoxelDensity(EVoxelLayout Layout);
     FVoxelDensityPatch PrepareEdit(const FVoxelEdit& Edit) const;
+    FVoxelDensityPatch PrepareBrush(const FVoxelBrushStamp& Stamp) const;
     void Apply(const FVoxelDensityPatch& Patch);
     int16 Sample(const FIntVector& GridPoint, const FVoxelDensityPatch* Patch = nullptr) const;
     bool IsVolumeClear(const FBox& Box) const;
-    uint32 Checksum() const;
+    bool IsVolumeSolid(const FBox& Box) const;
+    ACTDEMO_API TOptional<double> SurfaceAt(FVector2D Position) const;
+    ACTDEMO_API uint32 Checksum() const;
     FString ChunkChecksums() const;
 
     const FVoxelGrid Grid;
     const EVoxelLayout Layout;
 
 private:
+    bool VolumeMatches(const FBox& Box, bool bSolid) const;
     TArray<int16> Samples;
 };

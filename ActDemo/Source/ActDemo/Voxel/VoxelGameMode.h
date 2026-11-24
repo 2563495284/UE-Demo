@@ -35,6 +35,9 @@ protected:
 
     virtual int32 RoomCapacity() const { return 2; }
     virtual bool StopOnGuestExit() const { return true; }
+    static constexpr double AimReach = 235.0;
+    virtual bool PrepareRound(FString& Error) { return true; }
+    virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim) { return false; }
     virtual void OnRoundStarted() {}
     virtual void OnTerrainCommitted(const FVoxelEdit& Edit) {}
     virtual void UpdateEnvironment();
@@ -67,4 +70,5 @@ private:
     TWeakObjectPtr<AVoxelPlayerController> WorkingPlayer;
     bool bPlaying = false;
     bool bLocked = false;
+    bool bRoundSetupFailed = false;
 };

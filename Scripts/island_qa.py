@@ -155,7 +155,7 @@ def run(args, ip, mode, directory):
             processes[role] = process, path
 
         try:
-            launch("host", MAP + "?listen")
+            launch("host", args.map + "?listen")
             wait_for(processes, lambda logs: "VOXEL_INITIAL crc=" in logs["host"], 120, "Host map did not initialize")
             for guest in GUESTS:
                 launch(guest, address)
@@ -216,6 +216,7 @@ def main():
     parser.add_argument("--headless-host", action="store_true", help="Disable Metal for iteration only")
     parser.add_argument("--screenshot", action="store_true", help="Capture the completed chart or the party prompt on the host")
     parser.add_argument("--app", type=Path, default=APP)
+    parser.add_argument("--map", default=MAP, help="Level package to host, including authored test levels")
     parser.add_argument("--output", type=Path, default=ROOT / "ActDemo/Saved/IslandQA")
     args = parser.parse_args()
     ip = args.ip or subprocess.check_output(["/usr/sbin/ipconfig", "getifaddr", "en0"], text=True).strip()

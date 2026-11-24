@@ -117,7 +117,7 @@ void AVoxelPlayerController::PlayerTick(float DeltaTime)
     if (!bSentReady && Terrain.IsValid() && Terrain->IsReady() && GetHero())
     {
         bSentReady = true;
-        ServerTerrainReady(Terrain->GetChecksum());
+        ServerTerrainReady(Terrain->GetInitialChecksum());
     }
 }
 

@@ -1,10 +1,12 @@
 #include "Tests/IslandProbe.h"
 
+#include "Components/StaticMeshComponent.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "InputKeyEventArgs.h"
 #include "PartyMinigame.h"
 #include "Island/IslandGameMode.h"
+#include "Island/IslandBreakable.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
 #include "Island/IslandWorld.h"
@@ -17,6 +19,18 @@ namespace
     TOptional<FVector> PreviousFirstChest;
     constexpr int32 EditsPerStage = 150;
     const FIntPoint StressSites[] = {{-400, -400}, {800, 800}, {-800, 800}};
+
+    AIslandBreakable* FindBreakable(UWorld* World, EIslandBreakEffect Effect, bool bRedDock = false)
+    {
+        for (TActorIterator<AIslandBreakable> It(World); It; ++It)
+        {
+            if (It->Effect == Effect && (!bRedDock || It->GetActorLocation().X < -2380.0))
+            {
+                return *It;
+            }
+        }
+        return nullptr;
+    }
 
     FString TerrainDigest(const AVoxelTerrain& Terrain)
     {
@@ -32,7 +46,16 @@ namespace
                 Result += bFound ? FString::Printf(TEXT(":%d"), FMath::RoundToInt(Floor.ImpactPoint.Z)) : TEXT(":missing");
             }
         }
-        return Result;
+        int32 Count = 0;
+        int32 Broken = 0;
+        int32 Collidable = 0;
+        for (TActorIterator<AIslandBreakable> It(Terrain.GetWorld()); It; ++It)
+        {
+            ++Count;
+            Broken += It->IsBroken();
+            Collidable += It->GetMesh().IsCollisionEnabled();
+        }
+        return Result + FString::Printf(TEXT(":props=%d/%d/%d"), Count, Broken, Collidable);
     }
 }
 
@@ -69,6 +92,14 @@ void AIslandProbePeer::ClientOpenChest_Implementation()
     {
         UE_LOG(LogTemp, Display, TEXT("ISLAND_QA_INTERACT team=%d"), Player->GetTeam());
         Player->Interact();
+    }
+}
+
+void AIslandProbePeer::ClientStrike_Implementation(FVector Target)
+{
+    if (AIslandPlayerController* Player = Cast<AIslandPlayerController>(GetOwner()); Player && Player->GetHero())
+    {
+        Player->SubmitEdit(EVoxelAction::Punch, (Target - Player->GetHero()->GetAimOrigin()).GetSafeNormal());
     }
 }
 
@@ -171,7 +202,8 @@ void AIslandProbe::PrepareDig(int32 Index)
 {
     NextDig = Index;
     const FVector Point = Mode->HiddenLayout.GetCenter(Index);
-    const double Top = VoxelPlayground::IslandSurfaceHeight(FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y));
+    const double Top = Mode->GetTerrain()->GetDensity()->SurfaceAt(FVector2D(Point)).Get(
+        VoxelPlayground::IslandSurfaceHeight(FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y)));
     Place(0, {Point.X, Point.Y, Top + (bPartyScenario ? 165.0 : 97.0)});
     Advance(EStep::Dig);
 }
@@ -301,8 +333,10 @@ void AIslandProbe::Tick(float DeltaSeconds)
         {
             for (int32 Count : {0, 1, 4, 5, 24})
             {
-                const FIslandTreasureLayout Layout = IslandRules::GenerateLayout(Seed, Count);
-                bValid &= Layout.Decoys.Num() == Count && IslandRules::IsValidLayout(Layout);
+                FIslandTreasureLayout Layout;
+                const AVoxelTerrain* Terrain = Mode->GetTerrain();
+                bValid &= IslandRules::GenerateLayout(Seed, Count, Terrain->GetSearchCircles(), *Terrain->GetDensity(), Layout)
+                    && Layout.Decoys.Num() == Count;
             }
         }
         Require(bValid && Mode->GetTerrain()->GetAppliedSequence() == 0, TEXT("1000 valid layouts and pristine island on start"));
@@ -332,6 +366,10 @@ void AIslandProbe::Tick(float DeltaSeconds)
         {
             Require(!PreviousFirstChest.GetValue().Equals(Mode->HiddenLayout.Centers[0], .01),
                 TEXT("host reopened with a new treasure layout"));
+            for (TActorIterator<AIslandBreakable> It(GetWorld()); It; ++It)
+            {
+                Require(!It->IsBroken() && It->GetMesh().IsCollisionEnabled(), TEXT("reopen restores breakable props"));
+            }
         }
         InspectThen(bReopened ? EStep::Done : EStep::Dig, true);
         return;
@@ -466,8 +504,72 @@ void AIslandProbe::Tick(float DeltaSeconds)
         if (bSawDrown && FVector::Dist2D(Player.GetHero()->GetActorLocation(), Player.StartTransform.GetLocation()) < 15.0)
         {
             Require(Mode->TeamClues[1].Complete() && Sequence == DrownSequence, TEXT("drowning respawns at team dock with clues and terrain intact"));
-            StartStress(1);
+            Advance(EStep::BreakTree);
         }
+        break;
+    }
+    case EStep::BreakTree:
+    {
+        AIslandBreakable* Tree = FindBreakable(GetWorld(), EIslandBreakEffect::TreeFall);
+        if (!Tree)
+        {
+            Require(false, TEXT("authored example tree exists"));
+            break;
+        }
+        if (!bIssued)
+        {
+            Place(0, Tree->GetActorLocation() + FVector(-155, -70, 105));
+            Place(1, Tree->GetActorLocation() + FVector(-155, 70, 105));
+            bIssued = true;
+        }
+        if (Tree->IsBroken())
+        {
+            Require(!Tree->GetMesh().IsCollisionEnabled() && Sequence == DrownSequence,
+                TEXT("simultaneous player strikes disable tree collision without consuming a terrain sequence"));
+            Advance(EStep::BreakDock);
+        }
+        else if (Now - LastAction > .9)
+        {
+            Peers[0]->ClientStrike(Tree->GetMesh().Bounds.Origin);
+            Peers[1]->ClientStrike(Tree->GetMesh().Bounds.Origin);
+            LastAction = Now;
+        }
+        break;
+    }
+    case EStep::BreakDock:
+    {
+        AIslandBreakable* Dock = FindBreakable(GetWorld(), EIslandBreakEffect::Fragments, true);
+        if (!Dock)
+        {
+            Require(false, TEXT("authored red dock is breakable"));
+            break;
+        }
+        if (!bIssued)
+        {
+            const FVector DockPos = Dock->GetActorLocation();
+            Place(0, {DockPos.X + 115.0, DockPos.Y, Dock->GetMesh().Bounds.GetBox().Max.Z + 96.0});
+            bIssued = true;
+        }
+        if (Dock->IsBroken())
+        {
+            Require(!Dock->GetMesh().IsCollisionEnabled(), TEXT("dock destruction disables collision"));
+            InspectThen(EStep::ReturnAfterBreak, true);
+        }
+        else if (Now - LastAction > .85)
+        {
+            Peers[0]->ClientStrike(Dock->GetMesh().Bounds.Origin);
+            LastAction = Now;
+        }
+        break;
+    }
+    case EStep::ReturnAfterBreak:
+    {
+        AVoxelPlayerController& Player = *Mode->GetPlayers()[0];
+        Mode->RecoverPlayer(Player);
+        const FVector Position = Player.GetHero()->GetActorLocation();
+        Require(Position.Z > 0 && FVector::Dist2D(Position, Player.StartTransform.GetLocation()) > 20.0,
+            TEXT("recovery finds dry footing after the dock is destroyed"));
+        StartStress(1);
         break;
     }
     case EStep::StressShared:

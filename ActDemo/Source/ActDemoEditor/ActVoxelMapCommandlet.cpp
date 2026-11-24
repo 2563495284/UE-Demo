@@ -1,5 +1,7 @@
 #include "ActVoxelMapCommandlet.h"
 
+#include "Island/IslandBreakable.h"
+
 #include "Components/DirectionalLightComponent.h"
 #include "Components/PointLightComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
@@ -53,6 +55,108 @@ namespace
         return UPackage::SavePackage(Package, Material, *Filename, Args) ? Material : nullptr;
     }
 
+    void AddExampleTree(UWorld& World)
+    {
+        constexpr int32 X = 780;
+        constexpr int32 Y = -770;
+        const double Z = VoxelPlayground::IslandSurfaceHeight(X, Y);
+        AIslandBreakable* Tree = World.SpawnActor<AIslandBreakable>(FVector(X, Y, Z), FRotator::ZeroRotator);
+        Tree->SetActorLabel(TEXT("Example Breakable Tree"));
+        Tree->SetUpExampleTree();
+    }
+
+    void SetDockSign(AIslandBreakable& Dock, int32 Team)
+    {
+        UTextRenderComponent* Sign = Dock.GetSign();
+        if (!Sign)
+        {
+            return;
+        }
+        UTextRenderComponent& Label = *Sign;
+        Label.SetWorldLocation(Dock.GetActorLocation() + FVector(0, 0, 284));
+        Label.SetWorldRotation(Dock.GetActorRotation() + FRotator(0, 180, 0));
+        Label.SetWorldScale3D(FVector::OneVector);
+        Label.SetText(FText::FromString(IslandRules::TeamName(Team)));
+        Label.SetWorldSize(42.f);
+        Label.SetHorizontalAlignment(EHTA_Center);
+        Label.SetTextRenderColor(IslandRules::TeamColor(Team).ToFColor(true));
+    }
+
+    bool SaveAuthoringFixture(UWorld& World, bool bMismatch)
+    {
+        AVoxelTerrain* Terrain = AVoxelTerrain::Find(&World);
+        if (!Terrain)
+        {
+            return false;
+        }
+        Terrain->RebuildEditorPreview();
+        const uint32 Original = Terrain->GetEditorDensity()->Checksum();
+        const FVector2D Seam(-400, 1200);
+        const auto Trace = [Terrain](FVector2D Point, FHitResult& Hit)
+        {
+            return Terrain->TraceEditorPreview(FVector(Point, 800.0), FVector(Point, 0.0), Hit);
+        };
+        FHitResult LeftBefore, RightBefore, LeftAfter, RightAfter;
+        if (!Trace(Seam - FVector2D(35, 0), LeftBefore) || !Trace(Seam + FVector2D(35, 0), RightBefore))
+        {
+            return false;
+        }
+        const FVoxelBrushStamp Stamps[] = {{{-400, 1200, 460}, 190, false}, {{-650, 1150, 550}, 155, true}};
+        if (!Terrain->ApplyEditorStamps(MakeArrayView(Stamps)) || Terrain->GetEditorDensity()->Checksum() == Original
+            || !Trace(Seam - FVector2D(35, 0), LeftAfter) || !Trace(Seam + FVector2D(35, 0), RightAfter)
+            || LeftAfter.ImpactPoint.Z > LeftBefore.ImpactPoint.Z - 75.0 || RightAfter.ImpactPoint.Z > RightBefore.ImpactPoint.Z - 75.0)
+        {
+            return false;
+        }
+
+        FIslandSearchCircle Circle = Terrain->GetSearchCircles()[0];
+        Circle.Center.X += bMismatch ? 150 : 100;
+        Circle.Radius += 60;
+        Terrain->SetSearchCircle(0, Circle);
+        FIslandTreasureLayout Layout;
+        FString Error;
+        if (!IslandRules::GenerateLayout(0, 4, Terrain->GetSearchCircles(), *Terrain->GetEditorDensity(), Layout, &Error, true))
+        {
+            UE_LOG(LogTemp, Error, TEXT("Authoring fixture treasure layout: %s"), *Error);
+            return false;
+        }
+        const uint32 Checksum = Terrain->GetEditorDensity()->Checksum();
+        Terrain->ClearEditorPreview();
+        constexpr const TCHAR* FixturePath = TEXT("/Game/TreasureIsland/QA_Authoring");
+        if (!UEditorLoadingAndSavingUtils::SaveMap(&World, FixturePath))
+        {
+            return false;
+        }
+        UEditorLoadingAndSavingUtils::NewBlankMap(false);
+        UWorld* Reloaded = UEditorLoadingAndSavingUtils::LoadMap(FixturePath);
+        Terrain = Reloaded ? AVoxelTerrain::Find(Reloaded) : nullptr;
+        if (!Terrain)
+        {
+            return false;
+        }
+        Terrain->RebuildEditorPreview();
+        const FIslandSearchCircle& SavedCircle = Terrain->GetSearchCircles()[0];
+        const bool bPersisted = Terrain->GetEditorDensity()->Checksum() == Checksum
+            && SavedCircle.Center == Circle.Center && SavedCircle.Radius == Circle.Radius;
+        if (bPersisted)
+        {
+            UE_LOG(LogTemp, Display, TEXT("VOXEL_AUTHORING_SAVED crc=%08x radius=%d x=%d"), Checksum, SavedCircle.Radius, SavedCircle.Center.X);
+        }
+
+        // Excavate one full search zone and check that the same generator used by the server reports it.
+        const FVoxelBrushStamp Invalid[] = {
+            {{SavedCircle.Center.X, SavedCircle.Center.Y, -600}, 650, false},
+            {{SavedCircle.Center.X, SavedCircle.Center.Y, 0}, 650, false},
+            {{SavedCircle.Center.X, SavedCircle.Center.Y, 600}, 650, false}
+        };
+        Terrain->ApplyEditorStamps(MakeArrayView(Invalid));
+        const bool bRejected = !IslandRules::GenerateLayout(0, 4, Terrain->GetSearchCircles(), *Terrain->GetEditorDensity(),
+            Layout, &Error, true) && Error.Contains(TEXT("circle A"));
+        UE_LOG(LogTemp, Display, TEXT("VOXEL_AUTHORING_INVALID rejected=%d detail=%s"), bRejected, *Error);
+        Terrain->ClearEditorPreview();
+        return bPersisted && bRejected;
+    }
+
     bool BuildIsland(UWorld& World, const TCHAR* MapPath)
     {
         UMaterial* Sea = IslandSeaMaterial();
@@ -73,23 +177,20 @@ namespace
         for (int32 Team = 0; Team < IslandRules::TeamCount; ++Team)
         {
             const FRotator Facing(0, InwardYaw[Team], 0);
-            AStaticMeshActor* Dock = World.SpawnActor<AStaticMeshActor>(DockCenters[Team], Facing);
+            AIslandBreakable* Dock = World.SpawnActor<AIslandBreakable>(DockCenters[Team], Facing);
             Dock->SetActorLabel(FString::Printf(TEXT("%s Dock"), IslandRules::TeamName(Team)));
-            Dock->GetStaticMeshComponent()->SetStaticMesh(Cube);
-            Dock->GetStaticMeshComponent()->SetMaterial(0, DeckMaterial);
-            Dock->SetActorScale3D(FVector(7.2, 3.9, .48));
+            Dock->GetMesh().SetStaticMesh(Cube);
+            Dock->GetMesh().SetMaterial(0, DeckMaterial);
+            Dock->GetMesh().SetRelativeScale3D(FVector(7.2, 3.9, .48));
             for (int32 Member = 0; Member < 2; ++Member)
             {
                 const FVector Start = DockCenters[Team] + Facing.RotateVector(FVector(-74, Member == 0 ? -87 : 87, 121));
                 World.SpawnActor<APlayerStart>(Start, Facing)->PlayerStartTag =
                     FName(*FString::Printf(TEXT("Seat%d"), Team + Member * IslandRules::TeamCount));
             }
-            ATextRenderActor* Label = World.SpawnActor<ATextRenderActor>(DockCenters[Team] + FVector(0, 0, 284), Facing + FRotator(0, 180, 0));
-            Label->GetTextRender()->SetText(FText::FromString(IslandRules::TeamName(Team)));
-            Label->GetTextRender()->SetWorldSize(42.f);
-            Label->GetTextRender()->SetHorizontalAlignment(EHTA_Center);
-            Label->GetTextRender()->SetTextRenderColor(IslandRules::TeamColor(Team).ToFColor(true));
+            SetDockSign(*Dock, Team);
         }
+        AddExampleTree(World);
         ADirectionalLight* Sun = World.SpawnActor<ADirectionalLight>(FVector(0, 0, 700), FRotator(-54, -35, 0));
         Sun->SetMobility(EComponentMobility::Movable);
         Sun->GetLightComponent()->SetIntensity(4.5f);
@@ -119,6 +220,17 @@ int32 UActVoxelMapCommandlet::Main(const FString& Params)
 {
     const bool bIsland = FParse::Param(*Params, TEXT("Island"));
     const TCHAR* MapPath = bIsland ? TEXT("/Game/TreasureIsland/L_TreasureIsland") : TEXT("/Game/VoxelPlayground/L_VoxelPlayground");
+    if (bIsland && FParse::Param(*Params, TEXT("VerifyAuthoring")))
+    {
+        UWorld* Existing = UEditorLoadingAndSavingUtils::LoadMap(MapPath);
+        if (!Existing || !SaveAuthoringFixture(*Existing, FParse::Param(*Params, TEXT("CircleMismatch"))))
+        {
+            UE_LOG(LogTemp, Error, TEXT("Voxel authoring verification failed"));
+            return 1;
+        }
+        UE_LOG(LogTemp, Display, TEXT("VOXEL_MAP_READY /Game/TreasureIsland/QA_Authoring (authoring verified)"));
+        return 0;
+    }
     if (FPackageName::DoesPackageExist(MapPath) && !FParse::Param(*Params, TEXT("Force")))
     {
         UE_LOG(LogTemp, Display, TEXT("VOXEL_MAP_READY %s (existing)"), MapPath);

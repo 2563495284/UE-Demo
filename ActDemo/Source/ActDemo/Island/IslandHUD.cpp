@@ -1,5 +1,7 @@
 #include "Island/IslandHUD.h"
 
+#include "Voxel/VoxelTerrain.h"
+
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Island/IslandPlayerController.h"
@@ -102,6 +104,11 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& Player)
         Line(ProjectMap(Coast[Index]), ProjectMap(Coast[(Index + 1) % UE_ARRAY_COUNT(Coast)]), {.31f, .57f, .59f}, 2.f);
     }
 
+    const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
+    if (!Terrain || Terrain->GetSearchCircles().Num() != IslandRules::ClueCount)
+    {
+        return;
+    }
     const FIslandClues& Clues = Player.GetLocalClues();
     const FLinearColor Team = IslandRules::TeamColor(Player.GetTeam());
     if (Clues.Complete())
@@ -122,8 +129,10 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& Player)
         }
         else
         {
-            const FVector2D P = ProjectMap(IslandRules::SearchCenter(Index));
-            const double Radius = IslandRules::SearchRadius * Size / 5050.0;
+            const FIslandSearchCircle& Circle = Terrain->GetSearchCircles()[Index];
+            const FVector2D P = ProjectMap(FVector2D(Circle.Center));
+            DrawText(FString::Printf(TEXT("%c"), 'A' + Index), Ink, P.X + 4, P.Y - 8, GEngine->GetSmallFont(), 1.f);
+            const double Radius = Circle.Radius * Size / 5050.0;
             for (int32 Segment = 0; Segment < 24; ++Segment)
             {
                 const auto Ring = [&](int32 Step)
