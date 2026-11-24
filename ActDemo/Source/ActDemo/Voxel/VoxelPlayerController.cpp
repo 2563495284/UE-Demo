@@ -40,9 +40,36 @@ void AVoxelPlayerController::BeginPlay()
         PlayerCameraManager->ViewPitchMin = -82.f;
         PlayerCameraManager->ViewPitchMax = 70.f;
     }
+    UpdateVoxelMapping();
+}
+
+void AVoxelPlayerController::SetVoxelInputEnabled(bool bEnabled)
+{
+    if (bVoxelInputEnabled == bEnabled)
+    {
+        return;
+    }
+    bVoxelInputEnabled = bEnabled;
+    if (!bEnabled)
+    {
+        RecoverStartedAt = -1.0;
+        GetWorldTimerManager().ClearTimer(RecoverTimer);
+    }
+    UpdateVoxelMapping();
+}
+
+void AVoxelPlayerController::UpdateVoxelMapping()
+{
     if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()); Subsystem && InputConfig)
     {
-        Subsystem->AddMappingContext(InputConfig->Gameplay, 0);
+        if (bVoxelInputEnabled)
+        {
+            Subsystem->AddMappingContext(InputConfig->Gameplay, 0);
+        }
+        else
+        {
+            Subsystem->RemoveMappingContext(InputConfig->Gameplay);
+        }
     }
 }
 
@@ -51,7 +78,8 @@ void AVoxelPlayerController::SetupInputComponent()
     Super::SetupInputComponent();
 #if !UE_BUILD_SHIPPING
     // Drive the same controller actions from the test probe without desktop mouse input.
-    if ((FParse::Param(FCommandLine::Get(), TEXT("VoxelQA")) || FParse::Param(FCommandLine::Get(), TEXT("IslandQA"))))
+    if (FParse::Param(FCommandLine::Get(), TEXT("VoxelQA"))
+        || (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")) && !FParse::Param(FCommandLine::Get(), TEXT("IslandPartyQA"))))
     {
         return;
     }
@@ -100,7 +128,7 @@ void AVoxelPlayerController::Move(const FInputActionValue& Value)
 
 void AVoxelPlayerController::ApplyMove(const FVector2D& Input)
 {
-    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying)
+    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && bVoxelInputEnabled)
     {
         Hero->MoveOnGrid(Input, GetControlRotation().Yaw);
     }
@@ -108,6 +136,10 @@ void AVoxelPlayerController::ApplyMove(const FVector2D& Input)
 
 void AVoxelPlayerController::Look(const FInputActionValue& Value)
 {
+    if (!bVoxelInputEnabled)
+    {
+        return;
+    }
     const FVector2D Input = Value.Get<FVector2D>();
     AddYawInput(FMath::Clamp(Input.X, -30.0, 30.0) * .18f);
     AddPitchInput(-FMath::Clamp(Input.Y, -30.0, 30.0) * .18f);
@@ -115,7 +147,7 @@ void AVoxelPlayerController::Look(const FInputActionValue& Value)
 
 void AVoxelPlayerController::Jump()
 {
-    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying)
+    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && bVoxelInputEnabled)
     {
         Hero->Jump();
     }
@@ -128,7 +160,7 @@ void AVoxelPlayerController::Fill() { SubmitEdit(EVoxelAction::Fill); }
 void AVoxelPlayerController::SubmitEdit(EVoxelAction Action)
 {
     const AVoxelCharacter* Hero = GetHero();
-    if (!Hero || !bPlaying)
+    if (!Hero || !bPlaying || !bVoxelInputEnabled)
     {
         return;
     }
@@ -150,19 +182,19 @@ void AVoxelPlayerController::SubmitEdit(EVoxelAction Action)
 
 void AVoxelPlayerController::SubmitEdit(EVoxelAction Action, const FVector& Aim)
 {
-    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying)
+    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && bVoxelInputEnabled)
     {
         Hero->PlayTerrainSwing(Action);
         ServerRequestEdit(Action, Aim);
     }
 }
 
-void AVoxelPlayerController::StartClimb() { if (bPlaying) { ServerSetClimb(true); } }
+void AVoxelPlayerController::StartClimb() { if (bPlaying && bVoxelInputEnabled) { ServerSetClimb(true); } }
 void AVoxelPlayerController::StopClimb() { ServerSetClimb(false); }
 
 void AVoxelPlayerController::StartRecover()
 {
-    if (GetHero() && RecoverStartedAt < 0.0)
+    if (bVoxelInputEnabled && GetHero() && RecoverStartedAt < 0.0)
     {
         RecoverStartedAt = FPlatformTime::Seconds();
         ServerSetRecover(true);
@@ -229,7 +261,7 @@ void AVoxelPlayerController::ServerSetRecover_Implementation(bool bEnabled)
     {
         Timers.ClearTimer(RecoverTimer);
     }
-    else if (GetHero() && !Timers.IsTimerActive(RecoverTimer))
+    else if (bVoxelInputEnabled && GetHero() && !Timers.IsTimerActive(RecoverTimer))
     {
         Timers.SetTimer(RecoverTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
         {

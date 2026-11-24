@@ -14,6 +14,11 @@ case "${1:-help}" in
   build)
     "$UE_ROOT/Engine/Build/BatchFiles/Mac/Build.sh" ActDemoEditor Mac Development "$PROJECT" -NoHotReload "-log=$LOGS/ImplementationBuild.log"
     ;;
+  party-feature)
+    mkdir -p "$ROOT/ActDemo/Plugins/GameFeatures/PartyButtonChallenge/Content"
+    "$EDITOR" "$PROJECT" -run=ActPartyFeature -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/PartyFeature.log"
+    grep -F 'PARTY_FEATURE_ASSET_READY' "$LOGS/PartyFeature.log"
+    ;;
   play)
     "$EDITOR" "$PROJECT" "$ISLAND_MAP?listen" -game -windowed -ResX=1280 -ResY=720 -NoSplash "-abslog=$LOGS/Playtest.log"
     ;;
@@ -52,6 +57,6 @@ case "${1:-help}" in
     test -d "$ARCHIVE/ActDemo.app/Contents/UE"
     ;;
   *)
-    printf '%s\n' 'Usage: bash Scripts/actdemo.sh {build|play|package|voxel-map|voxel-package|voxel-host|voxel-join HOST_IP|island-map|island-package|island-host|island-join HOST_IP}' 'Optional UE_ROOT selects the installed Unreal Engine directory.'
+    printf '%s\n' 'Usage: bash Scripts/actdemo.sh {build|party-feature|play|package|voxel-map|voxel-package|voxel-host|voxel-join HOST_IP|island-map|island-package|island-host|island-join HOST_IP}' 'Optional UE_ROOT selects the installed Unreal Engine directory.'
     ;;
 esac

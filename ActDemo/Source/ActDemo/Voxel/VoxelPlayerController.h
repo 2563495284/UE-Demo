@@ -18,6 +18,8 @@ public:
     AVoxelPlayerController();
     AVoxelCharacter* GetHero() const;
     bool IsPlaying() const { return bPlaying; }
+    bool IsVoxelInputEnabled() const { return bVoxelInputEnabled; }
+    void SetVoxelInputEnabled(bool bEnabled);
     double GetRecoverProgress() const;
     const FString& GetNotice() const { return Notice; }
     bool IsNoticeVisible() const;
@@ -61,6 +63,7 @@ private:
     void DigDown();
     void Fill();
     void ApplyNextEdit();
+    void UpdateVoxelMapping();
     void TerrainProtocolError();
 
     UFUNCTION(Server, Reliable) void ServerTerrainReady(uint32 Checksum);
@@ -76,6 +79,7 @@ private:
     double RecoverStartedAt = -1.0;
     double NoticeUntil = -1.0;
     bool bPlaying = false;
+    bool bVoxelInputEnabled = true;
     bool bSentReady = false;
     FString Notice = TEXT("Waiting for both players");
 };

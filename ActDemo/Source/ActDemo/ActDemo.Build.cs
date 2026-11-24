@@ -10,7 +10,7 @@ public class ActDemo : ModuleRules
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "GeometryCore", "ProceduralMeshComponent" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "GeometryCore", "ProceduralMeshComponent", "GameFeatures", "PartyFramework", "Projects" });
 		PublicIncludePaths.Add(ModuleDirectory);
 
 		// Uncomment if you are using Slate UI

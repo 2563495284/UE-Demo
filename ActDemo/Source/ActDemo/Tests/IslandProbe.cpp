@@ -2,6 +2,8 @@
 
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "InputKeyEventArgs.h"
+#include "PartyMinigame.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
@@ -79,6 +81,19 @@ void AIslandProbePeer::ClientShowChart_Implementation()
     }
 }
 
+void AIslandProbePeer::ClientPartySpace_Implementation(bool bPressed, bool bCheckJump)
+{
+    if (AIslandPlayerController* Player = Cast<AIslandPlayerController>(GetOwner()))
+    {
+        Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::SpaceBar, bPressed ? IE_Pressed : IE_Released,
+            bPressed ? 1.0f : 0.0f));
+        if (bCheckJump)
+        {
+            ObserveJumpUntil = FPlatformTime::Seconds() + 1.0;
+        }
+    }
+}
+
 void AIslandProbePeer::ClientStress_Implementation(int32 Stage)
 {
     StressStage = Stage;
@@ -90,6 +105,14 @@ void AIslandProbePeer::Tick(float DeltaSeconds)
     Super::Tick(DeltaSeconds);
     const auto* Controller = Cast<AIslandPlayerController>(GetOwner());
     const double Now = FPlatformTime::Seconds();
+    if (Controller && Now < ObserveJumpUntil)
+    {
+        if (const AVoxelCharacter* Hero = Controller->GetHero(); Hero && Hero->GetVelocity().Z > 100.0)
+        {
+            UE_LOG(LogTemp, Display, TEXT("PARTY_QA_ISLAND_JUMP"));
+            ObserveJumpUntil = 0.0;
+        }
+    }
     if (Controller && Controller->IsLocalController() && StressStage > 0 && Now >= NextRequestAt)
     {
         NextRequestAt = Now + .56;
@@ -147,9 +170,9 @@ void AIslandProbe::Place(int32 Seat, const FVector& Center)
 void AIslandProbe::PrepareDig(int32 Index)
 {
     NextDig = Index;
-    const FVector Point = Mode->HiddenLayout.Centers[Index];
+    const FVector Point = Mode->HiddenLayout.GetCenter(Index);
     const double Top = VoxelPlayground::IslandSurfaceHeight(FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y));
-    Place(0, {Point.X, Point.Y, Top + 97.0});
+    Place(0, {Point.X, Point.Y, Top + (bPartyScenario ? 165.0 : 97.0)});
     Advance(EStep::Dig);
 }
 
@@ -271,12 +294,29 @@ void AIslandProbe::Tick(float DeltaSeconds)
             return;
         }
 
+        bPartyScenario = FParse::Param(FCommandLine::Get(), TEXT("IslandPartyQA"));
+        bPartyTimeout = FParse::Param(FCommandLine::Get(), TEXT("IslandPartyTimeout"));
         bool bValid = true;
         for (int32 Seed = 0; Seed < 200; ++Seed)
         {
-            bValid &= IslandRules::IsValidLayout(IslandRules::GenerateLayout(Seed));
+            for (int32 Count : {0, 1, 4, 5, 24})
+            {
+                const FIslandTreasureLayout Layout = IslandRules::GenerateLayout(Seed, Count);
+                bValid &= Layout.Decoys.Num() == Count && IslandRules::IsValidLayout(Layout);
+            }
         }
-        Require(bValid && Mode->GetTerrain()->GetAppliedSequence() == 0, TEXT("200 valid seeds and pristine island on start"));
+        Require(bValid && Mode->GetTerrain()->GetAppliedSequence() == 0, TEXT("1000 valid layouts and pristine island on start"));
+        Require(bPartyScenario ? Mode->HiddenLayout.Decoys.Num() >= 2 : Mode->HiddenLayout.Decoys.IsEmpty(),
+            TEXT("host applied the scenario's decoy configuration"));
+        UE_LOG(LogTemp, Display, TEXT("ISLAND_QA_DECOYS count=%d"), Mode->HiddenLayout.Decoys.Num());
+        if (bPartyScenario)
+        {
+            // Keep the scripted vertical shafts separated. Players can also dig from the side.
+            while (NextDig == Mode->HiddenLayout.Decoys[0].ClueIndex || NextDig == Mode->HiddenLayout.Decoys[1].ClueIndex)
+            {
+                ++NextDig;
+            }
+        }
         for (int32 Seat = 0; Seat < Mode->GetPlayers().Num(); ++Seat)
         {
             auto* Controller = CastChecked<AIslandPlayerController>(Mode->GetPlayers()[Seat]);
@@ -310,10 +350,10 @@ void AIslandProbe::Tick(float DeltaSeconds)
     switch (Step)
     {
     case EStep::Inspect:
-        if (Reports.Num() == IslandRules::Seats)
+        if (Reports.Num() == Mode->GetPlayers().Num())
         {
-            UE_LOG(LogTemp, Display, TEXT("ISLAND_QA_ISOLATION epoch=%d peers=6 checksum=%s"),
-                Epoch, ExpectedDigest.IsEmpty() ? TEXT("checked separately") : TEXT("matched"));
+            UE_LOG(LogTemp, Display, TEXT("ISLAND_QA_ISOLATION epoch=%d peers=%d checksum=%s"),
+                Epoch, Reports.Num(), ExpectedDigest.IsEmpty() ? TEXT("checked separately") : TEXT("matched"));
             if (AfterInspection == EStep::Done)
             {
                 Advance(EStep::Done);
@@ -331,7 +371,7 @@ void AIslandProbe::Tick(float DeltaSeconds)
         else if (Now - LastAction >= .65)
         {
             LastAction = Now;
-            for (int32 Seat = 0; Seat < Peers.Num(); ++Seat)
+            for (int32 Seat = 0; Seat < Mode->GetPlayers().Num(); ++Seat)
             {
                 if (!Reports.Contains(Seat))
                 {
@@ -343,13 +383,20 @@ void AIslandProbe::Tick(float DeltaSeconds)
     case EStep::Dig:
         if (Mode->Exposed[NextDig] && Now - LastAction > .50)
         {
-            Require(true, TEXT("player punched down and uncovered a real chest"));
+            Require(true, TEXT("player dug down and uncovered a chest"));
             if (OnPrize())
             {
                 PrizePose = Mode->GetPlayers()[0]->GetHero()->GetActorLocation();
             }
             PrepareOpen(0);
-            Advance(OnPrize() ? EStep::ExpectDenied : EStep::Open);
+            if (Mode->HiddenLayout.IsDecoy(NextDig))
+            {
+                Advance(EStep::PartyOpen);
+            }
+            else
+            {
+                Advance(OnPrize() ? EStep::ExpectDenied : EStep::Open);
+            }
         }
         else if (!Mode->Exposed[NextDig] && Now - LastAction > .62 && !Terrain.IsBusy())
         {
@@ -368,7 +415,12 @@ void AIslandProbe::Tick(float DeltaSeconds)
         }
         if ((Mode->TeamClues[OpeningTeam].Mask & Bit) != 0)
         {
-            if (OpeningTeam < 2)
+            if (bPartyScenario)
+            {
+                NextDig = IslandRules::PrizeIndex + 1;
+                InspectThen(EStep::Dig, true);
+            }
+            else if (OpeningTeam < 2)
             {
                 PrepareOpen(OpeningTeam + 1);
                 InspectThen(EStep::Open);
@@ -473,7 +525,101 @@ void AIslandProbe::Tick(float DeltaSeconds)
             bIssued = true;
         }
         break;
+    case EStep::PartyOpen:
+    case EStep::PartyPlay:
+    case EStep::PartyJump:
+    case EStep::PartyDone:
+        TickParty(Now);
+        break;
     default:
         break;
+    }
+}
+
+void AIslandProbe::TickParty(double Now)
+{
+    const EIslandPhase Phase = Mode->GetGameState<AIslandGameState>()->Phase;
+    if (Step == EStep::PartyOpen && PartyAttempts == 1 && !bIssued && Now - StepAt > .2)
+    {
+        Peers[1]->ClientPartySpace(true, false);
+        bIssued = true;
+    }
+    if (Step == EStep::PartyOpen && Now - StepAt > .6)
+    {
+        OriginalPawns.Reset();
+        for (AVoxelPlayerController* Player : Mode->GetPlayers())
+        {
+            OriginalPawns.Add(Player->GetPawn());
+        }
+        BeforePartyDigest = TerrainDigest(*Mode->GetTerrain());
+        PartyStartedAt = 0.0;
+        ++PartyAttempts;
+        Peers[0]->ClientOpenChest();
+        Peers[3]->ClientOpenChest();
+        Advance(EStep::PartyPlay);
+    }
+    else if (Step == EStep::PartyPlay)
+    {
+        if (Phase == EIslandPhase::PartyPlaying && PartyStartedAt == 0.0)
+        {
+            PartyStartedAt = Now;
+            Require(Mode->PartyRoundId == static_cast<uint32>(PartyAttempts), TEXT("simultaneous opens yielded one party"));
+            for (AVoxelPlayerController* Player : Mode->GetPlayers())
+            {
+                Require(Cast<APartyPawn>(Player->GetPawn()) != nullptr, TEXT("online player possessed a party pawn"));
+            }
+        }
+        if (Phase == EIslandPhase::PartyPlaying && PartyAttempts == 1 && !bIssued && Now - PartyStartedAt >= 3.9)
+        {
+            if (FParse::Param(FCommandLine::Get(), TEXT("IslandScreenshot")))
+            {
+                FScreenshotRequest::RequestScreenshot(TEXT("IslandPartyQA"), true, true);
+            }
+            for (AIslandProbePeer* Peer : Peers)
+            {
+                Peer->ClientPartySpace(true, false);
+            }
+            bIssued = true;
+        }
+        if (Mode->PartyRoundId != static_cast<uint32>(PartyAttempts) || Phase != EIslandPhase::Hunting)
+        {
+            return;
+        }
+        Require(!Mode->bPartyUnavailable && !Mode->PartySession && Mode->PartyPlayers.IsEmpty(),
+            TEXT("feature returned to installed on every online peer"));
+        Require(Mode->ConsumedDecoys.Num() == (bPartyTimeout ? 0 : PartyAttempts),
+            TEXT("only parties that started consumed a fake chest"));
+        Require(TerrainDigest(*Mode->GetTerrain()) == BeforePartyDigest && Mode->TeamClues[0].Count() == 1,
+            TEXT("party preserved the original terrain and private clue"));
+        for (int32 Seat = 0; Seat < Mode->GetPlayers().Num(); ++Seat)
+        {
+            Require(Mode->GetPlayers()[Seat]->GetPawn() == OriginalPawns[Seat].Get(), TEXT("player got the original island pawn back"));
+            Peers[Seat]->ClientPartySpace(false, false);
+        }
+        if (!bPartyTimeout && PartyAttempts == 1)
+        {
+            ++NextDig;
+            InspectThen(EStep::Dig, true);
+        }
+        else
+        {
+            Mode->RecoverPlayer(*Mode->GetPlayers()[0]);
+            InspectThen(EStep::PartyJump, true);
+        }
+    }
+    else if (Step == EStep::PartyJump)
+    {
+        const AVoxelCharacter* Hero = Mode->GetPlayers()[0]->GetHero();
+        if (Hero && Hero->GetCharacterMovement()->IsMovingOnGround())
+        {
+            Peers[0]->ClientPartySpace(true, true);
+            Advance(EStep::PartyDone);
+        }
+    }
+    else if (Step == EStep::PartyDone && Now - StepAt > .8)
+    {
+        Peers[0]->ClientPartySpace(false, false);
+        UE_LOG(LogTemp, Display, TEXT("PARTY_QA_DONE rounds=%d players=%d"), PartyAttempts, Mode->GetPlayers().Num());
+        Advance(EStep::Done);
     }
 }

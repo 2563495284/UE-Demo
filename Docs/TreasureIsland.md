@@ -22,6 +22,12 @@ WASD 移动，鼠标控制镜头，空格跳，左键凿岩，右键挖脚下，
 
 四个搜索圈公开。每只线索箱可被红、蓝、黄三队各开一次，精确平面坐标只下发给开过箱子的队伍。集齐才显示 A–C 与 B–D 的交点。大奖须挖露并打开，最先满足条件的队伍获胜。挖露的实体箱与地形变化对六端可见。
 
+## 假箱与派对玩法
+
+房主读 `ActDemo/Config/DefaultGame.ini` 的 `[/Script/ActDemo.IslandGameMode]`。将 `DecoyChestCount` 设为 0–24，默认四个。假箱分散在各线索箱的搜索圈内，外观与线索箱相同，按 E 打开后触发全房间派对。成功开局后该假箱消失。小玩法期间按提示用空格确认，结束后全员返回海岛。已挖地形和队内线索会保留。Mac Development 包也可以用房主启动参数 `-ini:Game:[/Script/ActDemo.IslandGameMode]:DecoyChestCount=0` 临时关闭假箱。
+
+`DecoyMinigameFeature` 选择小玩法插件，默认 `PartyButtonChallenge`。每个插件在 `Plugins/GameFeatures` 中声明 `ExplicitlyLoaded` 和初始状态 `Installed`，使用与插件同名的 `UPartyMinigameFeatureData` 资源指定会话类。会话提供自己的 Pawn，输入、视角和 HUD 随该 Pawn 启停。房主与客户端各自激活插件，所有在线玩家准备好后开局，返回海岛后卸载资源。新增玩法时，将插件和资源一同打包到所有端。
+
 ## 构建和复测
 
 ```sh
@@ -29,7 +35,12 @@ bash Scripts/actdemo.sh build
 bash Scripts/actdemo.sh island-map
 bash Scripts/actdemo.sh island-package
 PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --mode both
+PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --scenario party --mode both
+PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --scenario party-drop --mode normal
+PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --scenario party-timeout --mode normal
 ```
+
+派对测试通过玩家控制器注入空格键，覆盖玩法确认及返回海岛后的跳跃。需要重建默认插件的 GameFeatureData 时，先编译再运行 `bash Scripts/actdemo.sh party-feature`。
 
 默认归档在 `Builds/TreasureIsland/Mac/ActDemo.app`，自动化日志在 `ActDemo/Saved/IslandQA`。六进程回归通过真实 NetDriver 测试挖箱、开箱、结算、重开和可靠编辑复制。探针直接布置角色和压力测试的笔刷落点，以便重复跑相同情景。探针使用正常房主编辑队列、角色挖地入口和客户端开箱 RPC。队内隔离根据每个独立进程持有的线索坐标和交点验证。帧时间由一台启用 Metal 的房主进程采样，五个客户端使用 NullRHI。
 
@@ -53,4 +64,8 @@ UE 5.8 Mac Development，Apple Silicon arm64，最低 macOS 14.0。归档包通�
 
 六端自动化覆盖了联机规则、数据和碰撞。跨两台物理 Mac 和六位真人操作尚未实测。
 
-逐端数据与原始日志见 [正常网络汇总](../ActDemo/Saved/IslandQA/normal/summary.json) 和 [弱网汇总](../ActDemo/Saved/IslandQA/emulated/summary.json)。
+## 派对玩法复测 · 2026-11-24
+
+同一台 Mac 上用六个独立进程验证。正常网络和模拟弱网都连续触发两轮，六端每轮从 `Installed` 进入 `Active`，返回原角色后卸载。另测了玩法中掉线和加载等待超时。六端保留地形与队内线索，回海岛后空格恢复跳跃。 [正常网络](../ActDemo/Saved/IslandQA/party/normal/summary.json) · [模拟弱网](../ActDemo/Saved/IslandQA/party/emulated/summary.json) · [掉线](../ActDemo/Saved/IslandQA/party-drop/normal/summary.json) · [加载超时](../ActDemo/Saved/IslandQA/party-timeout/normal/summary.json)
+
+关闭假箱后，正常网络和模拟弱网都跑通挖箱、大奖结算和重开。正常网络通过原性能门槛。两轮模拟弱网复测的房主帧 P95 分别为 183.761 ms 和 485.170 ms，房主碰撞延迟 P95 分别为 494.785 ms 和 2100.789 ms，均超出原门槛。 [正常寻宝](../ActDemo/Saved/IslandQA/normal/summary.json) · [弱网寻宝复测 1](../ActDemo/Saved/IslandQARetry/emulated/summary.json) · [弱网寻宝复测 2](../ActDemo/Saved/IslandQAFinal/emulated/summary.json)

@@ -5,9 +5,11 @@
 #include "IslandGameMode.generated.h"
 
 class AIslandChest;
+class APartyPawn;
+class APartySession;
 class AIslandPlayerController;
 
-UCLASS()
+UCLASS(Config = Game)
 class ACTDEMO_API AIslandGameMode : public AVoxelGameMode
 {
     GENERATED_BODY()
@@ -16,6 +18,9 @@ public:
     AIslandGameMode();
     void TryOpen(AIslandPlayerController& Player);
     void RestartIsland();
+    void PartyAssetsReady(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess);
+    void PartyPawnReady(AIslandPlayerController& Player, uint32 RoundId);
+    void PartyUnloaded(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess);
     void RecoverPlayer(AVoxelPlayerController& Player) override;
     bool CanPlayerAct(const AVoxelPlayerController& Player) const override;
 
@@ -39,6 +44,25 @@ private:
         double RespawnAt = 0.0;
     };
 
+    struct FPartyPlayer
+    {
+        TWeakObjectPtr<AVoxelCharacter> Original;
+        TWeakObjectPtr<APartyPawn> Temporary;
+        FRotator View = FRotator::ZeroRotator;
+        int32 Seat = INDEX_NONE;
+        bool bReturnToDock = false;
+        bool bAssetsReady = false;
+        bool bPawnReady = false;
+        bool bUnloaded = false;
+    };
+
+    void BeginParty(int32 ChestIndex);
+    void UpdateParty();
+    void ReturnFromParty();
+    void RemovePartyPlayer(AIslandPlayerController& Player);
+    void SetPhase(EIslandPhase Phase);
+    FPartyPlayer* FindPartyPlayer(AIslandPlayerController& Player, uint32 RoundId);
+
     AActor* FindDock(int32 Seat) const;
     int32 FindReachableChest(const AIslandPlayerController& Player) const;
     void GiveClue(int32 Team, int32 Index);
@@ -48,5 +72,16 @@ private:
     TStaticArray<FIslandClues, IslandRules::TeamCount> TeamClues;
     UPROPERTY() TArray<TObjectPtr<AIslandChest>> Exposed;
     TMap<const AVoxelPlayerController*, FSeaState> SeaStates;
+    TSet<int32> ConsumedDecoys;
+
+    UPROPERTY(Config) int32 DecoyChestCount = 4;
+    UPROPERTY(Config) FName DecoyMinigameFeature = TEXT("PartyButtonChallenge");
+    UPROPERTY() TObjectPtr<APartySession> PartySession;
+    TMap<TWeakObjectPtr<AIslandPlayerController>, FPartyPlayer> PartyPlayers;
+    uint32 PartyRoundId = 0;
+    int32 PartyChestIndex = INDEX_NONE;
+    double PartyDeadline = 0.0;
+    bool bPartyPrepareFailed = false;
+    bool bPartyUnavailable = false;
     bool bRestarting = false;
 };

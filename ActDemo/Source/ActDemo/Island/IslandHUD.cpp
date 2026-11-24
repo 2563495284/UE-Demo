@@ -4,6 +4,7 @@
 #include "Engine/Engine.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
+#include "PartyMinigame.h"
 #include "Voxel/VoxelCharacter.h"
 
 namespace
@@ -19,7 +20,6 @@ FString AIslandHUD::ControlsText() const
 
 void AIslandHUD::DrawHUD()
 {
-    Super::DrawHUD();
     const AIslandPlayerController* Player = Cast<AIslandPlayerController>(GetOwningPlayerController());
     const AIslandGameState* Round = GetWorld()->GetGameState<AIslandGameState>();
     if (!Canvas || !Player || !Round)
@@ -35,6 +35,29 @@ void AIslandHUD::DrawHUD()
         DrawRect(Panel, X - 14, Y - 6, Width + 28, Height + 12);
         DrawText(Text, Color, X, Y, Font, 1.05f);
     };
+    if (Round->Phase == EIslandPhase::PartyReturning)
+    {
+        Label(TEXT("Returning to the island"), Ink, Canvas->ClipY * .32f);
+        return;
+    }
+    if (const APartyPawn* Pawn = Cast<APartyPawn>(Player->GetPawn()))
+    {
+        if (Round->Phase == EIslandPhase::PartyPlaying)
+        {
+            Pawn->DrawPartyHUD(*this, FVector2D(Canvas->ClipX, Canvas->ClipY));
+        }
+        else
+        {
+            Label(TEXT("Getting ready"), Ink, Canvas->ClipY * .32f);
+        }
+        return;
+    }
+    if (Round->Phase == EIslandPhase::PartyLoading || Round->Phase == EIslandPhase::PartyPlaying || !Player->IsVoxelInputEnabled())
+    {
+        Label(TEXT("Entering party challenge"), Ink, Canvas->ClipY * .32f);
+        return;
+    }
+    Super::DrawHUD();
     if (Round->Phase == EIslandPhase::Finished)
     {
         Label(FString::Printf(TEXT("%s crew found the prize"), IslandRules::TeamName(Round->Winner)), IslandRules::TeamColor(Round->Winner), 27.0f);

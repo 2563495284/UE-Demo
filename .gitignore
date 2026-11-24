@@ -25,6 +25,8 @@
 
 # Plugin intermediate files (keep precompiled plugin binaries)
 /ActDemo/Plugins/**/Intermediate/
+/ActDemo/Plugins/PartyFramework/Binaries/
+/ActDemo/Plugins/GameFeatures/PartyButtonChallenge/Binaries/
 
 # OS metadata
 .DS_Store

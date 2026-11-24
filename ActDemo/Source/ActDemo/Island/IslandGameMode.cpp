@@ -1,6 +1,9 @@
 #include "Island/IslandGameMode.h"
 
+#include "Algo/AllOf.h"
+#include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
+#include "PartyMinigame.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerStart.h"
 #include "Island/IslandHUD.h"
@@ -22,8 +25,13 @@ AIslandGameMode::AIslandGameMode()
 void AIslandGameMode::BeginPlay()
 {
     Super::BeginPlay();
-    HiddenLayout = IslandRules::GenerateLayout(static_cast<int32>(FPlatformTime::Cycles64()));
-    Exposed.SetNum(IslandRules::ClueCount + 1);
+    const int32 Decoys = FMath::Clamp(DecoyChestCount, 0, IslandRules::MaxDecoys);
+    if (Decoys != DecoyChestCount)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("DecoyChestCount %d clamped to %d"), DecoyChestCount, Decoys);
+    }
+    HiddenLayout = IslandRules::GenerateLayout(static_cast<int32>(FPlatformTime::Cycles64()), Decoys);
+    Exposed.SetNum(HiddenLayout.Num());
 #if !UE_BUILD_SHIPPING
     if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
     {
@@ -41,7 +49,11 @@ void AIslandGameMode::PostLogin(APlayerController* NewPlayer)
 
 void AIslandGameMode::Logout(AController* Exiting)
 {
-    SeaStates.Remove(Cast<AVoxelPlayerController>(Exiting));
+    if (AIslandPlayerController* Player = Cast<AIslandPlayerController>(Exiting))
+    {
+        RemovePartyPlayer(*Player);
+        SeaStates.Remove(Player);
+    }
     Super::Logout(Exiting);
     GetGameState<AIslandGameState>()->JoinedCount = GetPlayers().Num();
     if (IsPlaying())
@@ -97,13 +109,15 @@ void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit)
     }
     for (int32 Index = 0; Index < Exposed.Num(); ++Index)
     {
-        const FVector Center = HiddenLayout.Centers[Index];
+        const FVector Center = HiddenLayout.GetCenter(Index);
         const FBox Bounds = FBox::BuildAABB(Center, IslandRules::ChestExtent);
-        if (!Exposed[Index] && GetTerrain()->IsVolumeClear(Bounds))
+        if (!Exposed[Index] && !ConsumedDecoys.Contains(Index) && GetTerrain()->IsVolumeClear(Bounds))
         {
-            AIslandChest* Chest = GetWorld()->SpawnActor<AIslandChest>(Center, FRotator::ZeroRotator);
-            Chest->SetPrize(Index == IslandRules::PrizeIndex);
-            Exposed[Index] = Chest;
+            if (AIslandChest* Chest = GetWorld()->SpawnActor<AIslandChest>(Center, FRotator::ZeroRotator))
+            {
+                Chest->SetPrize(Index == IslandRules::PrizeIndex);
+                Exposed[Index] = Chest;
+            }
         }
     }
 }
@@ -125,7 +139,8 @@ bool AIslandGameMode::CanFillAt(const FVoxelEdit& Edit) const
 bool AIslandGameMode::CanPlayerAct(const AVoxelPlayerController& Player) const
 {
     const FSeaState* Sea = SeaStates.Find(&Player);
-    return Super::CanPlayerAct(Player) && (!Sea || Sea->RespawnAt == 0.0);
+    return GetGameState<AIslandGameState>()->Phase == EIslandPhase::Hunting
+        && Super::CanPlayerAct(Player) && (!Sea || Sea->RespawnAt == 0.0);
 }
 
 int32 AIslandGameMode::FindReachableChest(const AIslandPlayerController& Player) const
@@ -166,6 +181,17 @@ void AIslandGameMode::TryOpen(AIslandPlayerController& Player)
     if (Index == INDEX_NONE)
     {
         Player.ClientEditRejected(TEXT("Reach an exposed chest"));
+    }
+    else if (HiddenLayout.IsDecoy(Index))
+    {
+        if (bPartyUnavailable)
+        {
+            Player.ClientEditRejected(TEXT("This party challenge is unavailable"));
+        }
+        else
+        {
+            BeginParty(Index);
+        }
     }
     else if (Index == IslandRules::PrizeIndex)
     {
@@ -234,6 +260,11 @@ void AIslandGameMode::RestartIsland()
 
 void AIslandGameMode::RecoverPlayer(AVoxelPlayerController& Player)
 {
+    const EIslandPhase Phase = GetGameState<AIslandGameState>()->Phase;
+    if (Phase == EIslandPhase::PartyLoading || Phase == EIslandPhase::PartyPlaying || Phase == EIslandPhase::PartyReturning)
+    {
+        return;
+    }
     if (const FSeaState* Sea = SeaStates.Find(&Player); !Sea || Sea->RespawnAt == 0.0)
     {
         SeaStates.Remove(&Player);
@@ -244,6 +275,11 @@ void AIslandGameMode::RecoverPlayer(AVoxelPlayerController& Player)
 
 void AIslandGameMode::UpdateEnvironment()
 {
+    if (GetGameState<AIslandGameState>()->Phase != EIslandPhase::Hunting)
+    {
+        UpdateParty();
+        return;
+    }
     const double Now = FPlatformTime::Seconds();
     for (AVoxelPlayerController* Controller : GetPlayers())
     {
@@ -293,5 +329,260 @@ void AIslandGameMode::UpdateEnvironment()
                 RecoverPlayer(Player);
             }
         }
+    }
+}
+
+void AIslandGameMode::SetPhase(EIslandPhase Phase)
+{
+    AIslandGameState* Round = GetGameState<AIslandGameState>();
+    Round->Phase = Phase;
+    Round->ForceNetUpdate();
+}
+
+void AIslandGameMode::BeginParty(int32 ChestIndex)
+{
+    constexpr double PrepareTimeout = 15.0;
+    SetPhase(EIslandPhase::PartyLoading);
+    ++PartyRoundId;
+    PartyChestIndex = ChestIndex;
+    PartyDeadline = FPlatformTime::Seconds() + PrepareTimeout;
+    bPartyPrepareFailed = false;
+
+    for (int32 Seat = 0; Seat < GetPlayers().Num(); ++Seat)
+    {
+        auto* Player = CastChecked<AIslandPlayerController>(GetPlayers()[Seat]);
+        FPartyPlayer& Entry = PartyPlayers.Add(Player);
+        Entry.Seat = Seat;
+        Entry.View = Player->GetControlRotation();
+        Entry.bReturnToDock = SeaStates.Contains(Player);
+        Entry.Original = Player->GetHero();
+        if (AVoxelCharacter* Hero = Entry.Original.Get())
+        {
+            Hero->SetWantsClimb(false);
+            Hero->StopJumping();
+            Hero->GetCharacterMovement()->StopMovementImmediately();
+            Hero->GetCharacterMovement()->DisableMovement();
+        }
+        else
+        {
+            bPartyPrepareFailed = true;
+        }
+        Player->SetVoxelInputEnabled(false);
+    }
+    UE_LOG(LogTemp, Display, TEXT("PARTY_PREPARE round=%u chest=%d players=%d"), PartyRoundId, ChestIndex, PartyPlayers.Num());
+    for (const auto& Pair : PartyPlayers)
+    {
+        Pair.Key->ClientPrepareParty(PartyRoundId, DecoyMinigameFeature);
+    }
+}
+
+AIslandGameMode::FPartyPlayer* AIslandGameMode::FindPartyPlayer(AIslandPlayerController& Player, uint32 RoundId)
+{
+    return RoundId == PartyRoundId ? PartyPlayers.Find(&Player) : nullptr;
+}
+
+void AIslandGameMode::PartyAssetsReady(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess)
+{
+    if (GetGameState<AIslandGameState>()->Phase == EIslandPhase::PartyLoading)
+    {
+        if (FPartyPlayer* Entry = FindPartyPlayer(Player, RoundId); Entry && !Entry->bAssetsReady)
+        {
+            Entry->bAssetsReady = bSuccess;
+            bPartyPrepareFailed |= !bSuccess;
+        }
+    }
+}
+
+void AIslandGameMode::PartyPawnReady(AIslandPlayerController& Player, uint32 RoundId)
+{
+    if (GetGameState<AIslandGameState>()->Phase == EIslandPhase::PartyLoading)
+    {
+        if (FPartyPlayer* Entry = FindPartyPlayer(Player, RoundId); Entry && Entry->Temporary.IsValid()
+            && Entry->Temporary.Get() == Player.GetPawn())
+        {
+            Entry->bPawnReady = true;
+        }
+    }
+}
+
+void AIslandGameMode::PartyUnloaded(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess)
+{
+    if (GetGameState<AIslandGameState>()->Phase == EIslandPhase::PartyReturning)
+    {
+        if (FPartyPlayer* Entry = FindPartyPlayer(Player, RoundId); Entry && !Entry->bUnloaded)
+        {
+            Entry->bUnloaded = true;
+            bPartyUnavailable |= !bSuccess;
+        }
+    }
+}
+
+void AIslandGameMode::UpdateParty()
+{
+    const EIslandPhase Phase = GetGameState<AIslandGameState>()->Phase;
+    const bool bTimedOut = FPlatformTime::Seconds() >= PartyDeadline;
+    if (Phase == EIslandPhase::PartyReturning)
+    {
+        const bool bAllUnloaded = Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bUnloaded; });
+        if (bAllUnloaded || bTimedOut)
+        {
+            bPartyUnavailable |= !bAllUnloaded;
+            PartyPlayers.Reset();
+            PartyChestIndex = INDEX_NONE;
+            SetPhase(EIslandPhase::Hunting);
+            UE_LOG(LogTemp, Display, TEXT("PARTY_HUNTING round=%u unloaded=%d available=%d"), PartyRoundId, bAllUnloaded, !bPartyUnavailable);
+        }
+        return;
+    }
+    if (Phase != EIslandPhase::PartyLoading)
+    {
+        return;
+    }
+    if (bPartyPrepareFailed || bTimedOut)
+    {
+        UE_LOG(LogTemp, Display, TEXT("PARTY_ABORT round=%u timeout=%d"), PartyRoundId, bTimedOut);
+        ReturnFromParty();
+        return;
+    }
+
+    if (!PartySession)
+    {
+        if (!Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bAssetsReady; }) || GetTerrain()->IsBusy())
+        {
+            return;
+        }
+        UClass* SessionClass = nullptr;
+        for (const auto& Pair : PartyPlayers)
+        {
+            if (Pair.Key->IsLocalController())
+            {
+                SessionClass = Pair.Key->GetPartySessionClass();
+                break;
+            }
+        }
+        if (SessionClass)
+        {
+            PartySession = GetWorld()->SpawnActor<APartySession>(SessionClass, FVector(8000, 0, 1700), FRotator::ZeroRotator);
+        }
+        if (!PartySession)
+        {
+            bPartyPrepareFailed = true;
+            return;
+        }
+        PartySession->OnPartyFinished.BindUObject(this, &AIslandGameMode::ReturnFromParty);
+        for (auto& Pair : PartyPlayers)
+        {
+            FPartyPlayer& Entry = Pair.Value;
+            APartyPawn* Pawn = PartySession->CreateParticipant(Entry.Seat);
+            if (!Pawn)
+            {
+                bPartyPrepareFailed = true;
+                return;
+            }
+            Entry.Temporary = Pawn;
+            Pair.Key->Possess(Pawn);
+            bPartyPrepareFailed |= Pair.Key->GetPawn() != Pawn;
+        }
+        return;
+    }
+
+    if (Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bPawnReady; }))
+    {
+        Exposed[PartyChestIndex]->Destroy();
+        Exposed[PartyChestIndex] = nullptr;
+        ConsumedDecoys.Add(PartyChestIndex);
+        SetPhase(EIslandPhase::PartyPlaying);
+        PartySession->StartParty();
+        UE_LOG(LogTemp, Display, TEXT("PARTY_START round=%u chest=%d players=%d"), PartyRoundId, PartyChestIndex, PartyPlayers.Num());
+    }
+}
+
+void AIslandGameMode::ReturnFromParty()
+{
+    constexpr double ReturnTimeout = 15.0;
+    SetPhase(EIslandPhase::PartyReturning);
+    PartyDeadline = FPlatformTime::Seconds() + ReturnTimeout;
+
+    for (auto& Pair : PartyPlayers)
+    {
+        AIslandPlayerController* Controller = Pair.Key.Get();
+        if (!Controller)
+        {
+            continue;
+        }
+        AIslandPlayerController& Player = *Controller;
+        FPartyPlayer& Entry = Pair.Value;
+        if (AVoxelCharacter* Hero = Entry.Original.Get())
+        {
+            if (Player.GetPawn() != Hero)
+            {
+                Player.Possess(Hero);
+            }
+            const UCapsuleComponent* Capsule = Hero->GetCapsuleComponent();
+            const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight());
+            const bool bBlocked = GetWorld()->OverlapBlockingTestByProfile(Hero->GetActorLocation(),
+                Hero->GetActorQuat(), Capsule->GetCollisionProfileName(), Shape, FCollisionQueryParams(SCENE_QUERY_STAT(IslandPartyReturn), false, Hero));
+            if (Entry.bReturnToDock || bBlocked)
+            {
+                Super::RecoverPlayer(Player);
+            }
+            else
+            {
+                Hero->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+                Player.SetControlRotation(Entry.View);
+                Player.ClientResetView(Entry.View);
+            }
+        }
+        else
+        {
+            Player.UnPossess();
+            RestartPlayerAtTransform(&Player, Player.StartTransform);
+            Player.ClientResetView(Player.StartTransform.Rotator());
+        }
+        if (APartyPawn* Pawn = Entry.Temporary.Get())
+        {
+            Pawn->Destroy();
+        }
+        SeaStates.Remove(&Player);
+        Player.ClientWaterState(0);
+        Player.SetVoxelInputEnabled(true);
+    }
+    if (PartySession)
+    {
+        PartySession->Destroy();
+        PartySession = nullptr;
+    }
+    for (const auto& Pair : PartyPlayers)
+    {
+        if (AIslandPlayerController* Player = Pair.Key.Get())
+        {
+            if (!ConsumedDecoys.Contains(PartyChestIndex))
+            {
+                Player->ClientEditRejected(TEXT("Party challenge could not start"));
+            }
+            Player->ClientReturnFromParty(PartyRoundId);
+        }
+    }
+    UE_LOG(LogTemp, Display, TEXT("PARTY_RETURN round=%u"), PartyRoundId);
+}
+
+void AIslandGameMode::RemovePartyPlayer(AIslandPlayerController& Player)
+{
+    FPartyPlayer Entry;
+    if (!PartyPlayers.RemoveAndCopyValue(&Player, Entry))
+    {
+        return;
+    }
+    if (PartySession)
+    {
+        PartySession->RemoveParticipant(Entry.Seat);
+    }
+    if (APartyPawn* Pawn = Entry.Temporary.Get())
+    {
+        Pawn->Destroy();
+    }
+    if (AVoxelCharacter* Hero = Entry.Original.Get(); Hero && !Hero->GetController())
+    {
+        Hero->Destroy();
     }
 }

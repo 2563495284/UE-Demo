@@ -20,6 +20,7 @@ public:
     UFUNCTION(Client, Reliable) void ClientOpenChest();
     UFUNCTION(Client, Reliable) void ClientStress(int32 Stage);
     UFUNCTION(Client, Reliable) void ClientShowChart();
+    UFUNCTION(Client, Reliable) void ClientPartySpace(bool bPressed, bool bCheckJump);
     UFUNCTION(Server, Reliable) void ServerMeasure(int32 Epoch, FIslandClues Clues, int32 Boxes, int32 Winner,
         uint32 Sequence, const FString& Digest);
     UFUNCTION(Server, Reliable) void ServerStress(int32 Stage);
@@ -30,6 +31,7 @@ public:
 private:
     int32 StressStage = 0;
     double NextRequestAt = 0.0;
+    double ObserveJumpUntil = 0.0;
 };
 
 UCLASS()
@@ -44,7 +46,7 @@ public:
     void RequestStress(int32 Seat, int32 Stage);
 
 private:
-    enum class EStep : uint8 { Waiting, Inspect, Dig, Open, ExpectDenied, Drown, StressShared, StressApart, Drain, Race, Restart, Done };
+    enum class EStep : uint8 { Waiting, Inspect, Dig, Open, ExpectDenied, Drown, StressShared, StressApart, Drain, Race, Restart, PartyOpen, PartyPlay, PartyJump, PartyDone, Done };
 
     void Advance(EStep Step);
     void Require(bool bSuccess, const TCHAR* Message);
@@ -53,6 +55,7 @@ private:
     void PrepareDig(int32 Index);
     void PrepareOpen(int32 Team);
     void StartStress(int32 Stage);
+    void TickParty(double Now);
     bool OnPrize() const { return NextDig == IslandRules::PrizeIndex; }
 
     UPROPERTY() TObjectPtr<AIslandGameMode> Mode;
@@ -63,6 +66,12 @@ private:
     TSet<int32> Reports;
     TArray<double> FrameTimes;
     FString ExpectedDigest;
+    FString BeforePartyDigest;
+    TArray<TWeakObjectPtr<APawn>> OriginalPawns;
+    double PartyStartedAt = 0.0;
+    int32 PartyAttempts = 0;
+    bool bPartyScenario = false;
+    bool bPartyTimeout = false;
     FVector PrizePose = FVector::ZeroVector;
     int32 Epoch = 0;
     int32 NextDig = 0;
