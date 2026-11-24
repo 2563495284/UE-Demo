@@ -17,10 +17,10 @@
 
 namespace
 {
-    constexpr uint8 Punch = uint8(EVoxelAction::Punch);
-    constexpr uint8 Fill = uint8(EVoxelAction::Fill);
-    constexpr uint8 Rope = 3;
-    constexpr uint8 Jump = 4;
+    constexpr uint8 DigInput = uint8(EVoxelAction::Punch);
+    constexpr uint8 ThrowInput = uint8(EVoxelAction::Fill);
+    constexpr uint8 RopeInput = 3;
+    constexpr uint8 JumpInput = 4;
     const TCHAR* Names[] = {TEXT("Tree"), TEXT("Ship"), TEXT("Hopper"), TEXT("Sail"), TEXT("Tide")};
 
     FVector Local(const AActor& Actor, double X, double Y, double Z = 0.)
@@ -110,11 +110,11 @@ void AIslandProbePeer::ClientNeutralInput_Implementation(uint8 Action, FVector T
     auto* Player = CastChecked<AIslandPlayerController>(GetOwner());
     const auto* Hero = Player->GetHero();
     if (!Hero) return;
-    if (Action == Rope)
+    if (Action == RopeInput)
     {
         ClientOpenChest_Implementation();
     }
-    else if (Action == Jump)
+    else if (Action == JumpInput)
     {
         Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::SpaceBar, IE_Pressed, 1.f));
         FTimerHandle Release;
@@ -126,8 +126,8 @@ void AIslandProbePeer::ClientNeutralInput_Implementation(uint8 Action, FVector T
     else
     {
         // Use the same controller-to-server action, reach, visibility and cooldown as a player's button press.
-        const FVector Aim = Action==Fill ? BankAim(Hero->GetAimOrigin(),Target) : (Target - Hero->GetAimOrigin()).GetSafeNormal();
-        if (Action == Fill) Player->SubmitExpeditionThrow(Aim);
+        const FVector Aim = Action==ThrowInput ? BankAim(Hero->GetAimOrigin(),Target) : (Target - Hero->GetAimOrigin()).GetSafeNormal();
+        if (Action == ThrowInput) Player->SubmitExpeditionThrow(Aim);
         else Player->SubmitEdit(EVoxelAction::Punch,Aim);
     }
     UE_LOG(LogTemp, Display, TEXT("NEUTRAL_QA_INPUT team=%d action=%d"), Player->GetTeam(), Action);
@@ -219,7 +219,7 @@ bool AIslandProbe::NeutralAim(int32 Seat, uint8 Action, const FVector& Target, c
     const double Eye = Head + (Hero->GetAimOrigin() - Hero->GetActorLocation()).Z;
     const FCollisionQueryParams Query(SCENE_QUERY_STAT(NeutralSight),false,Hero);
     TOptional<FVector> Spot;
-    const bool bFilling = Action == Fill;
+    const bool bFilling = Action == ThrowInput;
     const double Ranges[] = {bFilling ? 125. : 120., bFilling ? 161. : 153., bFilling ? 90. : 85., 170., 195.};
     for (const double Radius : Ranges)
     {
@@ -297,7 +297,7 @@ void AIslandProbe::NeutralDigLane(int32 Seat, const FVector& Point)
                 Place(Seat,Foot+FVector(0,0,H+3.));
                 NeutralAimPoint=Hit.ImpactPoint;
                 NeutralPendingSeat=Seat;
-                NeutralPendingAction=Punch;
+                NeutralPendingAction=DigInput;
                 NeutralSendAt=FPlatformTime::Seconds()+.30;
                 bNeutralWaitingInput=true;
                 return;
@@ -459,7 +459,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
         if (NeutralStep==2 || NeutralStep==3)
         {
             if (Prop.GetPhase()>=NeutralStep-1) { Next(); return; }
-            Aim(1,Punch,Prop.GetInteractionPoint(),&Prop);
+            Aim(1,DigInput,Prop.GetInteractionPoint(),&Prop);
             return;
         }
         if (NeutralStep==4)
@@ -481,7 +481,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
             const double TrunkZ=Prop.GetActorLocation().Z;
             const double LaneX=248.;
             const FVector SiteScale=Prop.GetActorScale3D();
-            const double MouthY=(46.*SiteScale.Y+84.)/SiteScale.Y;
+            const double TunnelEntranceY=(46.*SiteScale.Y+84.)/SiteScale.Y;
             const double Bed=FMath::Min(NeutralBase-65.,TrunkZ+(90.-46.)*SiteScale.Z
                 -2.*Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()-26.);
             // Scan below the wood. A shaft can retain an undisturbed roof above its side
@@ -507,7 +507,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
             FVector Stand[2];
             for (int32 I=0; I<2; ++I)
             {
-                const double Y = I ? MouthY : -MouthY;
+                const double Y = I ? TunnelEntranceY : -TunnelEntranceY;
                 const FVector Mouth = Local(Prop,LaneX,Y);
                 if (Surface(Terrain,Mouth) > Bed || !Below(LaneX,Y,Stand[I]) || Stand[I].Z > Bed+20.)
                 {
@@ -522,7 +522,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
             // A ray that meets no soil before the chosen sample must not drill the opposite bank.
             const auto& Density=*Terrain.GetDensity();
             bool bRockRemains=false;
-            for (double Y=-MouthY+12./SiteScale.Y; Y<MouthY; Y+=21./SiteScale.Y)
+            for (double Y=-TunnelEntranceY+12./SiteScale.Y; Y<TunnelEntranceY; Y+=21./SiteScale.Y)
                 for (double X=LaneX-49./SiteScale.X; X<=LaneX+50./SiteScale.X; X+=16./SiteScale.X)
                     for (double AboveBed=19.; AboveBed<=177.; AboveBed+=20.)
                     {
@@ -540,11 +540,11 @@ void AIslandProbe::TickNeutralCheck(double Now)
                             FHitResult Hit;
                             if (!Terrain.TraceRock(Eye,Eye+Dir*FMath::Min(228.,Ray.Size()+12.),Hero,Hit)) continue;
                             const FVector At=Prop.GetActorTransform().InverseTransformPosition(Hit.ImpactPoint);
-                            if (FMath::Abs(At.Y)>MouthY+9. || Hit.ImpactPoint.Z<Bed-12.) continue;
+                            if (FMath::Abs(At.Y)>TunnelEntranceY+9. || Hit.ImpactPoint.Z<Bed-12.) continue;
                             Place(2,Stand[Side]+FVector(0,0,Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()+3.));
                             NeutralAimPoint=Hit.ImpactPoint;
                             NeutralPendingSeat=2;
-                            NeutralPendingAction=Punch;
+                            NeutralPendingAction=DigInput;
                             bNeutralWaitingInput=true;
                             NeutralSendAt=Now+.30;
                             ++NeutralStroke;
@@ -595,7 +595,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
                     const FVector Dir = (Wanted-Eye).GetSafeNormal();
                     if (Terrain.TraceRock(Eye,Eye+Dir*228.,Hero,Face))
                     {
-                        Peers[2]->ClientNeutralInput(Punch,Face.ImpactPoint);
+                        Peers[2]->ClientNeutralInput(DigInput,Face.ImpactPoint);
                         ++NeutralStroke;
                         bSent=true;
                     }
@@ -615,7 +615,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
                             const FVector At = Prop.GetActorTransform().InverseTransformPosition(Hit.ImpactPoint);
                             // Excavate the wall or a high lip ahead, preserving the ground under our own feet.
                             if (Advance<15. || Advance>145. || FMath::Abs(At.Y)>130. || Hit.ImpactPoint.Z<Foot.Z-12.) continue;
-                            Peers[2]->ClientNeutralInput(Punch,Hit.ImpactPoint);
+                            Peers[2]->ClientNeutralInput(DigInput,Hit.ImpactPoint);
                             ++NeutralStroke;
                             bSent=true;
                             break;
@@ -644,13 +644,16 @@ void AIslandProbe::TickNeutralCheck(double Now)
         {
             if (Terrain.IsBusy() || Now-LastAction<.68) return;
             const double Outer = 240.;
-            const double Bed = Prop.GetActorLocation().Z - 137.;
+            const auto* Hero=Players[1]->GetHero();
+            const auto& Capsule=*Hero->GetCapsuleComponent();
+            const double Half=Capsule.GetScaledCapsuleHalfHeight();
+            const double Bed=Local(Prop,0,0,116.5).Z-2.*Half-33.;
             // Revisit each clear vertical sight line until it reaches the working level.
             // The gunport lintels are solid; excavate beneath them from the sides below.
             for (const double X : {-Outer,Outer,-113.,-67.,-25.,19.,67.,113.})
             {
                 const FVector P = Local(Prop,X,0);
-                if (Surface(Terrain,P) <= Bed+38.) continue;
+                if (Surface(Terrain,P) <= Bed+18.) continue;
                 NeutralDigLane(1,P);
                 ++NeutralStroke;
                 LastAction=Now;
@@ -658,8 +661,6 @@ void AIslandProbe::TickNeutralCheck(double Now)
             }
             // The lintels cast a shadow over both mouths. Sampling only the top of the sand
             // misses a narrow knee- or shoulder-high plug under a perfectly clear centre ray.
-            const auto* Hero=Players[1]->GetHero();
-            const double Half=Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
             const double EyeHeight=Half+Hero->GetAimOrigin().Z-Hero->GetActorLocation().Z;
             const auto& Density=*Terrain.GetDensity();
             TArray<FVector,TInlineAllocator<12>> Stands;
@@ -672,8 +673,9 @@ void AIslandProbe::TickNeutralCheck(double Now)
                     if (NeutralFloorPose(1,Ground,Foot,Height) && FMath::Abs(Foot.Z-Ground.Z)<42.)
                     { Stands.Add(Foot); break; }
             }
-            for (double X=-221.; X<=222.; X+=21.)
-                for (double Y=-50.; Y<=50.; Y+=16.)
+            const double LaneRadius=(Capsule.GetScaledCapsuleRadius()+12.)/Prop.GetActorScale3D().Y;
+            for (double X=-221.; X<=222.; X+=25./Prop.GetActorScale3D().X)
+                for (double Y=-LaneRadius; Y<=LaneRadius; Y+=16./Prop.GetActorScale3D().Y)
                     for (double Height=18.; Height<180.; Height+=20.)
                     {
                         const FVector P=Local(Prop,X,Y,Bed-Prop.GetActorLocation().Z+Height);
@@ -692,7 +694,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
                             if (FMath::Abs(At.X)>248. || FMath::Abs(At.Y)>72. || Hit.ImpactPoint.Z<Bed-15.) continue;
                             Place(1,Stand+FVector(0,0,Half+3.));
                             NeutralPendingSeat=1;
-                            NeutralPendingAction=Punch;
+                            NeutralPendingAction=DigInput;
                             NeutralAimPoint=Hit.ImpactPoint;
                             bNeutralWaitingInput=true;
                             NeutralSendAt=Now+.28;
@@ -763,13 +765,13 @@ void AIslandProbe::TickNeutralCheck(double Now)
                         const FVector Dir=(Wanted-Eye).GetSafeNormal();
                         if (Terrain.TraceRock(Eye,Eye+Dir*228.,&Guest,Face))
                         {
-                            Peers[2]->ClientNeutralInput(Punch,Face.ImpactPoint);
+                            Peers[2]->ClientNeutralInput(DigInput,Face.ImpactPoint);
                             bDug=true;
                             ++NeutralStroke;
                         }
                     }
                     // If the remaining obstruction is a small turf lip, a regular jump can step onto it.
-                    if (!bDug || NeutralStroke%4==0) Peers[2]->ClientNeutralInput(Jump,NeutralWalkTo);
+                    if (!bDug || NeutralStroke%4==0) Peers[2]->ClientNeutralInput(JumpInput,NeutralWalkTo);
                     UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_SHIP_PROGRESS foot=%s"),*At.ToCompactString());
                     LastAction=Now;
                 }
@@ -813,7 +815,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
                 return;
             }
             const FVector P=Local(Prop,229,190);
-            Aim(1,Fill,FVector(P.X,P.Y,Surface(Terrain,P)),&Terrain);
+            Aim(1,ThrowInput,FVector(P.X,P.Y,Surface(Terrain,P)),&Terrain);
         }
         if (NeutralStep==6)
         {
@@ -834,7 +836,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
             }
             else if (Age>.74+NeutralStroke*.8 && Movement.IsMovingOnGround() && Foot.Z < NeutralWalkTo.Z-22.)
             {
-                Peers[1]->ClientNeutralInput(Jump,NeutralWalkTo);
+                Peers[1]->ClientNeutralInput(JumpInput,NeutralWalkTo);
                 ++NeutralStroke;
             }
         }
@@ -858,7 +860,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
         if (NeutralStep==3)
         {
             if (Prop.GetPhase()>=1) { Mode->RecoverPlayer(*Players[1]); Next(); return; }
-            Aim(1,Punch,Prop.GetInteractionPoint(),&Prop);
+            Aim(1,DigInput,Prop.GetInteractionPoint(),&Prop);
             return;
         }
         if (NeutralStep==4)
@@ -899,7 +901,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
         if (NeutralStep==2)
         {
             if (Prop.GetPhase()==1) { Next(); return; }
-            Aim(1,Rope,Prop.GetInteractionPoint(),&Prop);
+            Aim(1,RopeInput,Prop.GetInteractionPoint(),&Prop);
             return;
         }
         if (NeutralStep==3 && Shared())
@@ -921,7 +923,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
                 Done();
                 return;
             }
-            Aim(2,Rope,Prop.GetInteractionPoint(),&Prop);
+            Aim(2,RopeInput,Prop.GetInteractionPoint(),&Prop);
         }
         return;
     }
@@ -942,7 +944,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
                 Next();
                 return;
             }
-            Aim(1,Fill,FVector(A.X,A.Y,Surface(Terrain,A)),&Terrain);
+            Aim(1,ThrowInput,FVector(A.X,A.Y,Surface(Terrain,A)),&Terrain);
             return;
         }
         if (NeutralStep==3)
@@ -957,7 +959,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
             if (Age>.65 && Now-LastAction>.55 && Prop.IsTideBoostReady() && Players[2]->GetHero()->GetCharacterMovement()->IsMovingOnGround())
             {
                 Capture(TEXT("After"));
-                Peers[2]->ClientNeutralInput(Jump,B);
+                Peers[2]->ClientNeutralInput(JumpInput,B);
                 LastAction=Now;
             }
             const auto& Hero=*Players[2]->GetHero();
@@ -981,7 +983,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
         if (NeutralStep==6)
         {
             if (Prop.GetPlugMask()==3) { Next(); return; }
-            Aim(2,Fill,FVector(B.X,B.Y,Surface(Terrain,B)),&Terrain);
+            Aim(2,ThrowInput,FVector(B.X,B.Y,Surface(Terrain,B)),&Terrain);
             return;
         }
         if (NeutralStep==7)
@@ -994,7 +996,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
         if (NeutralStep==8)
         {
             if (!(Prop.GetPlugMask()&1)) { Next(); return; }
-            Aim(2,Punch,FVector(A.X,A.Y,Surface(Terrain,A)),&Terrain);
+            Aim(2,DigInput,FVector(A.X,A.Y,Surface(Terrain,A)),&Terrain);
             return;
         }
         if (NeutralStep==9)
@@ -1005,7 +1007,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
                 Done();
                 return;
             }
-            Aim(1,Punch,FVector(B.X,B.Y,Surface(Terrain,B)),&Terrain);
+            Aim(1,DigInput,FVector(B.X,B.Y,Surface(Terrain,B)),&Terrain);
         }
     }
 }

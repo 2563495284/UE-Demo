@@ -222,7 +222,25 @@ namespace
             if (*It==Hero) { Body=BodyParts; Paws=EyeParts; }
             else if (BodyParts>=6 && EyeParts==0) ++Others;
         }
-        if (Others<Seats-1) return false;
+        // Opposing docks are beyond the pawn's 150 m net relevance. Walk inland
+        // through the real input mapping before checking the opponent's model.
+        static bool WalkingInland=false;
+        if (Others<Seats-1)
+        {
+            if (Stage==0 && !WalkingInland)
+            {
+                PC.SetControlRotation((-Hero->GetActorLocation().GetSafeNormal2D()).Rotation());
+                Key(PC,EKeys::W,true);
+                WalkingInland=true;
+            }
+            return false;
+        }
+        if (WalkingInland)
+        {
+            Key(PC,EKeys::W,false);
+            WalkingInland=false;
+            return false;
+        }
 
         FVector Eye;
         FRotator View;

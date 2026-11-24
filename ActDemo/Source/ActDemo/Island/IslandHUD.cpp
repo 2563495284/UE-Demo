@@ -545,7 +545,7 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
                     const FVector2D Middle = P + Normal*Offset;
                     Line(Middle-Diagonal*HalfLength,Middle+Diagonal*HalfLength,Hatch);
                 }
-                Mark(P+FVector2D(-.85,-.72)*Radius,Letter,IslandHudColors::Ink);
+                Mark(P+FVector2D(-.80,-.80)*Radius-FVector2D(8,5),Letter,IslandHudColors::Ink);
             }
         }
     }

@@ -5,7 +5,7 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
-namespace
+namespace NeutralPropColors
 {
     const FColor Bark(114,68,45), BarkLight(161,104,62), Leaf(54,132,75), LeafLight(108,177,96);
     const FColor Rock(105,115,121), RockLight(132,143,147);
@@ -64,6 +64,7 @@ UStaticMeshComponent* AIslandNeutralProp::Beam(FVector A, FVector B, double Widt
 
 void AIslandNeutralProp::BuildTree()
 {
+    using namespace NeutralPropColors;
     // Only the two supports sit on the ground. The span in between stays editable.
     Piece(Ball, {-9,7,-51}, {170,157,184}, Rock);
     Piece(Ball, {485,0,12}, {125,172,121}, Rock, true, FRotator(5,12,0));
@@ -112,6 +113,7 @@ void AIslandNeutralProp::AnimateTree(double Age)
 
 void AIslandNeutralProp::BuildShip()
 {
+    using namespace NeutralPropColors;
     // +X crosses the wreck. The lower central bay consists entirely of island
     // voxels; the lintels above the open gunports carry the walkable upper deck.
     for (const double Side : {-1.,1.})
@@ -153,6 +155,7 @@ void AIslandNeutralProp::BuildShip()
 
 void AIslandNeutralProp::BuildHopper()
 {
+    using namespace NeutralPropColors;
     const FVector Leg = {-135.,0.,0.};
     for (double X : {-55.,55.})
         for (double Y : {-94.,94.})
@@ -199,6 +202,7 @@ void AIslandNeutralProp::AnimateHopper(double Age)
 
 void AIslandNeutralProp::BuildSail()
 {
+    using namespace NeutralPropColors;
     for (const double Side : {-1.,1.})
     {
         Beam({0,Side*217.,-76.},{0,Side*217.,309.},20.,Mast);
@@ -253,6 +257,7 @@ void AIslandNeutralProp::AnimateSail(double Now)
 
 void AIslandNeutralProp::BuildTide()
 {
+    using namespace NeutralPropColors;
     for (int32 Mouth=0; Mouth<2; ++Mouth)
     {
         const FVector Center = GetActorTransform().InverseTransformPosition(GetTideMouth(Mouth));

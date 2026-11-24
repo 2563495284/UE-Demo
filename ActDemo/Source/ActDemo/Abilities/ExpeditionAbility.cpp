@@ -8,7 +8,7 @@
 #include "Island/IslandPlayerController.h"
 #include "Voxel/VoxelCharacter.h"
 
-namespace
+namespace ExpeditionTags
 {
     UE_DEFINE_GAMEPLAY_TAG_STATIC(Dig, "Expedition.Action.Dig");
     UE_DEFINE_GAMEPLAY_TAG_STATIC(Throw, "Expedition.Action.Throw");
@@ -26,18 +26,18 @@ FGameplayTag ExpeditionAbilities::ActionTag(EExpeditionAction Action)
 {
     switch (Action)
     {
-    case EExpeditionAction::Dig: return Dig;
-    case EExpeditionAction::Throw: return Throw;
-    case EExpeditionAction::Jump: return Jump;
-    case EExpeditionAction::Interact: return Interact;
-    case EExpeditionAction::Rally: return Rally;
-    case EExpeditionAction::Recall: return Recall;
+    case EExpeditionAction::Dig: return ExpeditionTags::Dig;
+    case EExpeditionAction::Throw: return ExpeditionTags::Throw;
+    case EExpeditionAction::Jump: return ExpeditionTags::Jump;
+    case EExpeditionAction::Interact: return ExpeditionTags::Interact;
+    case EExpeditionAction::Rally: return ExpeditionTags::Rally;
+    case EExpeditionAction::Recall: return ExpeditionTags::Recall;
     }
     return FGameplayTag();
 }
 
-FGameplayTag ExpeditionAbilities::Stunned() { return Stun; }
-FGameplayTag ExpeditionAbilities::Immune() { return Immunity; }
+FGameplayTag ExpeditionAbilities::Stunned() { return ExpeditionTags::Stun; }
+FGameplayTag ExpeditionAbilities::Immune() { return ExpeditionTags::Immunity; }
 
 UExpeditionTimedEffect::UExpeditionTimedEffect()
 {
@@ -58,10 +58,10 @@ bool ExpeditionAbilities::ApplyTimedTag(UAbilitySystemComponent& ASC, FGameplayT
 void ExpeditionAbilities::ClearTimedTags(UAbilitySystemComponent& ASC)
 {
     FGameplayTagContainer Tags;
-    Tags.AddTag(Stun);
-    Tags.AddTag(Immunity);
-    Tags.AddTag(DigCooldown);
-    Tags.AddTag(ThrowCooldown);
+    Tags.AddTag(ExpeditionTags::Stun);
+    Tags.AddTag(ExpeditionTags::Immunity);
+    Tags.AddTag(ExpeditionTags::DigCooldown);
+    Tags.AddTag(ExpeditionTags::ThrowCooldown);
     ASC.RemoveActiveEffects(FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(Tags));
 }
 
@@ -95,13 +95,13 @@ void UExpeditionAbility::SetAction(EExpeditionAction InAction)
 UExpeditionDigAbility::UExpeditionDigAbility()
 {
     SetAction(EExpeditionAction::Dig);
-    Cooldown = DigCooldown;
+    Cooldown = ExpeditionTags::DigCooldown;
     Interval = .50f;
 }
 UExpeditionThrowAbility::UExpeditionThrowAbility()
 {
     SetAction(EExpeditionAction::Throw);
-    Cooldown = ThrowCooldown;
+    Cooldown = ExpeditionTags::ThrowCooldown;
     Interval = .60f;
 }
 UExpeditionInteractAbility::UExpeditionInteractAbility() { SetAction(EExpeditionAction::Interact); }

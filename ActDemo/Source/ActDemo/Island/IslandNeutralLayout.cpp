@@ -21,7 +21,7 @@ FVector IslandNeutral::SiteScale(EIslandNeutralKind Kind)
     return FVector::OneVector;
 }
 
-namespace
+namespace NeutralLayoutDetail
 {
     // A path connects neighbouring floor samples. A blocker is expanded by the pawn
     // radius plus half an edge, so a graph edge can never jump across a narrow post.
@@ -430,6 +430,7 @@ namespace
 void IslandNeutral::Generate(UWorld& World,const AVoxelTerrain& Terrain,int32 RoundSeed,
     const FIslandTreasureLayout& Treasure,TArray<FIslandNeutralPlacement>& Out)
 {
+    using NeutralLayoutDetail::FIslandSurface;
     Out.Reset();
     if (Terrain.Layout!=EVoxelLayout::Expedition || !Terrain.GetDensity()) return;
     FIslandSurface Surface(World,Terrain);
@@ -440,6 +441,7 @@ void IslandNeutral::Generate(UWorld& World,const AVoxelTerrain& Terrain,int32 Ro
 #if !UE_BUILD_SHIPPING
 bool IslandNeutral::Audit(UWorld& World,const AVoxelTerrain& Terrain,int32 DecoyCount)
 {
+    using namespace NeutralLayoutDetail;
     if (!Terrain.GetDensity() || Terrain.Layout!=EVoxelLayout::Expedition) return false;
     const FIslandSurface Surface(World,Terrain);
     int32 Counts[KindCount]={};
