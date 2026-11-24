@@ -22,9 +22,16 @@
 #include "Voxel/VoxelTerrain.h"
 #include "Widgets/SWeakWidget.h"
 
+namespace IslandHudColors
+{
+    const FLinearColor Panel(.018f, .030f, .038f, .93f);
+    const FLinearColor Ink(.91f, .94f, .92f);
+    const FLinearColor Sea(.48f, .60f, .60f);
+    const FLinearColor Alert(.99f, .76f, .48f);
+}
+
 namespace
 {
-    const FLinearColor PanelColor(.018f,.030f,.038f,.93f), Ink(.91f,.94f,.92f), Sea(.48f,.60f,.60f), Alert(.99f,.76f,.48f);
     TArray<int32> OccupiedTeams(const AIslandGameState& GS)
     {
         TArray<int32> Teams;
@@ -307,7 +314,7 @@ void AIslandHUD::DrawHUD()
     {
         if (!GS->bRoomLobby && (GS->Phase==EIslandPhase::Waiting || GS->Phase==EIslandPhase::Finished))
             DrawText(GS->Phase==EIslandPhase::Waiting?FString::Printf(TEXT("等待队员   %u / 6"),GS->JoinedCount)
-                :FString::Printf(TEXT("第 %d 队找到宝藏"),GS->Winner+1),Ink,20,20,GEngine->GetMediumFont(),1);
+                :FString::Printf(TEXT("第 %d 队找到宝藏"),GS->Winner+1),IslandHudColors::Ink,20,20,GEngine->GetMediumFont(),1);
         return;
     }
     DrawHunt(*PC);
@@ -316,13 +323,13 @@ void AIslandHUD::DrawHUD()
 void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
 {
     const float W=Canvas->ClipX,H=Canvas->ClipY, S=FMath::Clamp(H/720.f,.70f,1.65f);
-    auto Box=[&](const FString& Text,float X,float Y,FLinearColor Color=Ink, bool bCentered=false)
+    auto Box=[&](const FString& Text,float X,float Y,FLinearColor Color=IslandHudColors::Ink, bool bCentered=false)
     {
         if (Text.IsEmpty()) return;
         float TW,TH; UFont* Font=GEngine->GetMediumFont();
         GetTextSize(Text,TW,TH,Font,S);
         X=bCentered?X-TW*.5f:X;
-        DrawRect(PanelColor,X-8*S,Y-4*S,TW+16*S,TH+8*S);
+        DrawRect(IslandHudColors::Panel,X-8*S,Y-4*S,TW+16*S,TH+8*S);
         DrawText(Text,Color,X,Y,Font,S);
     };
     const int32 Team=PC.GetTeam();
@@ -335,30 +342,30 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     }
     const auto* Chest=PC.GetReachableChest();
     const float X=W*.5f,Y=H*.5f;
-    DrawRect(PanelColor,X-3*S,Y-3*S,6*S,6*S);
-    DrawRect(Ink,X-S,Y-S,2*S,2*S);
+    DrawRect(IslandHudColors::Panel,X-3*S,Y-3*S,6*S,6*S);
+    DrawRect(IslandHudColors::Ink,X-S,Y-S,2*S,2*S);
     if (Chest)
     {
         FVector2D Screen;
         if (PC.ProjectWorldLocationToScreen(Chest->GetActorLocation()+FVector(0,0,50),Screen))
-            Box(Chest->IsPrize() && !PC.GetLocalClues().Complete() ? TEXT("宝藏 · 需要四条线索") : TEXT("E  打开"),Screen.X,Screen.Y,Ink,true);
+            Box(Chest->IsPrize() && !PC.GetLocalClues().Complete() ? TEXT("宝藏 · 需要四条线索") : TEXT("E  打开"),Screen.X,Screen.Y,IslandHudColors::Ink,true);
     }
     const FString Water=PC.WaterStatus();
-    if (!Water.IsEmpty()) Box(Water,X,H*.30f,Alert,true);
-    if (PC.IsNoticeVisible()) Box(PC.GetDisplayNotice(),X,H*.65f,Ink,true);
+    if (!Water.IsEmpty()) Box(Water,X,H*.30f,IslandHudColors::Alert,true);
+    if (PC.IsNoticeVisible()) Box(PC.GetDisplayNotice(),X,H*.65f,IslandHudColors::Ink,true);
     const double Progress=PC.GetRecoverProgress();
     if (Progress>0)
     {
-        Box(TEXT("松开 R 取消回码头"),X,H*.72f,Ink,true);
-        DrawRect(PanelColor,X-70*S,H*.78f,140*S,4*S);
-        DrawRect(Ink,X-70*S,H*.78f,140*S*Progress,4*S);
+        Box(TEXT("松开 R 取消回码头"),X,H*.72f,IslandHudColors::Ink,true);
+        DrawRect(IslandHudColors::Panel,X-70*S,H*.78f,140*S,4*S);
+        DrawRect(IslandHudColors::Ink,X-70*S,H*.78f,140*S*Progress,4*S);
     }
     if (PC.ShowControlHelp())
     {
-        Box(TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下"),X,H-115*S,Ink,true);
-        Box(TEXT("Q 回填    按住 Shift 攀爬    E 开箱    按住 R 回码头"),X,H-81*S,Ink,true);
+        Box(TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下"),X,H-115*S,IslandHudColors::Ink,true);
+        Box(TEXT("Q 回填    按住 Shift 攀爬    E 开箱    按住 R 回码头"),X,H-81*S,IslandHudColors::Ink,true);
     }
-    Box(TEXT("按住 Tab 看海图    按住 F1 看操作"),X,H-40*S,Ink,true);
+    Box(TEXT("按住 Tab 看海图    按住 F1 看操作"),X,H-40*S,IslandHudColors::Ink,true);
 }
 
 void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
@@ -374,33 +381,33 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
         { DrawLine(A.X,A.Y,B.X,B.Y,Tint(C),Thickness); };
     const auto Mark=[&](FVector2D P,const FString& Text,FLinearColor Color)
         {DrawText(Text,Tint(Color),P.X+5,P.Y-7,GEngine->GetMediumFont(),.85f);};
-    DrawRect(Tint(PanelColor),Center.X-Size*.5f,Center.Y-Size*.5f,Size,Size);
+    DrawRect(Tint(IslandHudColors::Panel),Center.X-Size*.5f,Center.Y-Size*.5f,Size,Size);
     const auto& Coast=Terrain->GetCoastOutline();
-    for (int32 I=0;I<Coast.Num();++I) Line(Project(Coast[I]),Project(Coast[(I+1)%Coast.Num()]),Sea,1.5f);
+    for (int32 I=0;I<Coast.Num();++I) Line(Project(Coast[I]),Project(Coast[(I+1)%Coast.Num()]),IslandHudColors::Sea,1.5f);
     const FIslandClues& Clues=PC.GetLocalClues();
     const auto& Circles=Terrain->GetSearchCircles();
     if (Clues.Complete())
     {
-        Line(Project(Clues.Points[0]),Project(Clues.Points[2]),Ink);
-        Line(Project(Clues.Points[1]),Project(Clues.Points[3]),Ink);
+        Line(Project(Clues.Points[0]),Project(Clues.Points[2]),IslandHudColors::Ink);
+        Line(Project(Clues.Points[1]),Project(Clues.Points[3]),IslandHudColors::Ink);
         const FVector2D Hit=Project(Clues.Crossing);
-        Line(Hit-FVector2D(6,6),Hit+FVector2D(6,6),Alert,2);
-        Line(Hit+FVector2D(-6,6),Hit+FVector2D(6,-6),Alert,2);
+        Line(Hit-FVector2D(6,6),Hit+FVector2D(6,6),IslandHudColors::Alert,2);
+        Line(Hit+FVector2D(-6,6),Hit+FVector2D(6,-6),IslandHudColors::Alert,2);
     }
     for (int32 I=0;I<Circles.Num();++I)
     {
         const bool Found=(Clues.Mask & (1<<I))!=0 && Clues.Points.IsValidIndex(I);
         const FVector2D P=Project(Found?Clues.Points[I]:FVector2D(Circles[I].Center));
         const FString Letter=FString::Printf(TEXT("%c"),'A'+I);
-        if (Found) { DrawRect(Tint(Ink),P.X-2.5f,P.Y-2.5f,5,5); Mark(P,Letter,Ink); }
+        if (Found) { DrawRect(Tint(IslandHudColors::Ink),P.X-2.5f,P.Y-2.5f,5,5); Mark(P,Letter,IslandHudColors::Ink); }
         else for (int32 J=0;J<40;++J)
         {
             const auto Ring=[&](double K){return P+Scale*Circles[I].Radius*FVector2D(FMath::Cos(K*UE_TWO_PI/40),FMath::Sin(K*UE_TWO_PI/40));};
-            Line(Ring(J),Ring(J+1),Sea);
+            Line(Ring(J),Ring(J+1),IslandHudColors::Sea);
         }
     }
     for (TActorIterator<AExpeditionLandmark> It(GetWorld());It;++It)
-        Mark(Project(FVector2D(It->GetActorLocation())),FString::Printf(TEXT("%c"),'A'+It->ClueIndex),Sea);
+        Mark(Project(FVector2D(It->GetActorLocation())),FString::Printf(TEXT("%c"),'A'+It->ClueIndex),IslandHudColors::Sea);
     if (const auto* GS=GetWorld()->GetGameState<AIslandGameState>())
     {
         const TArray<int32>& Teams=GS->LaunchedTeams;
@@ -408,19 +415,19 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
             if (const auto* Dock=AExpeditionDock::FindForTeam(GetWorld(),Teams,Team))
             {
                 const auto P=Project(FVector2D(Dock->GetActorLocation()));
-                DrawText(FString::Printf(TEXT("码头 %d"),Team+1),Tint(Team==PC.GetTeam()?Ink:Sea),
+                DrawText(FString::Printf(TEXT("码头 %d"),Team+1),Tint(Team==PC.GetTeam()?IslandHudColors::Ink:IslandHudColors::Sea),
                     P.X-48,P.Y-16,GEngine->GetMediumFont(),.95f);
-                DrawRect(Tint(Sea),P.X-2,P.Y-2,4,4);
+                DrawRect(Tint(IslandHudColors::Sea),P.X-2,P.Y-2,4,4);
             }
         for (const auto& Entry:GS->PlayerArray)
             if (const auto* P=Cast<AIslandPlayerState>(Entry.Get()); P && P->Team==PC.GetTeam() && P->GetPawn())
             {
                 const auto Pos=Project(FVector2D(P->GetPawn()->GetActorLocation()));
                 const bool bSelf=P==PC.GetPlayerState<AIslandPlayerState>();
-                const FLinearColor Color=bSelf?Alert:Ink;
+                const FLinearColor Color=bSelf?IslandHudColors::Alert:IslandHudColors::Ink;
                 const double Heading=FMath::DegreesToRadians(P->GetPawn()->GetActorRotation().Yaw);
                 const FVector2D Forward(FMath::Sin(Heading),-FMath::Cos(Heading)),Side(-Forward.Y,Forward.X);
-                if (bSelf) Mark(Pos+FVector2D(5,5),TEXT("你"),Alert);
+                if (bSelf) Mark(Pos+FVector2D(5,5),TEXT("你"),IslandHudColors::Alert);
                 Line(Pos+Forward*5,Pos-Forward*3+Side*3,Color,2);
                 Line(Pos+Forward*5,Pos-Forward*3-Side*3,Color,2);
             }
