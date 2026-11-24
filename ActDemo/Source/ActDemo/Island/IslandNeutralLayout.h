@@ -42,6 +42,11 @@ struct ACTDEMO_API FIslandNeutralSettings
 
 namespace IslandNeutral
 {
+    // Construction coordinates describe the modules of each landmark. Vertical proportions
+    // can differ from the ground plan so deck heights and controls remain within player reach.
+    ACTDEMO_API FVector SiteScale(EIslandNeutralKind Kind);
+    inline constexpr double TideTravel = 850.; // world centimetres from a mouth to its uphill exit
+    inline constexpr double TideRadius = 210.;
     ACTDEMO_API void Generate(UWorld& World, const AVoxelTerrain& Terrain, int32 RoundSeed,
         const FIslandTreasureLayout& Treasure, TArray<FIslandNeutralPlacement>& Out);
 #if !UE_BUILD_SHIPPING

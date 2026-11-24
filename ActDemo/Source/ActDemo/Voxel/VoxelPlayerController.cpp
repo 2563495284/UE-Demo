@@ -112,6 +112,7 @@ void AVoxelPlayerController::SetupInputComponent()
     {
         return;
     }
+    InputComponent->BindKey(EKeys::V, IE_Pressed, this, &AVoxelPlayerController::SwitchPerspective);
     Input->BindAction(InputConfig->Move, ETriggerEvent::Triggered, this, &AVoxelPlayerController::Move);
     Input->BindAction(InputConfig->Look, ETriggerEvent::Triggered, this, &AVoxelPlayerController::Look);
     Input->BindAction(InputConfig->Dodge, ETriggerEvent::Started, this, &AVoxelPlayerController::Jump);
@@ -187,6 +188,15 @@ void AVoxelPlayerController::Jump()
     }
 }
 
+void AVoxelPlayerController::SwitchPerspective()
+{
+    if (IsLocalController() && bPlaying && bVoxelInputEnabled && UsesExpeditionAbilities()
+        && GetHero() && GetViewTarget() == GetHero())
+    {
+        bFirstPersonView = !bFirstPersonView;
+    }
+}
+
 void AVoxelPlayerController::Punch()
 {
     if (UsesExpeditionAbilities()) SetExpeditionDigHeld(true);
@@ -241,7 +251,7 @@ FVector AVoxelPlayerController::GetExcavationAim(const AVoxelCharacter& Hero) co
     FVector CameraLocation;
     FRotator CameraRotation;
     GetPlayerViewPoint(CameraLocation, CameraRotation);
-    if (UsesExpeditionAbilities() && FRotator::NormalizeAxis(CameraRotation.Pitch) < -72.f)
+    if (UsesExpeditionAbilities() && !Hero.IsInFirstPersonView() && FRotator::NormalizeAxis(CameraRotation.Pitch) < -72.f)
         return (FRotator(0., CameraRotation.Yaw, 0.).Vector() * .07f - FVector::UpVector).GetSafeNormal();
     const FVector End = CameraLocation + CameraRotation.Vector() * 1000.0;
     FCollisionQueryParams Params(SCENE_QUERY_STAT(VoxelCrosshair), false, &Hero);
@@ -263,7 +273,7 @@ FVector AVoxelPlayerController::GetExpeditionThrowAim(const AVoxelCharacter& Her
     GetPlayerViewPoint(Eye, View);
     // Looking straight down in a shoulder camera otherwise hits well off to the side
     // of the player's own capsule. In this limit the target is the ground at the toes.
-    if (FRotator::NormalizeAxis(View.Pitch) < -72.f)
+    if (!Hero.IsInFirstPersonView() && FRotator::NormalizeAxis(View.Pitch) < -72.f)
         return (FRotator(0., View.Yaw, 0.).Vector() * .07f - FVector::UpVector).GetSafeNormal();
 
     const FVector Far = Eye + View.Vector() * 1400.;

@@ -103,6 +103,7 @@ private:
     double MudKnockTime = 0., MudBase = 0.;
     FVector MudFoot = FVector::ZeroVector, MudShaft = FVector::ZeroVector;
     bool bNeutralScenario = false;
+    bool bEarlyPrizeCheck = false;
     bool bNeutralWaitingInput = false;
     uint8 NeutralPendingAction = 0;
     int32 NeutralPendingSeat = 0, NeutralKind = 0, NeutralStep = 0, NeutralStroke = 0;

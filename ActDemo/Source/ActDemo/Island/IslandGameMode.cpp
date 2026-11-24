@@ -182,7 +182,8 @@ bool AIslandGameMode::PrepareRound(FString& Error)
     const AVoxelTerrain* Terrain = GetTerrain();
     const auto& Circles = Terrain->GetSearchCircles();
     const auto& Density = *Terrain->GetDensity();
-    if (!IslandRules::GenerateLayout(0, Decoys, Circles, Density, HiddenLayout, &Error, true))
+    const TArray<FBox2D> SearchObstacles = bExpeditionRoom ? IslandRules::CollectSearchObstacles(*GetWorld()) : TArray<FBox2D>();
+    if (!bExpeditionRoom && !IslandRules::GenerateLayout(0, Decoys, Circles, Density, HiddenLayout, &Error, true))
     {
         return false;
     }
@@ -192,14 +193,25 @@ bool AIslandGameMode::PrepareRound(FString& Error)
     // Designers can replay a layout in the normal front end without starting an automated probe.
     FParse::Value(FCommandLine::Get(), TEXT("ExpeditionSeed="), LayoutSeed);
 #endif
-    if (IslandRules::GenerateLayout(LayoutSeed, Decoys, Circles, Density, RandomLayout))
+    if (IslandRules::GenerateLayout(LayoutSeed, Decoys, Circles, Density, RandomLayout, &Error, false, SearchObstacles))
     {
         HiddenLayout = MoveTemp(RandomLayout);
+    }
+    else if (bExpeditionRoom)
+    {
+        return false;
     }
 #if !UE_BUILD_SHIPPING
     if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")) && bExpeditionRoom)
     {
         UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_SEED %d"), LayoutSeed);
+        if ((FParse::Param(FCommandLine::Get(), TEXT("ExpeditionSearchAudit"))
+            || FParse::Param(FCommandLine::Get(), TEXT("NeutralLayoutAudit")))
+            && !IslandRules::AuditSearchAreas(Circles, Density, SearchObstacles))
+        {
+            Error = TEXT("搜索圈种子复验失败");
+            return false;
+        }
         if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")))
         {
             // Captured D shelf from crew-eight. Recompute the puzzle's actual line intersection.
@@ -233,7 +245,7 @@ bool AIslandGameMode::PrepareRound(FString& Error)
         IslandNeutral::Generate(*GetWorld(), *Terrain, LayoutSeed, HiddenLayout, Layout);
         for (const auto& Placement : Layout)
         {
-            const FTransform Transform(FRotator(0., Placement.Yaw, 0.), FVector(Placement.Location));
+            const FTransform Transform(FRotator(0., Placement.Yaw, 0.), FVector(Placement.Location), IslandNeutral::SiteScale(Placement.Kind));
             auto* Prop = GetWorld()->SpawnActorDeferred<AIslandNeutralProp>(AIslandNeutralProp::StaticClass(),
                 Transform, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
             if (!Prop) continue;
@@ -544,6 +556,22 @@ bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim)
     return false;
 }
 
+void AIslandGameMode::RevealChestIfClear(int32 Index)
+{
+    if (Exposed[Index] || ConsumedDecoys.Contains(Index)) return;
+    const bool bPrize = Index == IslandRules::PrizeIndex;
+    if (bPrize && bExpeditionRoom && !TeamClues.ContainsByPredicate([](const FIslandClues& Team) { return Team.Complete(); }))
+        return;
+
+    const FVector Center = HiddenLayout.GetCenter(Index);
+    if (!GetTerrain()->IsVolumeClear(FBox::BuildAABB(Center, IslandRules::ChestExtent))) return;
+    if (AIslandChest* Chest = GetWorld()->SpawnActor<AIslandChest>(Center, FRotator::ZeroRotator))
+    {
+        Chest->SetPrize(bPrize);
+        Exposed[Index] = Chest;
+    }
+}
+
 void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source)
 {
     for (AIslandNeutralProp* Prop : NeutralProps)
@@ -555,28 +583,27 @@ void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerCon
     AIslandPlayerController* Digger = bExpeditionRoom ? Cast<AIslandPlayerController>(Source) : nullptr;
     const FVector BrushCenter(Edit.Center);
     const double BrushRadius = VoxelPlayground::RadiusFor(Edit.BrushId);
-    double NearestBuriedGap = MAX_dbl;
+    bool bFaintEcho = false;
+    bool bStrongEcho = false;
     for (int32 Index = 0; Index < Exposed.Num(); ++Index)
     {
         const FVector Center = HiddenLayout.GetCenter(Index);
         const FBox Bounds = FBox::BuildAABB(Center, IslandRules::ChestExtent);
-        if (!Exposed[Index] && !ConsumedDecoys.Contains(Index) && GetTerrain()->IsVolumeClear(Bounds))
-        {
-            if (AIslandChest* Chest = GetWorld()->SpawnActor<AIslandChest>(Center, FRotator::ZeroRotator))
-            {
-                Chest->SetPrize(Index == IslandRules::PrizeIndex);
-                Exposed[Index] = Chest;
-            }
-        }
+        RevealChestIfClear(Index);
         if (Digger && !Exposed[Index] && CanClaimChest(Digger->GetTeam(), Index))
         {
             const double ToBox = FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(BrushCenter));
-            NearestBuriedGap = FMath::Min(NearestBuriedGap, ToBox - BrushRadius);
+            const double Gap = ToBox - BrushRadius;
+            const auto& Circles = GetTerrain()->GetSearchCircles();
+            const double HearingRange = Circles.IsValidIndex(Index)
+                ? FMath::Clamp(Circles[Index].Radius * .55, 550., 1200.) : 550.;
+            bFaintEcho |= Gap <= HearingRange;
+            bStrongEcho |= Gap <= 250.;
         }
     }
-    if (Digger && NearestBuriedGap <= 550.0)
+    if (Digger && bFaintEcho)
     {
-        Digger->ClientExcavationEcho(NearestBuriedGap <= 250.0);
+        Digger->ClientExcavationEcho(bStrongEcho);
     }
 }
 
@@ -731,6 +758,7 @@ void AIslandGameMode::GiveClue(int32 Team, int32 Index)
     if (Snapshot.Complete())
     {
         Snapshot.Crossing = HiddenLayout.Crossing;
+        if (bExpeditionRoom) RevealChestIfClear(IslandRules::PrizeIndex);
     }
     for (AVoxelPlayerController* Player : GetPlayers())
     {

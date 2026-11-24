@@ -11,6 +11,7 @@
 #include "EngineUtils.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Island/ExpeditionDock.h"
+#include "Island/IslandNeutralProp.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandRoomPanel.h"
 #include "Island/IslandRoomSession.h"
@@ -299,7 +300,7 @@ void AIslandHUD::Tick(float DeltaSeconds)
 FString AIslandHUD::ControlsText() const
 {
     if (const auto* State = GetWorld()->GetGameState<AIslandGameState>(); State && State->bRoomLobby)
-        return TEXT("左键 挖地    右键 丢土    空格 跳跃    E 交互    按住 Tab 看海图    按住 R 回码头");
+        return TEXT("左键 挖地    右键 丢土    空格 跳跃    E 交互    V 切换视角    按住 Tab 看海图    按住 R 回码头");
     return TEXT("左键 凿岩    右键 挖脚下    Q 回填    Shift 攀爬    按住 Tab 看海图    按住 R 回码头");
 }
 
@@ -416,8 +417,10 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
         Box(bExpedition ? TEXT("左键 连续挖    右键 连续丢    向脚边丢土可垫高") : TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下"),X,H-115*S,IslandHudColors::Ink,true);
         Box(bExpedition ? TEXT("WASD 移动    空格 跳跃    E 开箱或拉帆    按住 R 回码头") : TEXT("Q 回填    按住 Shift 攀爬    E 开箱    按住 R 回码头"),X,H-81*S,IslandHudColors::Ink,true);
     }
-    Box(bHasMate ? TEXT("G  呼叫队友    按住 Tab 看海图    按住 F1 看操作") :
-        TEXT("按住 Tab 看海图    按住 F1 看操作"),X,H-40*S,IslandHudColors::Ink,true);
+    FString Shortcuts = bExpedition ? TEXT("V 切换视角    ") : TEXT("");
+    if (bHasMate) Shortcuts += TEXT("G 呼叫队友    ");
+    Shortcuts += TEXT("按住 Tab 看海图    按住 F1 看操作");
+    Box(Shortcuts,X,H-40*S,IslandHudColors::Ink,true);
 }
 
 void AIslandHUD::DrawNearbyCrews(const AIslandPlayerController& PC, float S)
@@ -438,7 +441,8 @@ void AIslandHUD::DrawNearbyCrews(const AIslandPlayerController& PC, float S)
         const FVector Head = Other->GetActorLocation() + FVector(0,0, Animal && Animal->IsMudCompact() ? 8. : 65.);
         FVector2D Point;
         if (!PC.ProjectWorldLocationToScreen(Head + FVector(0,0,45), Point) ||
-            GetWorld()->LineTraceTestByChannel(Eye, Head, ECC_Visibility, Query)) continue;
+            GetWorld()->LineTraceTestByChannel(Eye, Head, ECC_Visibility, Query) ||
+            AIslandNeutralProp::AnySailObscures(*GetWorld(),Eye,Head)) continue;
         const bool bAlly = Crew->Team == PC.GetTeam();
         const FString Label = bAlly ? TEXT("队友") : FString::Printf(TEXT("对手 · %d 队"), Crew->Team+1);
         float W,H;
@@ -508,6 +512,7 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
     for (int32 I=0;I<Coast.Num();++I) Line(Project(Coast[I]),Project(Coast[(I+1)%Coast.Num()]),IslandHudColors::Sea,1.5f);
     const FIslandClues& Clues=PC.GetLocalClues();
     const auto& Circles=Terrain->GetSearchCircles();
+    const bool bExpedition = Terrain->Layout == EVoxelLayout::Expedition;
     if (Clues.Complete())
     {
         Line(Project(Clues.Points[0]),Project(Clues.Points[2]),IslandHudColors::Ink);
@@ -522,14 +527,31 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
         const FVector2D P=Project(Found?Clues.Points[I]:FVector2D(Circles[I].Center));
         const FString Letter=FString::Printf(TEXT("%c"),'A'+I);
         if (Found) { DrawRect(Tint(IslandHudColors::Ink),P.X-2.5f,P.Y-2.5f,5,5); Mark(P,Letter,IslandHudColors::Ink); }
-        else for (int32 J=0;J<40;++J)
+        else
         {
-            const auto Ring=[&](double K){return P+Scale*Circles[I].Radius*FVector2D(FMath::Cos(K*UE_TWO_PI/40),FMath::Sin(K*UE_TWO_PI/40));};
-            Line(Ring(J),Ring(J+1),IslandHudColors::Sea);
+            const double Radius = Scale * Circles[I].Radius;
+            const auto Ring=[&](int32 J){return P+Radius*FVector2D(FMath::Cos(J*UE_TWO_PI/40),FMath::Sin(J*UE_TWO_PI/40));};
+            for (int32 J=0;J<40;++J) Line(Ring(J),Ring(J+1),IslandHudColors::Sea,bExpedition ? 1.5f : 1.f);
+            if (bExpedition)
+            {
+                FLinearColor Hatch = IslandHudColors::Sea;
+                Hatch.A *= .34f;
+                const FVector2D Diagonal(UE_INV_SQRT_2,UE_INV_SQRT_2);
+                const FVector2D Normal(-Diagonal.Y,Diagonal.X);
+                for (int32 Stripe=-2;Stripe<=2;++Stripe)
+                {
+                    const double Offset = Radius * Stripe / 3.;
+                    const double HalfLength = FMath::Sqrt(Radius*Radius-Offset*Offset);
+                    const FVector2D Middle = P + Normal*Offset;
+                    Line(Middle-Diagonal*HalfLength,Middle+Diagonal*HalfLength,Hatch);
+                }
+                Mark(P+FVector2D(-.85,-.72)*Radius,Letter,IslandHudColors::Ink);
+            }
         }
     }
-    for (TActorIterator<AExpeditionLandmark> It(GetWorld());It;++It)
-        Mark(Project(FVector2D(It->GetActorLocation())),FString::Printf(TEXT("%c"),'A'+It->ClueIndex),IslandHudColors::Sea);
+    if (!bExpedition)
+        for (TActorIterator<AExpeditionLandmark> It(GetWorld());It;++It)
+            Mark(Project(FVector2D(It->GetActorLocation())),FString::Printf(TEXT("%c"),'A'+It->ClueIndex),IslandHudColors::Sea);
     FVector Rally;
     bool bAtChest;
     if (PC.GetCrewRally(Rally,bAtChest))

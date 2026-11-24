@@ -52,6 +52,7 @@ public:
 #endif
 
 protected:
+    void Serialize(FArchive& Ar) override;
     void PostLoad() override;
     void BeginPlay() override;
     void Tick(float DeltaSeconds) override;

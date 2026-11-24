@@ -4,6 +4,8 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "EngineUtils.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
@@ -86,6 +88,7 @@ void AIslandNeutralProp::OnRep_State()
     if (!State.bInitialized || !GetWorld()) return;
     if (!bBuilt)
     {
+        SetActorScale3D(IslandNeutral::SiteScale(State.Kind));
         switch (State.Kind)
         {
             case EIslandNeutralKind::Tree: BuildTree(); break;
@@ -116,9 +119,9 @@ FVector AIslandNeutralProp::GetInteractionPoint() const
 {
     switch (State.Kind)
     {
-        case EIslandNeutralKind::Tree: return GetActorTransform().TransformPosition(FVector(0,0,84));
-        case EIslandNeutralKind::Hopper: return GetActorTransform().TransformPosition(FVector(-95,-152,163));
-        case EIslandNeutralKind::Sail: return GetActorTransform().TransformPosition(FVector(-30,-169,117));
+        case EIslandNeutralKind::Tree: return GetActorTransform().TransformPosition(FVector(-55,0,64));
+        case EIslandNeutralKind::Hopper: return GetActorTransform().TransformPosition(FVector(-95,-157,108));
+        case EIslandNeutralKind::Sail: return GetActorTransform().TransformPosition(FVector(-30,-169,82));
         case EIslandNeutralKind::Tide: return GetTideMouth(0);
         default: return GetActorLocation();
     }
@@ -161,6 +164,24 @@ bool AIslandNeutralProp::UseRope(AIslandPlayerController& Player)
     return true;
 }
 
+bool AIslandNeutralProp::AnySailObscures(UWorld& World, const FVector& Start, const FVector& End)
+{
+    for (TActorIterator<AIslandNeutralProp> It(&World); It; ++It)
+    {
+        if (It->GetKind() != EIslandNeutralKind::Sail) continue;
+        // Check the current cloth panels in mesh space, including their movement as a pawn crosses.
+        for (int32 I = 0; I < It->Cloth.Num(); I += 2)
+        {
+            const FTransform& Panel = It->Cloth[I]->GetComponentTransform();
+            const FVector A = Panel.InverseTransformPosition(Start);
+            const FVector B = Panel.InverseTransformPosition(End);
+            const FBox Bounds = It->Cloth[I]->GetStaticMesh()->GetBoundingBox();
+            if (FMath::LineBoxIntersection(Bounds,A,B,B-A)) return true;
+        }
+    }
+    return false;
+}
+
 void AIslandNeutralProp::TouchSail(UPrimitiveComponent* Overlap, AActor* Other, UPrimitiveComponent* OtherComponent,
     int32 BodyIndex, bool bSwept, const FHitResult& Sweep)
 {
@@ -174,8 +195,8 @@ void AIslandNeutralProp::TouchSail(UPrimitiveComponent* Overlap, AActor* Other, 
 
 FVector AIslandNeutralProp::GetTideMouth(int32 Index) const
 {
-    return GetActorTransform().TransformPosition(FVector(0, Index == 0 ? -MouthY : MouthY,
-        6. + (Index == 0 ? State.MouthOffsetA : State.MouthOffsetB)));
+    return GetActorTransform().TransformPosition(FVector(0, Index == 0 ? -MouthY : MouthY, 0.))
+        + FVector::UpVector * (6. + (Index == 0 ? State.MouthOffsetA : State.MouthOffsetB));
 }
 
 void AIslandNeutralProp::RefreshTide(const AVoxelTerrain& Terrain)
@@ -183,7 +204,7 @@ void AIslandNeutralProp::RefreshTide(const AVoxelTerrain& Terrain)
     const FVoxelDensity* Density = Terrain.GetDensity();
     if (!HasAuthority() || State.Kind != EIslandNeutralKind::Tide || !Density) return;
     uint8 Mask = 0;
-    constexpr double D = 23.;
+    constexpr double D = 40.;
     const FVector2D Offsets[] = {{0,0},{D,0},{-D,0},{0,D},{0,-D}};
     for (int32 Mouth = 0; Mouth < 2; ++Mouth)
     {
@@ -222,8 +243,17 @@ bool AIslandNeutralProp::TryTideJump(AVoxelCharacter& Hero)
     if (!HasAuthority() || State.Kind != EIslandNeutralKind::Tide || !IsTideBoostReady()) return false;
     const FVector Mouth = GetTideMouth(State.PlugMask == 1 ? 1 : 0);
     const FVector Foot = Hero.GetActorLocation() - FVector::UpVector * Hero.GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-    if (FVector::DistSquared2D(Mouth, Foot) > FMath::Square(112.) || Foot.Z < Mouth.Z - 90. || Foot.Z > Mouth.Z + 125.) return false;
-    Hero.LaunchCharacter(GetActorForwardVector() * 255. + FVector::UpVector * 790., true, true);
+    if (FVector::DistSquared2D(Mouth, Foot) > FMath::Square(IslandNeutral::TideRadius) ||
+        Foot.Z < Mouth.Z - 90. || Foot.Z > Mouth.Z + 125.) return false;
+    const FVector Target = Mouth + GetActorForwardVector() * IslandNeutral::TideTravel;
+    const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
+    const FVoxelDensity* Density = Terrain ? Terrain->GetDensity() : nullptr;
+    const double Ground = Density ? Density->SurfaceAt(FVector2D(Target)).Get(Mouth.Z) : Mouth.Z;
+    constexpr double UpSpeed = 920.;
+    const double Gravity = FMath::Max(1., double(-Hero.GetCharacterMovement()->GetGravityZ()));
+    const double Flight = (UpSpeed + FMath::Sqrt(FMath::Max(0., UpSpeed*UpSpeed - 2.*Gravity*(Ground-Foot.Z)))) / Gravity;
+    const FVector Horizontal = FVector(Target.X-Foot.X, Target.Y-Foot.Y, 0.) / Flight;
+    Hero.LaunchCharacter(Horizontal.GetClampedToMaxSize(750.) + FVector::UpVector * UpSpeed, true, true);
     return true;
 }
 
@@ -232,15 +262,20 @@ TArray<FVector> AIslandNeutralProp::GetSandCenters() const
     // Adjacent 75 cm sphere brushes overlap in three dimensions. Columns below
     // the walk surface join the existing earth instead of leaving a suspended ramp.
     TArray<FVector> Centers;
+    const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
+    const FVoxelDensity* Density = Terrain ? Terrain->GetDensity() : nullptr;
     const FTransform& Frame = GetActorTransform();
-    for (int32 Step = 0; Step < 6; ++Step)
+    for (int32 Step = 0; Step < 10; ++Step)
     {
-        const double X = 30. + 44. * Step;
-        const double Top = -27. + 24. * Step;
-        for (double Y : {-58., 0., 58.})
+        const double X = 25. + 37.5 * Step;
+        const double Top = -38. + 14.5 * Step;
+        for (double Y : {-48., 0., 48.})
         {
-            Centers.Add(Frame.TransformPosition(FVector(X,Y,Top)));
-            if (Step >= 3) Centers.Add(Frame.TransformPosition(FVector(X,Y,Top - 54.)));
+            FVector Center = Frame.TransformPosition(FVector(X,Y,Top));
+            const double Ground = Density ? Density->SurfaceAt(FVector2D(Center)).Get(Center.Z-125.) : Center.Z-125.;
+            Center.Z = FMath::Min(Center.Z,Ground+125.);
+            Centers.Add(Center);
+            if (Center.Z-Ground > 50.) Centers.Add(Center-FVector::UpVector*82.);
         }
     }
     return Centers;

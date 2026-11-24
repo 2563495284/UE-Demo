@@ -8,6 +8,19 @@
 #include "Island/IslandRules.h"
 #include "Voxel/VoxelTerrain.h"
 
+FVector IslandNeutral::SiteScale(EIslandNeutralKind Kind)
+{
+    switch (Kind)
+    {
+        case EIslandNeutralKind::Tree:   return FVector(2.2);
+        case EIslandNeutralKind::Ship:   return {1.65,2.2,1.};
+        case EIslandNeutralKind::Hopper: return {2.,2.,1.6};
+        case EIslandNeutralKind::Sail:   return {2.6,2.6,1.7};
+        case EIslandNeutralKind::Tide:   return {2.,2.,1.8};
+    }
+    return FVector::OneVector;
+}
+
 namespace
 {
     // A path connects neighbouring floor samples. A blocker is expanded by the pawn
@@ -39,18 +52,20 @@ namespace
         // Cover every solid in both poses, including the crest of the released sand.
         switch (Kind)
         {
-            case EIslandNeutralKind::Tree: return {{-100,-125},{650,125}};
-            case EIslandNeutralKind::Ship: return {{-240,-440},{240,440}};
-            case EIslandNeutralKind::Hopper: return {{-275,-230},{390,230}};
+            case EIslandNeutralKind::Tree: return {{-100,-165},{650,165}};
+            case EIslandNeutralKind::Ship: return {{-295,-440},{295,440}};
+            case EIslandNeutralKind::Hopper: return {{-275,-230},{415,230}};
             case EIslandNeutralKind::Sail: return {{-75,-260},{75,260}};
-            case EIslandNeutralKind::Tide: return {{-110,-240},{400,240}};
+            case EIslandNeutralKind::Tide: return {{-125,-270},{525,270}};
         }
         return FBox2D(ForceInit);
     }
 
     FBox2D WorldEnvelope(const FIslandNeutralPlacement& P)
     {
-        const FBox2D Local = LocalEnvelope(P.Kind);
+        const FBox2D Modules = LocalEnvelope(P.Kind);
+        const FVector2D Scale(IslandNeutral::SiteScale(P.Kind));
+        const FBox2D Local(Modules.Min * Scale, Modules.Max * Scale);
         const FVector2D Axis = FVector2D(FRotator(0,P.Yaw,0).Vector());
         const FVector2D Across(-Axis.Y,Axis.X);
         const FVector2D Center = FVector2D(P.Location) + Axis * Local.GetCenter().X + Across * Local.GetCenter().Y;
@@ -229,12 +244,12 @@ namespace
         bool ForkAt(FVector2D P, FVector2D Axis, FVector2D Side, double Z) const
         {
             // Two diverging exits around a higher patch and a lower incoming branch.
-            const double Left=HeightAt(P+Axis*420.+Side*350.);
-            const double Right=HeightAt(P+Axis*420.-Side*350.);
-            const double Divider=HeightAt(P+Axis*420.);
-            const double Approach=HeightAt(P-Axis*580.);
-            return FMath::Min3(Left,Right,Approach)>-25. && FMath::Abs(Left-Z)<130. &&
-                FMath::Abs(Right-Z)<130. && FMath::Abs(Approach-Z)<130. &&
+            const double Left=HeightAt(P+Axis*580.+Side*560.);
+            const double Right=HeightAt(P+Axis*580.-Side*560.);
+            const double Divider=HeightAt(P+Axis*580.);
+            const double Approach=HeightAt(P-Axis*720.);
+            return FMath::Min3(Left,Right,Approach)>-25. && FMath::Abs(Left-Z)<175. &&
+                FMath::Abs(Right-Z)<175. && FMath::Abs(Approach-Z)<175. &&
                 Divider > FMath::Max(Left,Right)+24.;
         }
 
@@ -279,20 +294,33 @@ namespace
                         }
                         Candidates[int32(Kind)].Add({Prop,Envelope,Region});
                     };
-                    const double TreeEnd=HeightAt(P+Axis*475.);
-                    const double UnderTree=HeightAt(P+Axis*235.);
-                    if (FMath::Abs(TreeEnd-Z)<64. && UnderTree<FMath::Min(Z,TreeEnd)-2. &&
+                    const double TreeEnd=HeightAt(P+Axis*1067.);
+                    const double UnderTree=HeightAt(P+Axis*540.);
+                    if (FMath::Abs(TreeEnd-Z)<78. && UnderTree<FMath::Min(Z,TreeEnd)-2. && UnderTree>Z-56. &&
                         FMath::Abs(Left-Right)<125. && FMath::Max(Fwd,Aft)-FMath::Min(Fwd,Aft)>10.)
                         Add(EIslandNeutralKind::Tree);
-                    if (Shore>-4900 && FMath::Max(Fwd,Aft)<Z-14. && FMath::Min(Fwd,Aft)>Z-145. &&
-                        FMath::Abs(Left-Right)<160.) Add(EIslandNeutralKind::Ship);
-                    const double Landing=HeightAt(P+Axis*350.);
-                    if (Landing>Z+66. && Landing<Z+175. && FMath::Abs(Left-Right)<125. &&
-                        HeightAt(P-Axis*170.)>Z-90.) Add(EIslandNeutralKind::Hopper);
-                    if (ForkAt(P,Axis,Side,Z)) Add(EIslandNeutralKind::Sail);
-                    if (Shore>-1750 && Landing>Z+50. && Landing<Z+190. &&
-                        FMath::Abs(HeightAt(P+Side*150.)-Z)<31. && FMath::Abs(HeightAt(P-Side*150.)-Z)<31.)
-                        Add(EIslandNeutralKind::Tide);
+                    const double Port=HeightAt(P+Axis*610.), Starboard=HeightAt(P-Axis*610.);
+                    if (Shore>-4900 && FMath::Max(Port,Starboard)<Z-12. && FMath::Min(Port,Starboard)>Z-155. &&
+                        FMath::Abs(HeightAt(P+Side*704.)-Z)<120. && FMath::Abs(HeightAt(P-Side*704.)-Z)<120.)
+                        Add(EIslandNeutralKind::Ship);
+                    const double Landing=HeightAt(P+Axis*735.);
+                    const double PinGround=HeightAt(P-Axis*190.-Side*314.);
+                    if (Landing>Z+86. && Landing<Z+218. && PinGround>Z-78. && PinGround<Z+75. &&
+                        FMath::Abs(Left-Right)<150.) Add(EIslandNeutralKind::Hopper);
+                    if (FMath::Abs(HeightAt(P+Side*564.)-Z)<98. && FMath::Abs(HeightAt(P-Side*564.)-Z)<98. &&
+                        ForkAt(P,Axis,Side,Z)) Add(EIslandNeutralKind::Sail);
+                    if (Shore>-2250 && FMath::Abs(Left-Z)<100. && FMath::Abs(Right-Z)<100.)
+                    {
+                        bool bBothLandings=true;
+                        for (double Sign : {-1.,1.})
+                        {
+                            const FVector2D Mouth=P+Side*(300.*Sign);
+                            const double Rise=HeightAt(Mouth+Axis*IslandNeutral::TideTravel)-HeightAt(Mouth);
+                            if (Rise<46. || Rise>264. || NearestCell(Mouth+Axis*IslandNeutral::TideTravel,145.)==INDEX_NONE)
+                                bBothLandings=false;
+                        }
+                        if (bBothLandings) Add(EIslandNeutralKind::Tide);
+                    }
                 }
             }
         }
@@ -415,13 +443,14 @@ bool IslandNeutral::Audit(UWorld& World,const AVoxelTerrain& Terrain,int32 Decoy
     if (!Terrain.GetDensity() || Terrain.Layout!=EVoxelLayout::Expedition) return false;
     const FIslandSurface Surface(World,Terrain);
     int32 Counts[KindCount]={};
+    const TArray<FBox2D> Obstacles=IslandRules::CollectSearchObstacles(World);
     int32 FullSeed=INDEX_NONE;
     TSet<uint32> Unique;
     bool bPassed=true;
     for (int32 Seed=1; Seed<=64; ++Seed)
     {
         FIslandTreasureLayout Treasure;
-        bool bValid=IslandRules::GenerateLayout(Seed,DecoyCount,Terrain.GetSearchCircles(),*Terrain.GetDensity(),Treasure);
+        bool bValid=IslandRules::GenerateLayout(Seed,DecoyCount,Terrain.GetSearchCircles(),*Terrain.GetDensity(),Treasure,nullptr,false,Obstacles);
         TArray<FIslandNeutralPlacement> A,B;
         bool bRoutes=bValid && Surface.Roll(Seed,Treasure,A);
         const bool bReplay=bRoutes && Surface.Roll(Seed,Treasure,B) && A==B;

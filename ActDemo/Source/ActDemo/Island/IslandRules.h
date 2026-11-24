@@ -68,6 +68,8 @@ namespace IslandRules
     inline constexpr int32 MaxDecoys = 24;
     inline constexpr int32 MinSearchRadius = 200;
     inline constexpr int32 MaxSearchRadius = 1000;
+    inline constexpr int32 ExpeditionSearchRadius = 1800;
+    inline constexpr int32 MaxExpeditionSearchRadius = 2500;
     inline constexpr double OpenReach = 200.0;
     inline constexpr double LockSeconds = 4.0;
     inline constexpr double DrownTime = 3.0;
@@ -78,8 +80,13 @@ namespace IslandRules
     ACTDEMO_API FLinearColor TeamColor(int32 Team);
     ACTDEMO_API const TCHAR* TeamName(int32 Team);
     bool InSea(const FVector& Head);
+    ACTDEMO_API TArray<FBox2D> CollectSearchObstacles(UWorld& World);
+#if !UE_BUILD_SHIPPING
+    bool AuditSearchAreas(TConstArrayView<FIslandSearchCircle> Circles, const FVoxelDensity& Density, TConstArrayView<FBox2D> Obstacles);
+#endif
     bool IsValidLayout(const FIslandTreasureLayout& Layout, TConstArrayView<FIslandSearchCircle> Circles,
-        const FVoxelDensity& Density, FString* Error = nullptr);
+        const FVoxelDensity& Density, FString* Error = nullptr, TConstArrayView<FBox2D> Obstacles = {});
     ACTDEMO_API bool GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<FIslandSearchCircle> Circles,
-        const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error = nullptr, bool bFixedOnly = false);
+        const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error = nullptr, bool bFixedOnly = false,
+        TConstArrayView<FBox2D> Obstacles = {});
 }

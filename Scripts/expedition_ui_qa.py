@@ -74,10 +74,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--editor", action="store_true")
     parser.add_argument("--app", type=Path, default=ROOT / "Builds/TreasureIsland/Mac/ActDemo.app")
-    parser.add_argument("--scenario", choices=("solo", "pair", "recovery", "walkthrough"), default="pair")
+    parser.add_argument("--scenario", choices=("solo", "pair", "recovery", "walkthrough", "chart"), default="pair")
     parser.add_argument("--weak", action="store_true")
     parser.add_argument("--foreground", action="store_true", help="run one interactive Mac game and verify it owns the foreground")
     parser.add_argument("--edges", action="store_true", help="exercise settings, team changes and withdrawn readiness in the pair run")
+    parser.add_argument("--perspective", action="store_true", help="press V in game, check both camera positions and digging/throwing aim")
     parser.add_argument("--shots", action="store_true")
     parser.add_argument("--record", action="store_true", help="record the game viewport and encode a replay using ffmpeg")
     parser.add_argument("--ffmpeg", help="path to a working ffmpeg executable for --record")
@@ -86,6 +87,10 @@ def main():
     args = parser.parse_args()
     if args.foreground and (sys.platform != "darwin" or args.scenario == "pair"):
         parser.error("--foreground requires a single Mac game window")
+    if args.perspective and args.scenario not in ("solo", "pair"):
+        parser.error("--perspective requires a solo or pair run")
+    if args.scenario == "chart":
+        args.shots = True
     encoder = recording_encoder(args.ffmpeg) if args.record else None
     # One directory per run keeps earlier captures and exposes the exact processes/logs under test.
     directory = args.output.resolve() / (args.scenario + ("-weak-" if args.weak else "-normal-") + time.strftime("%Y%m%d-%H%M%S"))
@@ -93,7 +98,8 @@ def main():
     engine = Path(os.environ.get("UE_ROOT", "/Users/Shared/Epic Games/UE_5.8"))
     command = ([str(engine / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"), str(PROJECT), "-game"]
                if args.editor else [str(args.app / "Contents/MacOS/ActDemo")])
-    roles = {"solo": ["Solo"], "pair": ["Host", "Guest"], "recovery": ["Recovery"], "walkthrough": ["Walkthrough"]}[args.scenario]
+    roles = {"solo": ["Solo"], "pair": ["Host", "Guest"], "recovery": ["Recovery"],
+             "walkthrough": ["Walkthrough"], "chart": ["Chart"]}[args.scenario]
     game_output = directory
     if not args.editor:
         with (args.app / "Contents/Info.plist").open("rb") as stream:
@@ -105,10 +111,12 @@ def main():
               "-stdout", "-FullStdOutLogOutput", f"-IslandUISeats={len(roles)}", f"-IslandUIOutput={game_output}"]
     if args.foreground:
         shared.remove("-unattended")
-    if args.scenario == "walkthrough":
+    if args.scenario in ("chart", "walkthrough"):
         shared += ["-ExpeditionWalkQA", "-ExpeditionTreasureWalkQA"]
     if args.shots:
         shared.append("-IslandUIShots")
+    if args.perspective:
+        shared.append("-IslandUIPerspective")
     if args.edges:
         if args.scenario != "pair":
             parser.error("--edges requires a pair of players")
@@ -151,7 +159,7 @@ def main():
             print(f"{role} pid={process.pid} log={log}", flush=True)
 
         start(roles[0])
-        deadline = time.monotonic() + (1500 if args.scenario == "walkthrough" else 360 if args.editor else 210)
+        deadline = time.monotonic() + (1500 if args.scenario == "walkthrough" else 360 if args.editor or args.scenario == "chart" else 210)
         while time.monotonic() < deadline:
             logs = {role: read_log(log) if log.exists() else "" for role, (_, log) in processes.items()}
             if args.foreground:
@@ -180,7 +188,11 @@ def main():
                         raise RuntimeError("Packet simulation was not active on " + role)
                     if "ISLAND_UI_PRESS" not in log or (role not in ("Recovery", "Walkthrough") and "ISLAND_UI_CHART" not in log):
                         raise RuntimeError("Actual UI and chart input evidence missing on " + role)
-                    events[role] = re.findall(r"ISLAND_(?:UI_(?:PRESS|CHART|DONE)|LAN_(?:SEARCH|ARRIVED))[^\r\n]*", log)
+                    if args.perspective:
+                        for mode in ("third", "first", "steep", "restored", "chart_blocked"):
+                            if not re.search(rf"ISLAND_UI_PERSPECTIVE mode={mode}\b", log):
+                                raise RuntimeError(f"Missing {mode} camera check on {role}")
+                    events[role] = re.findall(r"ISLAND_(?:UI_(?:PRESS|CHART|PERSPECTIVE|DONE)|LAN_(?:SEARCH|ARRIVED))[^\r\n]*", log)
                 if len(roles) == 2 and not re.search(r"ISLAND_LAN_SEARCH results=[1-9]", logs["Guest"]):
                     raise RuntimeError("Guest did not discover a LAN room")
                 if args.edges and ("ISLAND_UI_EDGE room_edit=1" not in logs["Host"]
@@ -197,6 +209,15 @@ def main():
                 copy_screenshots()
                 if args.shots and not list(directory.glob("*.png")):
                     raise RuntimeError("No rendered screenshots were saved")
+                if args.scenario == "chart":
+                    for view in ("ChartUnsearched", "ChartOneClue"):
+                        if not (directory / f"Chart_{view}.png").is_file():
+                            raise RuntimeError(f"Missing {view} chart proof")
+                if args.shots and args.perspective:
+                    for role in roles:
+                        for view in ("FirstPerson", "ThirdPerson"):
+                            if not (directory / f"{role}_{view}.png").is_file():
+                                raise RuntimeError(f"Missing {view} screenshot on {role}")
                 result = dict(scenario=args.scenario, edges=args.edges, simulated_weak_network=args.weak, roles=roles, events=events,
                               captures=sorted(p.name for p in directory.glob("*.png")))
                 if args.foreground:

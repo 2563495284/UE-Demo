@@ -28,6 +28,7 @@ public:
     void SetExpeditionThrowHeld(bool bHeld);
     bool IsPlaying() const { return bPlaying; }
     bool IsVoxelInputEnabled() const { return bVoxelInputEnabled; }
+    bool WantsFirstPersonView() const { return bFirstPersonView && bPlaying && IsLocalController(); }
     void SetVoxelInputEnabled(bool bEnabled);
     void SetIslandUIInput(bool bOpen);
     double GetRecoverProgress() const;
@@ -72,6 +73,7 @@ private:
     void Move(const FInputActionValue& Value);
     void Look(const FInputActionValue& Value);
     void Jump();
+    void SwitchPerspective();
     void Punch();
     void DigDown();
     void StopDig();
@@ -107,6 +109,7 @@ private:
     double RecoverStartedAt = -1.0;
     double NoticeUntil = -1.0;
     bool bPlaying = false;
+    bool bFirstPersonView = false;
     bool bVoxelInputEnabled = true;
     bool bSentReady = false;
     FString Notice = TEXT("Waiting for both players");

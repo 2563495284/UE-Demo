@@ -70,6 +70,15 @@ AVoxelCharacter::AVoxelCharacter(const FObjectInitializer& Initializer)
     UCameraComponent* Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
     Camera->SetupAttachment(Boom, USpringArmComponent::SocketName);
     Camera->FieldOfView = 82.f;
+
+    EyeCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("EyeCamera"));
+    EyeCamera->SetupAttachment(GetCapsuleComponent());
+    EyeCamera->SetAutoActivate(false);
+    EyeCamera->SetRelativeLocation(FVector(0., 0., AimHeight));
+    EyeCamera->bUsePawnControlRotation = true;
+    EyeCamera->FieldOfView = Camera->FieldOfView;
+    EyeCamera->bEnableFirstPersonScale = true;
+    EyeCamera->FirstPersonScale = .5f;
 }
 
 UAbilitySystemComponent* AVoxelCharacter::GetAbilitySystemComponent() const { return AbilitySystem; }
@@ -144,6 +153,23 @@ bool AVoxelCharacter::CanJumpInternal_Implementation() const
 FVector AVoxelCharacter::GetAimOrigin() const
 {
     return GetActorLocation() + FVector(0, 0, IsMudCompact() ? 10.0 : AimHeight);
+}
+
+bool AVoxelCharacter::IsInFirstPersonView() const
+{
+    const auto* PC = Cast<AVoxelPlayerController>(Controller);
+    return PC && PC->WantsFirstPersonView() && PC->GetViewTarget() == this;
+}
+
+void AVoxelCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
+{
+    if (IsInFirstPersonView())
+    {
+        EyeCamera->SetWorldLocation(GetAimOrigin());
+        EyeCamera->GetCameraView(DeltaTime, OutResult);
+        return;
+    }
+    Super::CalcCamera(DeltaTime, OutResult);
 }
 
 void AVoxelCharacter::OnJumped_Implementation()

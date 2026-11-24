@@ -105,6 +105,7 @@ private:
     void ReturnToSafeGround(AVoxelPlayerController& Player);
     FTransform FindSafeReturn(const AVoxelPlayerController& Player);
     int32 FindReachableChest(const AIslandPlayerController& Player) const;
+    void RevealChestIfClear(int32 Index);
     void GiveClue(int32 Team, int32 Index);
     void PublishWinner(int32 Team);
 

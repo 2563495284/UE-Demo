@@ -91,7 +91,7 @@ namespace
                         [SNew(STextBlock).Text(LOCTEXT("CircleRadius", "Search radius (cm)"))]
                         + SVerticalBox::Slot().AutoHeight()
                         [
-                            SNew(SNumericEntryBox<int32>).MinValue(IslandRules::MinSearchRadius).MaxValue(IslandRules::MaxSearchRadius)
+                            SNew(SNumericEntryBox<int32>).MinValue(IslandRules::MinSearchRadius).MaxValue_Lambda([this] { return TOptional<int32>(Mode.GetMaxCircleRadius()); })
                             .Value_Lambda([this] { return Mode.GetCircleRadius(); })
                             .OnValueCommitted_Lambda([this](int32 Radius, ETextCommit::Type) { Mode.CommitCircleRadius(Radius); })
                         ]
@@ -237,6 +237,12 @@ TOptional<int32> FActVoxelEditorMode::GetCircleRadius() const
     return {};
 }
 
+int32 FActVoxelEditorMode::GetMaxCircleRadius() const
+{
+    return Terrain.IsValid() && Terrain->Layout == EVoxelLayout::Expedition
+        ? IslandRules::MaxExpeditionSearchRadius : IslandRules::MaxSearchRadius;
+}
+
 void FActVoxelEditorMode::CommitCircleRadius(int32 Value)
 {
     if (!GetCircleRadius().IsSet() || GetCircleRadius().GetValue() == Value)
@@ -246,7 +252,7 @@ void FActVoxelEditorMode::CommitCircleRadius(int32 Value)
     const FScopedTransaction Transaction(LOCTEXT("RadiusTransaction", "Resize search circle"));
     Terrain->Modify();
     FIslandSearchCircle Circle = Terrain->GetSearchCircles()[CircleIndex];
-    Circle.Radius = FMath::Clamp(Value, IslandRules::MinSearchRadius, IslandRules::MaxSearchRadius);
+    Circle.Radius = FMath::Clamp(Value, IslandRules::MinSearchRadius, GetMaxCircleRadius());
     Terrain->SetSearchCircle(CircleIndex, Circle);
     ValidateMap();
     GEditor->RedrawLevelEditingViewports();
@@ -434,8 +440,13 @@ void FActVoxelEditorMode::ValidateMap()
         FIslandTreasureLayout Layout;
         int32 Decoys = 4;
         GConfig->GetInt(TEXT("/Script/ActDemo.IslandGameMode"), TEXT("DecoyChestCount"), Decoys, GGameIni);
-        if (Terrain->Layout == EVoxelLayout::Expedition) Decoys = 0;
-        IslandRules::GenerateLayout(0, Decoys, Terrain->GetSearchCircles(), *Terrain->GetEditorDensity(), Layout, &ValidationError, true);
+        TArray<FBox2D> Obstacles;
+        if (Terrain->Layout == EVoxelLayout::Expedition)
+        {
+            Decoys = 0;
+            Obstacles = IslandRules::CollectSearchObstacles(*Terrain->GetWorld());
+        }
+        IslandRules::GenerateLayout(0, Decoys, Terrain->GetSearchCircles(), *Terrain->GetEditorDensity(), Layout, &ValidationError, true, Obstacles);
     }
 }
 

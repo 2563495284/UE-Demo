@@ -53,8 +53,13 @@ UStaticMeshComponent* AIslandNeutralProp::Piece(UStaticMesh* Shape, FVector Cent
 UStaticMeshComponent* AIslandNeutralProp::Beam(FVector A, FVector B, double Width, FColor Color,
     bool bSolid, USceneComponent* Parent)
 {
-    return Piece(Cylinder, (A+B)*.5, FVector(Width,Width,FVector::Distance(A,B)), Color, bSolid,
-        FRotationMatrix::MakeFromZ(B - A).Rotator(), Parent);
+    // UE composes component scale axis by axis. Aim the cylinder after scaling its endpoints
+    // so angled spars and the crossbar still join their posts on wide, low structures.
+    const FVector ParentScale = (Parent ? Parent : GetRootComponent())->GetComponentScale();
+    const FVector Span = (B-A)*ParentScale;
+    const double Length = Span.Size() / ParentScale.Z;
+    return Piece(Cylinder, (A+B)*.5, FVector(Width,Width,Length), Color, bSolid,
+        FRotationMatrix::MakeFromZ(Span).Rotator(), Parent);
 }
 
 void AIslandNeutralProp::BuildTree()
@@ -72,7 +77,7 @@ void AIslandNeutralProp::BuildTree()
     }
     MovingTree = NewObject<USceneComponent>(this, TEXT("TreePivot"));
     MovingTree->SetupAttachment(GetRootComponent());
-    MovingTree->SetRelativeLocation({0,0,110});
+    MovingTree->SetRelativeLocation({0,0,90});
     AddInstanceComponent(MovingTree);
     MovingTree->RegisterComponent();
     TreeSolids.Add(Beam({0,0,-9},{0,0,485},92.,Bark,true,MovingTree));
@@ -140,7 +145,8 @@ void AIslandNeutralProp::BuildShip()
         Piece(Cube, {0,End*365.,6.}, {184,32,250}, Hull, true, FRotator(0,0,End*8.));
         Beam({0,End*329.,100.},{0,End*394.,192.},25.,Frame);
     }
-    Beam({38,217.,153.},{43,220.,271.},24.,Frame);
+    Beam({38,217.,153.},{67,220.,590.},29.,Frame);
+    Beam({59,145.,465.},{59,295.,489.},16.,Frame);
     for (double Z : {187.,202.})
         Piece(Cylinder, {39,218.,Z},{29,29,8},Rope,false);
 }
@@ -169,7 +175,7 @@ void AIslandNeutralProp::BuildHopper()
         Piece(Cube, {8.,Side*35.,150.}, {151,10,21}, Ochre, true, FRotator(-24,0,0));
     Gate = Piece(Cube, {-53.,0.,179.}, {16,73,58}, Iron);
     // Pin protrudes toward the player, well clear of the sand landing zone.
-    HitTarget = Beam({-95.,-100.,163.},{-95.,-171.,163.},34.,Sand);
+    HitTarget = Beam({-95.,-100.,151.},{-95.,-171.,97.},34.,Sand);
     for (int32 I=0; I<5; ++I)
         SandSpill.Add(Piece(Ball, FVector::ZeroVector, {15,13,15}, Sand, false));
 }
@@ -200,8 +206,8 @@ void AIslandNeutralProp::BuildSail()
         Beam({0,Side*217.,172.},{64.,Side*225.,-4.},11.,Mast);
     }
     Beam({0,-239.,291.},{0,239.,291.},19.,Mast);
-    Beam({-10.,-181.,292.},{-29.,-169.,120.},7.,Rope,false);
-    HitTarget = Piece(Ball, {-30,-169,117},{24,27,34},Rope);
+    Beam({-10.,-181.,292.},{-29.,-169.,85.},7.,Rope,false);
+    HitTarget = Piece(Ball, {-30,-169,82},{24,27,34},Rope);
     HitTarget->SetCollisionResponseToChannel(ECC_Pawn,ECR_Ignore);
     for (int32 I=0; I<3; ++I)
     {
@@ -253,9 +259,9 @@ void AIslandNeutralProp::BuildTide()
         for (int32 I=0; I<8; ++I)
         {
             const double T = I*UE_TWO_PI/8.;
-            const FVector P = Center + FVector(FMath::Cos(T)*67.,FMath::Sin(T)*67.,1.);
+            const FVector P = Center + FVector(FMath::Cos(T)*81.,FMath::Sin(T)*81.,1.);
             // Leave the centre ray and the terrain fill brush unobstructed.
-            Piece(Cube,P,{34.,53.,27.+(I%3)*5.},I%2 ? Slate : Shale,false,FRotator(0,I*45.,0));
+            Piece(Cube,P,{40.,64.,27.+(I%3)*5.},I%2 ? Slate : Shale,false,FRotator(0,I*45.,0));
         }
         Jets.Add(Piece(Ball,Center,{55,58,45},Lagoon,false));
         Foam.Add(Piece(Ball,Center,{55,52,14},Crest,false));
@@ -279,9 +285,9 @@ void AIslandNeutralProp::AnimateTide(double Now)
         Jets[I]->SetVisibility(!bPlugged);
         Foam[I]->SetVisibility(!bPlugged);
         Jets[I]->SetRelativeLocation(Base+FVector(0,0,Height*.45));
-        Jets[I]->SetRelativeScale3D({.51+.08*Surge,.48+.08*Surge,Height/100.});
+        Jets[I]->SetRelativeScale3D({1.16+.14*Surge,1.12+.14*Surge,Height/100.});
         Foam[I]->SetRelativeLocation(Base+FVector(0,0,Height*.92));
-        Foam[I]->SetRelativeScale3D({.29+.13*Bubble,.26+.15*Bubble,.15+.08*Bubble});
+        Foam[I]->SetRelativeScale3D({.72+.19*Bubble,.68+.19*Bubble,.15+.08*Bubble});
         // Four small ballistic crests make the lift direction visible at a
         // glance, even before a character jumps into the concentrated jet.
         for (int32 J=0; J<4; ++J)
@@ -289,7 +295,7 @@ void AIslandNeutralProp::AnimateTide(double Now)
             auto* Drop = Spray[I*4+J].Get();
             const double Flight = FMath::Fmod(T*1.45+.24*J,1.);
             const double Azimuth = J*UE_HALF_PI + .6*I;
-            const double Radius = 8.+Flight*(bHigh ? 53. : 29.);
+            const double Radius = 24.+Flight*(bHigh ? 73. : 45.);
             const double Arc = 4.*Flight*(1.-Flight)*(bHigh ? 53. : 27.);
             Drop->SetVisibility(!bPlugged);
             Drop->SetRelativeLocation(Base+FVector(FMath::Cos(Azimuth)*Radius,FMath::Sin(Azimuth)*Radius,

@@ -18,7 +18,8 @@ void AIslandProbePeer::TickFieldWalk(float DeltaSeconds)
     if (!Hero) return;
     const FVector Remaining = (*FieldWalkTarget - Hero->GetActorLocation()).GetSafeNormal2D();
     const double Distance = FVector::Dist2D(*FieldWalkTarget, Hero->GetActorLocation());
-    if (Distance > 750.)
+    const double MaxWalk = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionNeutralQA")) ? 2400. : 750.;
+    if (Distance > MaxWalk)
     {
         FieldWalkTarget.Reset();
         return;

@@ -37,6 +37,7 @@ public:
     int32 GetCircleIndex() const { return CircleIndex; }
     int32 GetBrushRadius() const { return BrushRadius; }
     void SetBrushRadius(int32 Value) { BrushRadius = Value; }
+    int32 GetMaxCircleRadius() const;
     TOptional<int32> GetCircleRadius() const;
     void CommitCircleRadius(int32 Value);
     void ConvertSelection();

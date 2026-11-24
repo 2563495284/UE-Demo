@@ -4,7 +4,11 @@
 #include "Island/IslandRoomPanel.h"
 #include "Island/IslandRoomSession.h"
 #include "Island/IslandState.h"
+#include "Voxel/VoxelCharacter.h"
+#include "Camera/CameraComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/GameInstance.h"
+#include "EngineUtils.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Framework/Application/SlateApplication.h"
@@ -194,6 +198,72 @@ namespace
     {
         PC.InputKey(FInputKeyEventArgs::CreateSimulated(Button,Down?IE_Pressed:IE_Released,Down?1.f:0.f));
     }
+
+    bool CheckViews(AIslandPlayerController& PC, int32 Seats, TFunctionRef<bool(const TCHAR*)> Shot)
+    {
+        static int32 Stage=0;
+        static FRotator InitialAim;
+        static double InitialGap=0.;
+        if (Stage>=4) return true;
+        auto* Hero=Cast<AVoxelCharacter>(PC.GetPawn());
+        if (!Hero) return false;
+        int32 Body=0, Paws=0, Others=0;
+        for (TActorIterator<AVoxelCharacter> It(PC.GetWorld()); It; ++It)
+        {
+            if (!It->GetPlayerState()) continue;
+            int32 BodyParts=0, EyeParts=0;
+            TInlineComponentArray<UStaticMeshComponent*> Parts(*It);
+            for (auto* Part:Parts)
+                if (Part->IsVisible())
+                {
+                    if (Part->GetAttachParent()==It->GetEyeCamera()) ++EyeParts;
+                    else ++BodyParts;
+                }
+            if (*It==Hero) { Body=BodyParts; Paws=EyeParts; }
+            else if (BodyParts>=6 && EyeParts==0) ++Others;
+        }
+        if (Others<Seats-1) return false;
+
+        FVector Eye;
+        FRotator View;
+        PC.GetPlayerViewPoint(Eye,View);
+        const double Gap=FVector::Dist(Eye,Hero->GetAimOrigin());
+        const double Dig=View.Vector()|PC.GetExcavationAim(*Hero);
+        const double Throw=View.Vector()|PC.GetExpeditionThrowAim(*Hero);
+        const bool First=Stage==1 || Stage==2;
+        const TCHAR* Mode=Stage==0?TEXT("third"):Stage==1?TEXT("first"):Stage==2?TEXT("steep"):TEXT("restored");
+        const bool Valid=Hero->IsInFirstPersonView()==First && (First
+            ? Gap<3. && Dig>.998 && Throw>.998 && Paws==2 && Body==0
+            : Gap>80. && Body>=6 && Paws==0);
+        if (!Valid || (Stage==2 && !FMath::IsNearlyEqual(FRotator::NormalizeAxis(View.Pitch),-78.,1.))
+            || (Stage==3 && FMath::Abs(Gap-InitialGap)>12.))
+        {
+            UE_LOG(LogTemp,Error,TEXT("ISLAND_UI_FAIL perspective=%s gap=%.2f dig=%.5f throw=%.5f pitch=%.2f first=%d body=%d paws=%d"),
+                Mode,Gap,Dig,Throw,View.Pitch,Hero->IsInFirstPersonView(),Body,Paws);
+            return false;
+        }
+        if (Stage==0 && Shot(TEXT("ThirdPerson"))) return false;
+        if (Stage==1 && Shot(TEXT("FirstPerson"))) return false;
+        UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_PERSPECTIVE mode=%s gap_cm=%.2f pitch=%.2f dig_dot=%.5f throw_dot=%.5f body=%d paws=%d remote_bodies=%d"),
+            Mode,Gap,View.Pitch,Dig,Throw,Body,Paws,Others);
+        if (Stage==0)
+        {
+            InitialGap=Gap; InitialAim=PC.GetControlRotation();
+            Key(PC,EKeys::V,true);
+        }
+        else if (Stage==1)
+        {
+            Key(PC,EKeys::V,false);
+            PC.SetControlRotation(FRotator(-78.,InitialAim.Yaw,0.));
+        }
+        else if (Stage==2)
+        {
+            PC.SetControlRotation(InitialAim); Key(PC,EKeys::V,true);
+        }
+        else Key(PC,EKeys::V,false);
+        ++Stage;
+        return false;
+    }
 }
 
 void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomPanel>& Panel)
@@ -240,6 +310,7 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     auto* Session=PC.GetGameInstance()->GetSubsystem<UIslandRoomSession>();
     const bool Guest=Role==TEXT("Guest") || Role==TEXT("Join");
     static const bool bEdges=FParse::Param(FCommandLine::Get(),TEXT("IslandUIEdges"));
+    static const bool bViews=FParse::Param(FCommandLine::Get(),TEXT("IslandUIPerspective"));
     auto Advance=[&]{ ++Step; LastChange=Now; };
     const auto Shot=[&](const TCHAR* Label)
     {
@@ -263,7 +334,9 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     if (Step==7 && Page==EIslandPanel::Pause && Shot(TEXT("Pause"))) return;
     // The other executable may still be booting. The external runner owns the overall deadline.
     if (Step==2 && !Guest && Page==EIslandPanel::Lobby && GS && GS->JoinedCount<Want) LastChange=Now;
-    const bool bWalking=Role==TEXT("Walkthrough") && (Step==3 || Step==4) && GS && GS->Phase==EIslandPhase::Hunting;
+    const bool bChartProof=Role==TEXT("Chart");
+    const bool bWalkRole=bChartProof || Role==TEXT("Walkthrough");
+    const bool bWalking=bWalkRole && (Step==3 || Step==4) && GS && GS->Phase==EIslandPhase::Hunting;
     if (bWalking) LastChange=Now;
     if (Now-LastChange>90)
     {
@@ -271,10 +344,33 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
         Done=true;
         return;
     }
-    if (Role==TEXT("Walkthrough") && Step>=3)
+    if (bWalkRole && Step>=3)
     {
         static FString RoomName;
         static double ResultShown=0;
+        static double ChartOpened=0;
+        if (!PC.IsMapOpen()) ChartOpened=0;
+        else if (GS && GS->Phase==EIslandPhase::Hunting)
+        {
+            if (ChartOpened==0.) ChartOpened=Now;
+            if (Now-ChartOpened>.2)
+            {
+                const int32 Clues=PC.GetLocalClues().Count();
+                if (Clues==0 && Shot(TEXT("ChartUnsearched")))
+                {
+                    UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_CHART clues=0"));
+                }
+                if (Clues==1 && Shot(TEXT("ChartOneClue")))
+                {
+                    UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_CHART clues=1"));
+                }
+                else if (bChartProof && Shots.Contains(TEXT("ChartUnsearched")) && Shots.Contains(TEXT("ChartOneClue")))
+                {
+                    UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_DONE role=Chart acquired_clues=%d"),Clues);
+                    Done=true;
+                }
+            }
+        }
         if (Step==3 && GS && GS->Phase==EIslandPhase::Hunting && Page==EIslandPanel::Hidden && PC.IsVoxelInputEnabled()
             && PC.GetPawn() && PC.GetViewTarget()==PC.GetPawn())
         {
@@ -349,10 +445,19 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     }
     else if (Step==4)
     {
+        if (bViews && !CheckViews(PC,Want,Shot)) return;
         Key(PC,EKeys::Tab,true); Advance();
     }
     else if (Step==5 && PC.IsMapOpen())
     {
+        if (bViews)
+        {
+            static bool Tried=false;
+            if (!Tried) { Key(PC,EKeys::V,true); Tried=true; return; }
+            Key(PC,EKeys::V,false);
+            if (PC.WantsFirstPersonView()) { UE_LOG(LogTemp,Error,TEXT("ISLAND_UI_FAIL perspective=chart")); return; }
+            UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_PERSPECTIVE mode=chart_blocked"));
+        }
         UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_CHART role=%s opened=1"),*Role);
         Key(PC,EKeys::Tab,false); Advance();
     }

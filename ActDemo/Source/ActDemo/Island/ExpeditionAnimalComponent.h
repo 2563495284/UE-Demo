@@ -33,6 +33,7 @@ private:
     UPROPERTY() TObjectPtr<UStaticMeshComponent> CheekMud;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> Badge;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Hands;
+    UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> EyePaws;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Feet;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Marks;
     UPROPERTY() TMap<uint32,TObjectPtr<UMaterialInstanceDynamic>> Paints;

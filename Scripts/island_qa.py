@@ -277,6 +277,18 @@ def summarize_neutral_audit(host):
     return {"seeds": seeds, "full_seed": int(done[1]), "per_kind": totals, "density_distribution": counts}
 
 
+def summarize_search_audit(host):
+    audit = re.search(r"SEARCH_AREA_AUDIT pass=1 seeds=(\d+) replay=(\d+) exact=(\d+) obstacles=(\d+) "
+                      r"center_guess_miss_cm=(\d+)/(\d+)/(\d+) unique_meter_cells=(\d+) "
+                      r"prize_quadrants=(\d+)/(\d+)/(\d+)/(\d+)", host)
+    if not audit:
+        raise RuntimeError("Missing search-area seed replay and intersection measurements")
+    count, replay, exact, obstacles, low, median, high, cells, *quadrants = map(int, audit.groups())
+    return {"seeds": count, "replays": replay, "exact_intersections": exact, "obstacles": obstacles,
+            "circle_center_error_cm": {"min": low, "median": median, "max": high},
+            "unique_meter_cells": cells, "prize_quadrants": quadrants}
+
+
 def expedition_performance(logs):
     stress = re.search(r"EXPEDITION_QA_STRESS first=(\d+) last=(\d+) frame95=([.\d]+) frames=(\d+)", logs["host"])
     state = re.search(r"EXPEDITION_QA_TERRAIN peers=8 digest=([^\s]+)", logs["host"])
@@ -330,6 +342,8 @@ def run(args, ip, mode, directory):
             shared.append("-ExpeditionTogether")
         if args.stress:
             shared.append("-ExpeditionStress")
+        if args.scenario == "solo" and not args.repro_dig:
+            shared.append("-ExpeditionEarlyPrize")
         if args.repro_dig:
             shared.extend(["-ExpeditionRepro", "-ExpeditionSeed=7319"])
         if args.scenario == "crew-drop":
@@ -473,6 +487,13 @@ def run(args, ip, mode, directory):
                 result = summarize(logs) if args.scenario == "hunt" else summarize_party(logs, args.scenario)
             if args.neutral_audit:
                 result["neutral_layout_audit"] = summarize_neutral_audit(logs["host"])
+                result["search_area_audit"] = summarize_search_audit(logs["host"])
+            if args.scenario == "solo" and not args.repro_dig:
+                checks = ("an early blind dig clears the prize site without revealing its actor",
+                          "fourth clue reveals the pre-excavated prize without another dig")
+                if any("ISLAND_QA_CHECK passed=1 " + check not in logs["host"] for check in checks):
+                    raise RuntimeError("Missing concealed prize and fourth-clue reveal observations")
+                result["early_prize_excavation"] = True
             if options and not all("PktLag set to 40" in log and "PktLoss set to 2" in log for log in logs.values()):
                 raise RuntimeError("Missing runtime packet simulation settings")
             result.update(mode=mode, ip=ip, host_render="NullRHI" if args.headless_host else "Metal", guest_render="NullRHI",

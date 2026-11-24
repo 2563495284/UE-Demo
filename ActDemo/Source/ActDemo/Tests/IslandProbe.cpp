@@ -329,6 +329,7 @@ AIslandProbe::AIslandProbe()
     FParse::Value(FCommandLine::Get(), TEXT("ExpeditionPlayers="), ExpeditionPlayers);
     bOneCrew = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionTogether"));
     bMudScenario = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMudQA"));
+    bEarlyPrizeCheck = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionEarlyPrize"));
     bNeutralScenario = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA"));
     bFieldScenario = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA"));
     bProfileFrames = FParse::Param(FCommandLine::Get(), TEXT("VoxelProfile"));
@@ -648,7 +649,8 @@ void AIslandProbe::TickExpedition(double Now)
             return;
         }
         RoomCheck = ERoomCheck::Dig;
-        PrepareDig(FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")) ? 3 : 0);
+        if (bEarlyPrizeCheck) PrepareDig(IslandRules::PrizeIndex);
+        else PrepareDig(FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")) ? 3 : 0);
         return;
     }
     if (RoomCheck == ERoomCheck::Mud) { TickMudCheck(Now); return; }
@@ -727,6 +729,16 @@ void AIslandProbe::TickExpedition(double Now)
     }
     if (RoomCheck == ERoomCheck::Dig && Now - LastAction > .65 && !Mode->GetTerrain()->IsBusy())
     {
+        if (bEarlyPrizeCheck && OnPrize() && Mode->TeamClues[Host->GetTeam()].Mask == 0)
+        {
+            const FBox Bounds = FBox::BuildAABB(Mode->HiddenLayout.GetCenter(NextDig), IslandRules::ChestExtent);
+            if (Mode->GetTerrain()->IsVolumeClear(Bounds))
+            {
+                Require(!Mode->Exposed[NextDig], TEXT("an early blind dig clears the prize site without revealing its actor"));
+                PrepareDig(0);
+                return;
+            }
+        }
         if (!Mode->Exposed[NextDig])
         {
             // A buried corner can remain above a deep vertical shaft on a slope. Walk the
@@ -852,6 +864,8 @@ void AIslandProbe::TickExpedition(double Now)
             Advance(EStep::Done);
             return;
         }
+        if (bEarlyPrizeCheck && NextDig == IslandRules::ClueCount - 1)
+            Require(Mode->Exposed[IslandRules::PrizeIndex] != nullptr, TEXT("fourth clue reveals the pre-excavated prize without another dig"));
         if (!OnPrize())
         {
             Mode->RecoverPlayer(*Players[ExpeditionOpener]);

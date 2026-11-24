@@ -212,7 +212,7 @@ namespace
         FIslandTreasureLayout Hunt;
         FString Error;
         bool bValid=CheckLandingRoutes(World,*Terrain);
-        bValid &= Density && IslandRules::GenerateLayout(0,0,Terrain->GetSearchCircles(),*Density,Hunt,&Error,true);
+        bValid &= Density && IslandRules::GenerateLayout(0,0,Terrain->GetSearchCircles(),*Density,Hunt,&Error,true,IslandRules::CollectSearchObstacles(World));
         FHitResult Hit;
         bValid &= Terrain->TraceEditorPreview({0,0,1600},{0,0,-600},Hit);
         const int32 Height=Ground(0,0);
@@ -265,7 +265,7 @@ int32 BuildExpeditionMap(const FString& Params)
     const FIntPoint Regions[]={{4300,1780},{-1780,4300},{-4300,-1780},{1780,-4300}};
     for (int32 Index=0;Index<4;++Index)
     {
-        Terrain->SetSearchCircle(Index,{Regions[Index],410});
+        Terrain->SetSearchCircle(Index,{Regions[Index],IslandRules::ExpeditionSearchRadius});
         Landmark(Art,Index,FVector2D(Regions[Index]));
     }
     Terrain->BakeExpeditionSurface();

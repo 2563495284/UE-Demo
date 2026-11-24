@@ -1,6 +1,10 @@
 #include "Island/IslandRules.h"
 
 #include "Voxel/VoxelDensity.h"
+#include "Island/ExpeditionDock.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMeshActor.h"
+#include "EngineUtils.h"
 
 namespace
 {
@@ -13,11 +17,10 @@ namespace
         return A.X * B.Y - A.Y * B.X;
     }
 
-    bool FindCrossing(const FIslandTreasureLayout& Layout, FVector2D& Crossing)
+    bool FindCrossing(FVector2D A, FVector2D B, FVector2D C, FVector2D D, FVector2D& Crossing)
     {
-        const FVector2D A(Layout.Centers[0]), B(Layout.Centers[1]);
-        const FVector2D AC = FVector2D(Layout.Centers[2]) - A;
-        const FVector2D BD = FVector2D(Layout.Centers[3]) - B;
+        const FVector2D AC = C - A;
+        const FVector2D BD = D - B;
         const double Denominator = Cross(AC, BD);
         if (FMath::Abs(Denominator) < 1.0)
         {
@@ -27,6 +30,12 @@ namespace
         const double U = Cross(B - A, AC) / Denominator;
         Crossing = A + AC * T;
         return T > 0.0 && T < 1.0 && U > 0.0 && U < 1.0;
+    }
+
+    bool FindCrossing(const FIslandTreasureLayout& Layout, FVector2D& Crossing)
+    {
+        return FindCrossing(FVector2D(Layout.Centers[0]), FVector2D(Layout.Centers[1]),
+            FVector2D(Layout.Centers[2]), FVector2D(Layout.Centers[3]), Crossing);
     }
 
     FString CircleError(int32 Index)
@@ -65,8 +74,27 @@ bool IslandRules::InSea(const FVector& Head)
     return Head.Z < 0 && VoxelPlayground::ShoreDistance(FMath::RoundToInt(Head.X), FMath::RoundToInt(Head.Y)) >= 0;
 }
 
+TArray<FBox2D> IslandRules::CollectSearchObstacles(UWorld& World)
+{
+    TArray<FBox2D> Obstacles;
+    for (TActorIterator<AActor> It(&World); It; ++It)
+    {
+        if (!It->IsA<AExpeditionLandmark>() && !It->IsA<AStaticMeshActor>() && !It->IsA<AExpeditionDock>()) continue;
+        TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
+        for (const UStaticMeshComponent* Mesh : Meshes)
+        {
+            if (!Mesh->GetStaticMesh() || !Mesh->IsQueryCollisionEnabled()
+                || Mesh->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block) continue;
+            const FBox Bounds = Mesh->Bounds.GetBox();
+            // Reserve an approach for a standing player as well as the buried chest itself.
+            Obstacles.Add(FBox2D(FVector2D(Bounds.Min), FVector2D(Bounds.Max)).ExpandBy(100.));
+        }
+    }
+    return Obstacles;
+}
+
 bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArrayView<FIslandSearchCircle> Circles,
-    const FVoxelDensity& Density, FString* Error)
+    const FVoxelDensity& Density, FString* Error, TConstArrayView<FBox2D> Obstacles)
 {
     const auto Reject = [Error](const FString& Message)
     {
@@ -85,6 +113,16 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArray
     if (Circles.Num() != ClueCount || Layout.Decoys.Num() > MaxDecoys)
     {
         return Reject(TEXT("Expected four search circles and at most 24 decoys"));
+    }
+    if (Density.Layout == EVoxelLayout::Expedition)
+    {
+        FVector2D CenterGuess;
+        const bool bHasGuess = FindCrossing(FVector2D(Circles[0].Center), FVector2D(Circles[1].Center),
+            FVector2D(Circles[2].Center), FVector2D(Circles[3].Center), CenterGuess);
+        int32 SmallestRadius = Circles[0].Radius;
+        for (const auto& Circle : Circles) SmallestRadius = FMath::Min(SmallestRadius, Circle.Radius);
+        if (bHasGuess && FVector2D::Distance(CenterGuess, Crossing) < FMath::Min(1000., .60 * SmallestRadius))
+            return Reject(TEXT("The public circle centers give away the prize intersection"));
     }
     TStaticArray<int32, ClueCount> PerCircle(InPlace, 0);
     const int32 BaseCount = Layout.Decoys.Num() / ClueCount;
@@ -121,6 +159,7 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArray
             || Center.Z - ChestExtent.Z < -700
             || (!bPrize && FVector2D::DistSquared(Point, FVector2D(Circles[Circle].Center)) > FMath::Square(Circles[Circle].Radius))
             || Density.ShoreDistance(FMath::RoundToInt(Center.X), FMath::RoundToInt(Center.Y)) > -550
+            || Obstacles.ContainsByPredicate([Point](const FBox2D& Area) { return Area.IsInside(Point); })
             || !Density.IsVolumeSolid(FBox::BuildAABB(Center, ChestExtent)))
         {
             return Reject(Message);
@@ -140,7 +179,7 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArray
 }
 
 bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<FIslandSearchCircle> Circles,
-    const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error, bool bFixedOnly)
+    const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error, bool bFixedOnly, TConstArrayView<FBox2D> Obstacles)
 {
     if (Circles.Num() != ClueCount)
     {
@@ -150,11 +189,13 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
         }
         return false;
     }
+    const bool bExpedition = Density.Layout == EVoxelLayout::Expedition;
+    const int32 MaxRadius = bExpedition ? MaxExpeditionSearchRadius : MaxSearchRadius;
     for (int32 Index = 0; Index < ClueCount; ++Index)
     {
         const FIslandSearchCircle& Circle = Circles[Index];
         const FIntVector Max = Density.Grid.Origin + Density.Grid.Cells * VoxelPlayground::Spacing;
-        if (Circle.Radius < MinSearchRadius || Circle.Radius > MaxSearchRadius
+        if (Circle.Radius < MinSearchRadius || Circle.Radius > MaxRadius
             || Circle.Center.X < Density.Grid.Origin.X || Circle.Center.Y < Density.Grid.Origin.Y
             || Circle.Center.X > Max.X || Circle.Center.Y > Max.Y)
         {
@@ -170,7 +211,7 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
     FRandomStream Random(Seed);
     FRandomStream Fixed(7319);
     constexpr int32 RandomAttempts = 64;
-    constexpr int32 TotalAttempts = RandomAttempts + 64;
+    const int32 TotalAttempts = bExpedition ? 512 : RandomAttempts + 64;
     const auto Place = [&Density](FVector2D Point, int32 Depth)
     {
         // Remap the original draw so the random sequence and planar coordinates remain stable.
@@ -179,10 +220,10 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
         return FVector(Point, Density.SurfaceAt(Point).Get(-10000.0) - Depth);
     };
 
-    for (int32 Attempt = bFixedOnly ? RandomAttempts : 0; Attempt < TotalAttempts; ++Attempt)
+    for (int32 Attempt = bFixedOnly && !bExpedition ? RandomAttempts : 0; Attempt < TotalAttempts; ++Attempt)
     {
-        const bool bFixed = Attempt >= RandomAttempts;
-        const bool bCentered = Attempt == RandomAttempts;
+        const bool bFixed = bExpedition ? bFixedOnly : Attempt >= RandomAttempts;
+        const bool bCentered = !bExpedition && Attempt == RandomAttempts;
         FRandomStream& Stream = bFixed ? Fixed : Random;
         TStaticArray<int32, ClueCount> PerCircle(InPlace, DecoyCount / ClueCount);
         int32 Order[ClueCount] = {0, 1, 2, 3};
@@ -202,7 +243,9 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
             FVector2D Point(Circle.Center);
             if (!bCentered)
             {
-                const double Radius = PerCircle[Index] > 0
+                const double Radius = bExpedition
+                    ? FMath::Max(0., Circle.Radius - ChestExtent.Size2D() - (PerCircle[Index] ? DecoyRadius : 0.))
+                    : PerCircle[Index] > 0
                     ? FMath::Min(ClueOffsetWithDecoys, Circle.Radius - DecoyRadius - 1.0)
                     : Circle.Radius - 1.0;
                 const double Angle = Stream.FRand() * UE_TWO_PI;
@@ -230,7 +273,7 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
                 Layout.Decoys.Add({Place(Point, bCentered ? 300 : Stream.RandRange(200, 400)), Index});
             }
         }
-        if (IsValidLayout(Layout, Circles, Density, Error))
+        if (IsValidLayout(Layout, Circles, Density, Error, Obstacles))
         {
             if (Error)
             {

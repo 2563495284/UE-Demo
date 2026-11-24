@@ -43,6 +43,7 @@ public:
     FVector GetTideMouth(int32 Index) const;
     TArray<FVector> GetSandCenters() const;
     bool IsTideBoostReady() const;
+    static bool AnySailObscures(UWorld& World, const FVector& Start, const FVector& End);
 
     bool Strike(AIslandPlayerController& Player, const FHitResult& Hit);
     bool CanUseRope(const AIslandPlayerController& Player) const;

@@ -1,6 +1,7 @@
 #include "Island/ExpeditionAnimalComponent.h"
 
 #include "Components/CapsuleComponent.h"
+#include "Camera/CameraComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Island/IslandState.h"
@@ -128,10 +129,23 @@ void UExpeditionAnimalComponent::TickComponent(float Delta,ELevelTick TickType,F
     Body->SetRelativeLocation(FVector(0,0,-Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()+FMath::Abs(FMath::Sin(Stride))*4.f*Speed));
     Body->SetRelativeScale3D(Compact ? FVector(.86,.88,.46) : FVector::OneVector);
     Body->SetRelativeRotation(FRotator(Stun ? -9.f : 0.f,0,Stun ? 9.f : 0.f));
-    const bool Visible = !(Compact && Hero->IsLocallyControlled());
+    const bool FirstPerson = Hero->IsInFirstPersonView();
+    const bool Visible = !FirstPerson && !(Compact && Hero->IsLocallyControlled());
     if (Body->IsVisible()!=Visible) Body->SetVisibility(Visible,true);
     const bool ShowMud=Visible && !Stun && MarkSeconds>0 && MudSpots>=1;
     CheekMud->SetVisibility(ShowMud);
+    // Only the player looking through these eyes needs a pair of near-camera paws.
+    if (FirstPerson && EyePaws.IsEmpty())
+    {
+        for (int32 I=0; I<2; ++I)
+        {
+            auto* Paw=Shape(Hero->GetEyeCamera(),FVector::ZeroVector,{23,12,15},FColor(69,61,65));
+            Paw->SetFirstPersonPrimitiveType(EFirstPersonPrimitiveType::FirstPerson);
+            Paw->SetOnlyOwnerSee(true);
+            Paw->SetCastShadow(false);
+            EyePaws.Add(Paw);
+        }
+    }
     for (int32 I=0; I<Hands.Num(); ++I)
     {
         const float Side=I ? 1.f : -1.f, Gait=Side*FMath::Sin(Stride)*Speed;
@@ -139,5 +153,15 @@ void UExpeditionAnimalComponent::TickComponent(float Delta,ELevelTick TickType,F
         Hands[I]->SetRelativeLocation(FVector(8.+Gait*9.+Reach*31.,Side*35.,61.+Reach*(bThrow?20.:-20.)));
         Feet[I]->SetRelativeLocation(FVector(8.-Gait*12.,Side*18.,13.+FMath::Max(0.f,Gait)*8.));
         Marks[I]->SetVisibility(ShowMud && !Compact && MudSpots>=2,true);
+        if (EyePaws.IsValidIndex(I))
+        {
+            auto* Paw=EyePaws[I].Get();
+            Paw->SetVisibility(FirstPerson && !Stun);
+            if (FirstPerson)
+            {
+                Paw->SetRelativeLocation({38.+Gait*1.5+Reach*14.,Side*(21.-Reach*8.),-18.+Gait+Reach*(bThrow?11.:6.)});
+                Paw->SetRelativeRotation(FRotator(14.+Reach*12.,-Side*12.,0.));
+            }
+        }
     }
 }

@@ -17,6 +17,7 @@
 #include "Misc/App.h"
 #include "Materials/MaterialInterface.h"
 #include "ProceduralMeshComponent.h"
+#include "Serialization/CustomVersion.h"
 #include "UObject/ConstructorHelpers.h"
 
 struct FVoxelMeshBuild
@@ -29,6 +30,10 @@ struct FVoxelMeshBuild
 
 namespace
 {
+    const FGuid SearchCircleVersion(0x606858E0, 0x8F94453B, 0xA477256A, 0xBDF22F55);
+    constexpr int32 WideExpeditionCircles = 1;
+    const FCustomVersionRegistration RegisterSearchCircleVersion(SearchCircleVersion, WideExpeditionCircles, TEXT("ExpeditionSearchCircles"));
+
     TSharedPtr<FVoxelDensity, ESPMode::ThreadSafe> BuildDensity(EVoxelLayout Layout, TConstArrayView<FVoxelBrushStamp> Stamps)
     {
         auto Result = MakeShared<FVoxelDensity, ESPMode::ThreadSafe>(Layout);
@@ -428,9 +433,20 @@ void AVoxelTerrain::SetSearchCircle(int32 Index, FIslandSearchCircle Circle)
 }
 #endif
 
+void AVoxelTerrain::Serialize(FArchive& Ar)
+{
+    Super::Serialize(Ar);
+    Ar.UsingCustomVersion(SearchCircleVersion);
+}
+
 void AVoxelTerrain::PostLoad()
 {
     Super::PostLoad();
+    if (Layout == EVoxelLayout::Expedition && GetLinkerCustomVersion(SearchCircleVersion) < WideExpeditionCircles)
+    {
+        for (FIslandSearchCircle& Circle : SearchCircles)
+            if (Circle.Radius == 410) Circle.Radius = IslandRules::ExpeditionSearchRadius;
+    }
     // The editor temporarily hides coarse tiles underneath its transient sculpt preview.
     // A level saved during a stroke must reload its original baked collision and visibility.
     for (UProceduralMeshComponent* Tile : BakedTiles)
