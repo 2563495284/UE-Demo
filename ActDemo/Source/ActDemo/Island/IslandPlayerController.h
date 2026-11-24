@@ -7,6 +7,8 @@
 
 class APartySession;
 class AIslandChest;
+class AIslandNeutralProp;
+class USoundWave;
 struct FStreamableHandle;
 
 UCLASS()
@@ -15,6 +17,7 @@ class AIslandPlayerController : public AVoxelPlayerController
     GENERATED_BODY()
 
 public:
+    AIslandPlayerController();
     int32 GetTeam() const;
     UFUNCTION(Server, Reliable) void ServerChooseTeam(int32 Team);
     UFUNCTION(Server, Reliable) void ServerSetRoomReady(bool bReady);
@@ -24,6 +27,12 @@ public:
     bool IsMapOpen() const { return bMapOpen; }
     const FIslandClues& GetLocalClues() const { return LocalClues; }
     FString WaterStatus() const;
+    UFUNCTION(Client, Reliable) void ClientExcavationEcho(bool bStrong);
+    UFUNCTION(Client, Reliable) void ClientCrewRally(FVector_NetQuantize Position, bool bAtChest, double ExpiresAt);
+    bool GetCrewRally(FVector& Position, bool& bAtChest) const;
+    double GetEchoAge() const { return FPlatformTime::Seconds() - LastEchoAt; }
+    bool HasStrongEcho() const { return bStrongEcho; }
+    bool HasChestClue(const AIslandChest& Chest) const;
 
     void Interact();
     void RestartIsland();
@@ -43,6 +52,8 @@ protected:
 private:
     friend class AIslandProbePeer;
     void OpenMap();
+    void Rally();
+    UFUNCTION(Server, Reliable) void ServerRally();
     void CloseMap();
     UFUNCTION(Server, Reliable) void ServerInteract();
     UFUNCTION(Server, Reliable) void ServerRestartIsland();
@@ -66,6 +77,12 @@ private:
     bool bPartyUnloadStarted = false;
 
     FIslandClues LocalClues;
+    UPROPERTY() TObjectPtr<USoundWave> EchoSound;
+    double LastEchoAt = -1e9;
+    bool bStrongEcho = false;
+    FVector RallyPosition = FVector::ZeroVector;
+    bool bRallyAtChest = false;
+    double RallyExpiresAt = 0.;
     double WaterChangedAt = 0.0;
     uint8 WaterState = 0;
     bool bMapOpen = false;
@@ -76,6 +93,8 @@ private:
     bool CanUseIslandWorld() const;
 public:
     AIslandChest* GetReachableChest() const;
+    AIslandNeutralProp* GetReachableSail() const;
+    FString GetNeutralHint() const;
     void ClearHeldIslandActions();
     bool ShowControlHelp() const { return bHelpOpen; }
 

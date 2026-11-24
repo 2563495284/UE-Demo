@@ -4,9 +4,12 @@
 #include "Island/IslandState.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
+#include "Voxel/VoxelGameMode.h"
+#include "Island/ExpeditionMudBall.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "GameFramework/InputSettings.h"
 #include "HAL/FileManager.h"
 #include "Misc/App.h"
@@ -16,6 +19,7 @@
 AExpeditionWalk::AExpeditionWalk()
 {
     PrimaryActorTick.bCanEverTick = true;
+    bSlopePitRun = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionSlopePitQA"));
     bTreasureRun = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionTreasureWalkQA"));
 }
 
@@ -41,7 +45,11 @@ void AExpeditionWalk::StopRun(const FString& Reason)
     {
         Frames.Sort();
         const double P95 = Frames.IsEmpty() ? 0. : Frames[FMath::Clamp(FMath::CeilToInt(Frames.Num()*.95)-1,0,Frames.Num()-1)];
-        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_DONE areas=4 meters=%.1f elapsed=%.1fs frameP95=%.2fms"),Meters,GetWorld()->GetTimeSeconds()-WalkStarted,P95);
+        if (bSlopePitRun)
+        {
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_SLOPE_PIT_DONE meters=%.1f elapsed=%.1fs"),Meters,GetWorld()->GetTimeSeconds()-WalkStarted);
+        }
+        else UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_DONE areas=4 meters=%.1f elapsed=%.1fs frameP95=%.2fms"),Meters,GetWorld()->GetTimeSeconds()-WalkStarted,P95);
     }
     else
     {
@@ -97,6 +105,25 @@ bool AExpeditionWalk::WalkTo(AIslandPlayerController& Player, FVector2D Dest, fl
     return false;
 }
 
+TOptional<FVector> AExpeditionWalk::HighestSupportingRock(AIslandPlayerController& Player, AVoxelTerrain& Terrain) const
+{
+    AVoxelCharacter& Hero = *Player.GetHero();
+    const FVector Eye = Hero.GetAimOrigin();
+    const FVector Feet = Hero.GetActorLocation() - FVector::UpVector * Hero.GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    TOptional<FVector> Best;
+    // Sample the player's actual standing footprint. A capsule can bridge a thin lip even when
+    // the ray through its exact centre already reaches the bottom.
+    const FVector2D Offsets[] = {{0,0}, {35,0}, {-35,0}, {0,35}, {0,-35}, {25,25}, {-25,25}, {25,-25}, {-25,-25}};
+    for (const FVector2D& Offset : Offsets)
+    {
+        const FVector End = Feet + FVector(Offset, -82.);
+        FHitResult Hit;
+        if (!Terrain.TraceRock(Eye, End, &Hero, Hit)) continue;
+        if (!Best || Hit.ImpactPoint.Z > Best->Z + 2.) Best = Hit.ImpactPoint;
+    }
+    return Best;
+}
+
 void AExpeditionWalk::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
@@ -129,7 +156,25 @@ void AExpeditionWalk::Tick(float DeltaSeconds)
         auto* Dock = AExpeditionDock::FindForTeam(GetWorld(),{Player->GetTeam()},Player->GetTeam());
         if (!Dock) { StopRun(TEXT("landing does not resolve")); return; }
         Route.Add(FVector2D(Dock->GetActorLocation() + Dock->GetActorForwardVector()*720.));
-        for (const auto& Circle : Terrain->GetSearchCircles()) Route.Add(FVector2D(Circle.Center));
+        if (bSlopePitRun)
+        {
+            const FVector2D TowardSea=FVector2D(Dock->GetActorLocation()).GetSafeNormal();
+            // Seek a natural inclined near-shore surface, leaving the generated map and its collision untouched.
+            for (double Inland=1050.; Inland<=2600.; Inland+=150.)
+            {
+                const FVector2D Site=FVector2D(Dock->GetActorLocation())-TowardSea*Inland;
+                FHitResult Ground;
+                if (Terrain->TraceRock(FVector(Site,1400.),FVector(Site,-180.),Hero,Ground)
+                    && Ground.ImpactPoint.Z>120. && Ground.ImpactNormal.Z>.91 && Ground.ImpactNormal.Z<.99)
+                {
+                    Route.Add(Site);
+                    EscapeDirection=FVector2D(Ground.ImpactNormal).GetSafeNormal();
+                    break;
+                }
+            }
+            if (Route.Num()<2) { StopRun(TEXT("no natural incline in approach")); return; }
+        }
+        else for (const auto& Circle : Terrain->GetSearchCircles()) Route.Add(FVector2D(Circle.Center));
         WalkStarted=Now;
         LastPosition=Position;
         ChangeStage(EStage::Landing);
@@ -161,6 +206,12 @@ void AExpeditionWalk::Tick(float DeltaSeconds)
         {
             ++Destination;
             StageStarted=Now;
+        }
+        else if (bSlopePitRun)
+        {
+            Pit=Position;
+            BaselineSequence=Terrain->GetAppliedSequence();
+            ChangeStage(EStage::Digging);
         }
         else ChangeStage(EStage::Viewing);
         return;
@@ -202,63 +253,163 @@ void AExpeditionWalk::Tick(float DeltaSeconds)
     }
     if (Stage==EStage::Digging)
     {
-        if (Terrain->GetAppliedSequence()>BaselineSequence && Position.Z<Pit.Z-80. && !Hero->GetCharacterMovement()->IsFalling())
+        if (Pit.Z-Position.Z >= 152. && Hero->GetCharacterMovement()->IsMovingOnGround())
         {
-            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_PIT depth=%.1f seq=%u"),Pit.Z-Position.Z,Terrain->GetAppliedSequence());
+            if (bSlopePitRun)
+            {
+                const FVector Feet=Position-FVector::UpVector*Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+                FHitResult Floor;
+                if (!Terrain->TraceRock(Feet+FVector::UpVector*35.,Feet-FVector::UpVector*60.,Hero,Floor)
+                    || Floor.ImpactNormal.Z>=.995 || Floor.ImpactNormal.Z<.7)
+                { StopRun(TEXT("measured pit bottom is not an incline")); return; }
+                UE_LOG(LogTemp,Display,TEXT("EXPEDITION_SLOPE_FLOOR degrees=%.2f depth=%.1f"),
+                    FMath::RadiansToDegrees(FMath::Acos(Floor.ImpactNormal.Z)),Pit.Z-Position.Z);
+            }
+            PitBottom=Position.Z;
+            BaselineSequence=Terrain->GetAppliedSequence();
+            SoilThrows=0;
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_PIT depth=%.1f seq=%u"),Pit.Z-PitBottom,BaselineSequence);
             RecordView(TEXT("05-far-dig"));
+            ChangeStage(EStage::Filling);
+            return;
+        }
+        Turn(*Player,FRotator(-83.,Player->GetControlRotation().Yaw,0.),DeltaSeconds);
+        if (Now-StageStarted>.6 && Now-LastInput>.59 && !Terrain->IsBusy() && Hero->GetCharacterMovement()->IsMovingOnGround())
+        {
+            if (auto Point=HighestSupportingRock(*Player,*Terrain))
+            {
+                Player->SubmitEdit(EVoxelAction::Punch,(*Point-Hero->GetAimOrigin()).GetSafeNormal());
+                LastInput=Now;
+            }
+        }
+        return;
+    }
+    if (Stage==EStage::Filling)
+    {
+        // Every throw has a visible, colliding flight and a normal authoritative mud landing.
+        // Only start walking once the new standing plane actually carries the player to the lip.
+        const double Remaining=Pit.Z-Position.Z;
+        if (Terrain->GetAppliedSequence()>BaselineSequence && Remaining<=43. && Hero->GetCharacterMovement()->IsMovingOnGround())
+        {
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_MUD_STAIRS throws=%d gain=%.1f remaining=%.1f"),
+                SoilThrows,Position.Z-PitBottom,Remaining);
+            RecordView(TEXT("06-far-fill"));
             ChangeStage(EStage::Escaping);
             return;
         }
-        if (Terrain->GetAppliedSequence()==BaselineSequence && Now-StageStarted>.6 && Now-LastInput>.8)
+        Turn(*Player,FRotator(-83.,Player->GetControlRotation().Yaw,0.),DeltaSeconds);
+        const double Pitch=FRotator::NormalizeAxis(Player->GetControlRotation().Pitch);
+        if (Pitch<-75. && Now-LastInput>.85 && !Terrain->IsBusy() && Hero->GetCharacterMovement()->IsMovingOnGround())
         {
-            Player->SubmitEdit(EVoxelAction::DigDown);
+            Player->SetExpeditionThrowHeld(true);
+            Player->SetExpeditionThrowHeld(false);
+            ++SoilThrows;
             LastInput=Now;
         }
         return;
     }
     if (Stage==EStage::Escaping)
     {
-        WalkTo(*Player,FVector2D(Pit)+EscapeDirection*650.,DeltaSeconds,10.);
-        const double YawError = FMath::Abs(FMath::FindDeltaAngleDegrees(Player->GetControlRotation().Yaw,FVector(EscapeDirection,0.).Rotation().Yaw));
-        const double OriginalSurface = VoxelPlayground::BaseHeight(Terrain->Layout,FMath::RoundToInt(Position.X),FMath::RoundToInt(Position.Y));
-        if (bClimbing && Position.Z>=OriginalSurface-15.)
+        WalkTo(*Player,FVector2D(Pit)+EscapeDirection*340.,DeltaSeconds,20.);
+        const double OriginalSurface=VoxelPlayground::BaseHeight(Terrain->Layout,FMath::RoundToInt(Position.X),FMath::RoundToInt(Position.Y));
+        const double Feet=Position.Z-Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+        if (FVector::Dist2D(Position,Pit)>165. && FMath::Abs(Feet-OriginalSurface)<35. && Hero->GetCharacterMovement()->IsMovingOnGround())
         {
-            Player->StopClimb();
-            bClimbing=false;
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_EXIT surface=1 throws=%d radius=%.1f"),SoilThrows,FVector::Dist2D(Position,Pit));
+            if (bSlopePitRun) ChangeStage(EStage::BuildingRoof);
+            else
+            {
+                ChangeStage(EStage::Returning);
+                Player->StartRecover();
+            }
         }
-        else if (!bClimbing && Position.Z<OriginalSurface-30. && YawError<15.)
+        return;
+    }
+    if (Stage==EStage::BuildingRoof)
+    {
+        if (!bRoofRequested)
         {
-            Player->StartClimb();
-            bClimbing=true;
+            if (Hero->GetVelocity().Size()>5.) return;
+            const double Half=Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+            RoofFeet=Position-FVector::UpVector*Half;
+            const FVector Support=FVector(-EscapeDirection,0.);
+            // Prepare a supported voxel overhang using the same authoritative sand queue as the hopper.
+            // Only this optional test builds the fixture; the subsequent throws are the ordinary right input.
+            auto* Mode=GetWorld()->GetAuthGameMode<AVoxelGameMode>();
+            if (!Mode) { StopRun(TEXT("no authoritative terrain queue")); return; }
+            TArray<FVector> Centers;
+            for (const FVector2D& Offset : {FVector2D(175.,45.), FVector2D(175.,150.), FVector2D(145.,245.),
+                                            FVector2D(75.,277.), FVector2D(0.,277.)})
+                Centers.Add(RoofFeet+Support*Offset.X+FVector::UpVector*Offset.Y);
+            bRoofRequested=true;
+            const TWeakObjectPtr<AExpeditionWalk> Weak(this);
+            Mode->EnqueueEnvironmentFill(Centers,[Weak](bool bOK)
+            {
+                if (auto* Walk=Weak.Get())
+                {
+                    if (!bOK) Walk->StopRun(TEXT("voxel overhang fixture rejected"));
+                    else Walk->bRoofReady=true;
+                }
+            });
+            return;
         }
-        if (Now-LastInput>.90)
+        if (!bRoofReady || Terrain->IsBusy()) return;
+        const FVector Head=Hero->GetActorLocation()+FVector::UpVector*Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+        FHitResult Roof;
+        if (!Terrain->TraceRock(Head,Head+FVector::UpVector*70.,Hero,Roof))
+        { StopRun(TEXT("no colliding roof above the standing capsule")); return; }
+        const double Clearance=Roof.ImpactPoint.Z-Head.Z;
+        if (Clearance<5. || Clearance>34.) { StopRun(TEXT("overhang does not constrain a 40cm rise")); return; }
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_MUD_HEADROOM clearance_cm=%.2f sequence=%u"),Clearance,Terrain->GetAppliedSequence());
+        BaselineSequence=Terrain->GetAppliedSequence();
+        SoilThrows=0;
+        ChangeStage(EStage::UnderRoof);
+        return;
+    }
+    if (Stage==EStage::UnderRoof)
+    {
+        const double FeetZ=Position.Z-Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+        if (Terrain->GetAppliedSequence()!=BaselineSequence || FMath::Abs(FeetZ-RoofFeet.Z)>5.)
+        { StopRun(TEXT("under-ceiling throw embedded or displaced the player")); return; }
+        Turn(*Player,FRotator(-83.,Player->GetControlRotation().Yaw,0.),DeltaSeconds);
+        if (SoilThrows<2 && FRotator::NormalizeAxis(Player->GetControlRotation().Pitch)<-75. && Now-LastInput>1.)
         {
-            Hero->Jump();
+            Player->SetExpeditionThrowHeld(true);
+            Player->SetExpeditionThrowHeld(false);
+            TActorIterator<AExpeditionMudBall> Ball(GetWorld());
+            bSawThrow|=bool(Ball);
+            ++SoilThrows;
             LastInput=Now;
         }
-        else if (Now-LastInput>.12) Hero->StopJumping();
-        // Remove the overhanging lip ahead with a regular, range-checked punch, like a player
-        // cutting a foothold before climbing. The brush location is resolved by the server.
-        if (YawError<15. && Now-StageStarted>2. && Now-LastCarve>1.4 && FVector::Dist2D(Position,Pit)<230. && !Terrain->IsBusy())
+        if (SoilThrows==2 && Now-LastInput>.8)
         {
-            const double TargetZ=Pit.Z-92.-18.;
-            const FVector RockTarget(FVector2D(Position)+EscapeDirection*155.,TargetZ);
-            Player->SubmitEdit(EVoxelAction::Punch,(RockTarget-Hero->GetAimOrigin()).GetSafeNormal());
-            LastCarve=Now;
+            if (!bSawThrow) { StopRun(TEXT("right input never produced a projectile")); return; }
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_MUD_HEADROOM_BLOCKED throws=2 seq=%u displacement_cm=%.2f"),BaselineSequence,FeetZ-RoofFeet.Z);
+            ChangeStage(EStage::BeyondRoof);
         }
-        // A player can carve a side alcove and return by holding R even when the exit lip is
-        // too steep. Identify it separately from reaching the original (uncarved) surface.
-        const bool bSurface = FVector::Dist2D(Position,Pit)>435. && FMath::Abs((Position.Z-92.)-OriginalSurface)<36.
-            && Hero->GetCharacterMovement()->IsMovingOnGround();
-        const bool bSidePassage = Now-StageStarted>9. && FVector::Dist2D(Position,Pit)>185. && Position.Z>Pit.Z-130.;
-        if (bSurface || bSidePassage)
+        return;
+    }
+    if (Stage==EStage::BeyondRoof)
+    {
+        if (ClearThrowStart.IsZero())
         {
-            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_EXIT surface=%d sidepassage=%d radius=%.1f"),
-                bSurface,bSidePassage,FVector::Dist2D(Position,Pit));
-            Player->StopClimb();
-            Hero->StopJumping();
-            BaselineSequence=Terrain->GetAppliedSequence();
-            ChangeStage(EStage::Filling);
+            if (!WalkTo(*Player,FVector2D(RoofFeet)+EscapeDirection*270.,DeltaSeconds,26.)) return;
+            if (Hero->GetVelocity().Size()>5.) return;
+            ClearThrowStart=Position;
+            return;
+        }
+        if (Terrain->GetAppliedSequence()>BaselineSequence && Position.Z-ClearThrowStart.Z>28.)
+        {
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_MUD_HEADROOM_CLEAR rise_cm=%.2f"),Position.Z-ClearThrowStart.Z);
+            StopRun({});
+            return;
+        }
+        Turn(*Player,FRotator(-83.,Player->GetControlRotation().Yaw,0.),DeltaSeconds);
+        if (FRotator::NormalizeAxis(Player->GetControlRotation().Pitch)<-75. && Now-LastInput>1.)
+        {
+            Player->SetExpeditionThrowHeld(true);
+            Player->SetExpeditionThrowHeld(false);
+            LastInput=Now;
         }
         return;
     }
@@ -272,29 +423,5 @@ void AExpeditionWalk::Tick(float DeltaSeconds)
             ChangeStage(EStage::Walking);
         }
         return;
-    }
-    if (Stage==EStage::Filling)
-    {
-        if (Terrain->GetAppliedSequence()>BaselineSequence)
-        {
-            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_RETURNED_FROM_PIT seq=%u xyz=%s"),Terrain->GetAppliedSequence(),*Position.ToCompactString());
-            RecordView(TEXT("06-far-fill"));
-            ChangeStage(EStage::Returning);
-            Player->StartRecover();
-            return;
-        }
-        const FVector2D GroundTarget = FVector2D(Position) - EscapeDirection * 137.;
-        const FVector Target(GroundTarget,Terrain->GetDensity()->SurfaceAt(GroundTarget).Get(Position.Z-90.));
-        FVector Camera;
-        FRotator CameraRotation;
-        Player->GetPlayerViewPoint(Camera,CameraRotation);
-        Turn(*Player,(Target-Camera).Rotation(),DeltaSeconds);
-        if (Now-StageStarted>1. && Now-LastInput>.8)
-        {
-            Player->SubmitEdit(EVoxelAction::Fill);
-            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_WALK_FILL_AIM elapsed=%.1f target=%s eye=%s view=%s feedback=%s"),
-                Now-StageStarted,*Target.ToCompactString(),*Camera.ToCompactString(),*CameraRotation.ToCompactString(),*Player->GetNotice());
-            LastInput=Now;
-        }
     }
 }

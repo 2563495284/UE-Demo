@@ -114,7 +114,10 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArray
         const double Depth = Surface.Get(0.0) - Center.Z;
         const int32 Circle = bDecoy ? Layout.Decoys[Index - Layout.Centers.Num()].ClueIndex : Index;
         const FString Message = bPrize ? TEXT("The prize intersection needs deeper solid rock") : CircleError(Circle);
-        if (!Surface || Depth < (bPrize ? 599.99 : 199.99) || Depth > (bPrize ? 800.01 : 400.01)
+        const bool Expedition = Density.Layout == EVoxelLayout::Expedition;
+        const double MinDepth = bPrize ? (Expedition ? 250. : 600.) : (Expedition ? 125. : 200.);
+        const double MaxDepth = bPrize ? (Expedition ? 300. : 800.) : (Expedition ? 175. : 400.);
+        if (!Surface || Depth < MinDepth - .01 || Depth > MaxDepth + .01
             || Center.Z - ChestExtent.Z < -700
             || (!bPrize && FVector2D::DistSquared(Point, FVector2D(Circles[Circle].Center)) > FMath::Square(Circles[Circle].Radius))
             || Density.ShoreDistance(FMath::RoundToInt(Center.X), FMath::RoundToInt(Center.Y)) > -550
@@ -170,6 +173,9 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
     constexpr int32 TotalAttempts = RandomAttempts + 64;
     const auto Place = [&Density](FVector2D Point, int32 Depth)
     {
+        // Remap the original draw so the random sequence and planar coordinates remain stable.
+        if (Density.Layout == EVoxelLayout::Expedition)
+            Depth = Depth >= 600 ? 250 + (Depth-600)/4 : 125 + (Depth-200)/4;
         return FVector(Point, Density.SurfaceAt(Point).Get(-10000.0) - Depth);
     };
 

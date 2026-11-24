@@ -16,6 +16,7 @@
 		}
 	],
 	"Plugins": [
+		{ "Name": "GameplayAbilities", "Enabled": true },
 		{ "Name": "OnlineSubsystemNull", "Enabled": true },
 		{ "Name": "GameFeatures", "Enabled": true },
 		{ "Name": "PartyFramework", "Enabled": true },

@@ -1,4 +1,6 @@
 #include "Island/IslandState.h"
+#include "Island/IslandWorld.h"
+#include "GameFramework/PlayerController.h"
 #include "Net/UnrealNetwork.h"
 
 void AIslandGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -23,6 +25,30 @@ void AIslandPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
     DOREPLIFETIME(AIslandPlayerState, bHost);
     DOREPLIFETIME(AIslandPlayerState, bRoomReady);
     DOREPLIFETIME(AIslandPlayerState, bMapReady);
+    DOREPLIFETIME_CONDITION(AIslandPlayerState, LockView, COND_OwnerOnly);
+}
+
+void AIslandPlayerState::SetLockView(const FIslandLockView& NewView)
+{
+    const FIslandLockView Previous = LockView;
+    LockView = NewView;
+    if (const APlayerController* Player = GetPlayerController(); Player && Player->IsLocalController())
+    {
+        OnRep_LockView(Previous);
+    }
+    ForceNetUpdate();
+}
+
+void AIslandPlayerState::OnRep_LockView(const FIslandLockView& Previous)
+{
+    if (IsValid(Previous.Chest) && Previous.Chest != LockView.Chest)
+    {
+        Previous.Chest->AnimateLock(0.0, false);
+    }
+    if (IsValid(LockView.Chest))
+    {
+        LockView.Chest->AnimateLock(LockView.FinishAt, LockView.bAssisted);
+    }
 }
 
 bool AIslandGameState::CanLaunch() const

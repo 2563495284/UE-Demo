@@ -15,13 +15,18 @@ class ACTDEMO_API AVoxelGameMode : public AGameModeBase
 
 public:
     AVoxelGameMode();
+    static constexpr double AimReach = 235.0;
 
     void ReceiveReady(AVoxelPlayerController& Player, uint32 Checksum);
     void RequestEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim);
+    // Server-only. The impact uses the first blocking surface; burial uses a fixed foot anchor.
+    void QueueMudLanding(const FVector& Impact, const FVector& Normal, TFunction<void(bool)> Completion = {});
+    void QueueBurialLayer(AVoxelCharacter& Victim, const FVector& FootAnchor, int32 Layer, TFunction<void(bool)> Completion = {});
     virtual void RecoverPlayer(AVoxelPlayerController& Player);
     AVoxelTerrain* GetTerrain() const { return Terrain; }
     bool IsPlaying() const { return bPlaying; }
     virtual bool CanPlayerAct(const AVoxelPlayerController& Player) const;
+    virtual void OnPlayerJumped(AVoxelCharacter& Hero) {}
 
 protected:
     void BeginPlay() override;
@@ -39,19 +44,21 @@ protected:
     virtual FString AdmissionError() const { return TEXT("The voxel room is full or already started."); }
     virtual void RoundSetupFailed(const FString& Error) {}
     virtual bool StopOnGuestExit() const { return true; }
-    static constexpr double AimReach = 235.0;
     virtual bool PrepareRound(FString& Error) { return true; }
     virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim) { return false; }
     virtual void OnRoundStarted() {}
-    virtual void OnTerrainCommitted(const FVoxelEdit& Edit) {}
+    virtual void OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source) {}
     virtual void UpdateEnvironment();
+    virtual void GetProtectedMudVolumes(TArray<FBox>& OutVolumes) const {}
     virtual bool CanFillAt(const FVoxelEdit& Edit) const { return true; }
     const TArray<TObjectPtr<AVoxelPlayerController>>& GetPlayers() const { return Players; }
     void FinishRound(const FString& Message);
+    void EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFunction<void(bool)> Completion);
 
 private:
     friend class AVoxelPlaygroundProbe;
     friend class AIslandProbe;
+    friend class AExpeditionWalk;
     struct FRequest
     {
         TWeakObjectPtr<AVoxelPlayerController> Player;
@@ -60,14 +67,20 @@ private:
         FVector Aim;
         double ReceivedAt;
         TOptional<FIntVector> ProbeCenter;
+        TOptional<FVoxelEdit> EnvironmentFill;
+        TFunction<void(bool)> Completion;
     };
 
+    void EnqueueMud(FVoxelEdit Edit, TFunction<void(bool)> Completion);
+    bool CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts = nullptr) const;
     void EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, TOptional<FIntVector> ProbeCenter);
     bool ResolveEdit(const FRequest& Request, AVoxelCharacter& Hero, FVoxelEdit& Edit) const;
     void StartNextEdit();
     void StartFrontRequest();
+    void CancelPendingEdits();
     void TryStartRound();
     bool CanPlaceAgainstPlayers(const FVoxelEdit& Edit) const;
+    bool IsFillAreaFree(const FVoxelEdit& Edit) const;
     bool RoomFull() const;
 
     UPROPERTY() TObjectPtr<AVoxelTerrain> Terrain;

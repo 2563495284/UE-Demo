@@ -19,7 +19,7 @@ namespace
     const FName DisplayNameKey(TEXT("ISLAND_ROOM"));
     const FName OccupiedKey(TEXT("ISLAND_PLAYERS"));
     const FName ProtocolKey(TEXT("ISLAND_PROTOCOL"));
-    constexpr int32 RoomProtocol = 1;
+    constexpr int32 RoomProtocol = 2;
     const FName IslandMap(TEXT("/Game/TreasureIsland/L_ExpeditionIsland"));
     const FName FrontMap(TEXT("/Game/TreasureIsland/L_IslandFront"));
 

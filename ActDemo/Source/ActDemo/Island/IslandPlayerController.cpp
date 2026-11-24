@@ -1,25 +1,41 @@
 #include "Island/IslandPlayerController.h"
+#include "Island/IslandNeutralProp.h"
+#include "Island/IslandNeutralLayout.h"
 
 #include "Components/InputComponent.h"
 #include "Engine/GameViewportClient.h"
 #include "Island/IslandHUD.h"
 #include "Island/IslandWorld.h"
 #include "Voxel/VoxelCharacter.h"
+#include "Voxel/ExpeditionImpact.h"
 #include "Engine/AssetManager.h"
 #include "Engine/Engine.h"
 #include "Engine/StreamableManager.h"
 #include "EngineUtils.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundWave.h"
+#include "UObject/ConstructorHelpers.h"
 #include "GameFeaturesSubsystem.h"
 #include "Interfaces/IPluginManager.h"
 #include "PartyMinigame.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandState.h"
 
+AIslandPlayerController::AIslandPlayerController()
+{
+    PlayerCameraManagerClass = AExpeditionImpactCamera::StaticClass();
+    static ConstructorHelpers::FObjectFinder<USoundWave> Echo(TEXT("/Game/ActDemo/Audio/RockEcho"));
+    EchoSound = Echo.Object;
+}
+
 void AIslandPlayerController::SetupInputComponent()
 {
     Super::SetupInputComponent();
 #if !UE_BUILD_SHIPPING
-    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
+    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA"))
+        && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA"))
+        && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMudQA"))
+        && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA")))
     {
         return;
     }
@@ -27,6 +43,7 @@ void AIslandPlayerController::SetupInputComponent()
     if (InputComponent)
     {
         InputComponent->BindKey(EKeys::E, IE_Pressed, this, &AIslandPlayerController::Interact);
+        InputComponent->BindKey(EKeys::G, IE_Pressed, this, &AIslandPlayerController::Rally);
         InputComponent->BindKey(EKeys::Tab, IE_Pressed, this, &AIslandPlayerController::OpenMap);
         InputComponent->BindKey(EKeys::Tab, IE_Released, this, &AIslandPlayerController::CloseMap);
         InputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &AIslandPlayerController::ToggleMenu);
@@ -78,13 +95,16 @@ void AIslandPlayerController::ClearHeldIslandActions()
 {
     CloseMap();
     bHelpOpen=false;
+    ReleaseHeldExpeditionInputs();
     StopRecover();
     if (GetHero()) StopClimb();
 }
 
 void AIslandPlayerController::Interact()
 {
-    if (CanUseIslandWorld() && IsVoxelInputEnabled() && WaterState < 2) ServerInteract();
+    if (!CanUseIslandWorld() || !IsVoxelInputEnabled() || WaterState >= 2) return;
+    if (UsesExpeditionAbilities()) DispatchExpeditionAction(EExpeditionAction::Interact);
+    else ServerInteract();
 }
 
 void AIslandPlayerController::RestartIsland()
@@ -93,12 +113,44 @@ void AIslandPlayerController::RestartIsland()
     if (GS && !GS->bRoomLobby && IsVoxelInputEnabled()) ServerRestartIsland();
 }
 
+void AIslandPlayerController::Rally()
+{
+    if (!CanUseIslandWorld() || !IsVoxelInputEnabled() || WaterState >= 2) return;
+    if (UsesExpeditionAbilities()) DispatchExpeditionAction(EExpeditionAction::Rally);
+    else ServerRally();
+}
+
+void AIslandPlayerController::ServerRally_Implementation()
+{
+    if (UsesExpeditionAbilities()) return;
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>()) Mode->RallyCrew(*this);
+}
+
+void AIslandPlayerController::ClientCrewRally_Implementation(FVector_NetQuantize Position, bool bAtChest, double ExpiresAt)
+{
+    RallyPosition = Position;
+    bRallyAtChest = bAtChest;
+    RallyExpiresAt = ExpiresAt;
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
+        UE_LOG(LogTemp, Display, TEXT("ISLAND_CREW_RALLY received team=%d chest=%d"), GetTeam(), bAtChest);
+#endif
+}
+
+bool AIslandPlayerController::GetCrewRally(FVector& Position, bool& bAtChest) const
+{
+    const auto* GS = GetWorld()->GetGameState<AIslandGameState>();
+    if (!GS || GS->Phase != EIslandPhase::Hunting || GS->GetServerWorldTimeSeconds() >= RallyExpiresAt) return false;
+    Position = RallyPosition;
+    bAtChest = bRallyAtChest;
+    return true;
+}
+
 AIslandChest* AIslandPlayerController::GetReachableChest() const
 {
     const AVoxelCharacter* Hero=GetHero();
     if (!Hero) return nullptr;
     const FVector Origin=Hero->GetAimOrigin();
-    const FCollisionQueryParams Params(SCENE_QUERY_STAT(IslandReachableChest), false, Hero);
     double Nearest=FMath::Square(IslandRules::OpenReach);
     AIslandChest* Target=nullptr;
     for (TActorIterator<AIslandChest> It(GetWorld()); It; ++It)
@@ -106,8 +158,7 @@ AIslandChest* AIslandPlayerController::GetReachableChest() const
         AIslandChest* Chest=*It;
         const FVector Center=Chest->GetActorLocation();
         const double Distance=FVector::DistSquared(Origin,Center);
-        FHitResult Hit;
-        if (Distance<=Nearest && GetWorld()->LineTraceSingleByChannel(Hit,Origin,Center,ECC_Visibility,Params) && Hit.GetActor()==Chest)
+        if (Distance<=Nearest && Chest->IsReachableFrom(*Hero))
         {
             Target=Chest;
             Nearest=Distance;
@@ -118,10 +169,46 @@ AIslandChest* AIslandPlayerController::GetReachableChest() const
 
 void AIslandPlayerController::ServerInteract_Implementation()
 {
+    if (UsesExpeditionAbilities()) return;
     if (AIslandGameMode* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
     {
         Mode->TryOpen(*this);
     }
+}
+
+AIslandNeutralProp* AIslandPlayerController::GetReachableSail() const
+{
+    for (TActorIterator<AIslandNeutralProp> It(GetWorld()); It; ++It)
+        if (It->GetKind() == EIslandNeutralKind::Sail && It->CanUseRope(*this)) return *It;
+    return nullptr;
+}
+
+FString AIslandPlayerController::GetNeutralHint() const
+{
+    if (const auto* Sail = GetReachableSail())
+        return Sail->GetPhase() == 0 ? TEXT("E  放下帆布") : TEXT("E  收起帆布");
+    const auto* Hero = GetHero();
+    if (!Hero) return {};
+    const FVector Eye = Hero->GetAimOrigin();
+    const FVector Forward = GetControlRotation().Vector();
+    for (TActorIterator<AIslandNeutralProp> It(GetWorld()); It; ++It)
+    {
+        const FVector Offset = It->GetInteractionPoint() - Eye;
+        if (Offset.SizeSquared() > FMath::Square(480.) || FVector::DotProduct(Forward, Offset.GetSafeNormal()) < .72) continue;
+        switch (It->GetKind())
+        {
+        case EIslandNeutralKind::Tree:
+            if (It->GetPhase() < 2) return TEXT("左键敲树根");
+            break;
+        case EIslandNeutralKind::Ship: return TEXT("挖通船舱  ·  右键丢土搭上甲板");
+        case EIslandNeutralKind::Hopper:
+            if (It->GetPhase() == 0) return TEXT("左键敲木销放砂");
+            break;
+        case EIslandNeutralKind::Tide: return TEXT("右键丢土堵一孔  ·  白泡冒起时跳入另一孔");
+        default: break;
+        }
+    }
+    return {};
 }
 
 void AIslandPlayerController::ServerRestartIsland_Implementation()
@@ -143,8 +230,33 @@ void AIslandPlayerController::ClientUpdateClues_Implementation(const FIslandClue
 
 void AIslandPlayerController::ClientWaterState_Implementation(uint8 State)
 {
+    if (State >= 2)
+    {
+        ReleaseHeldExpeditionInputs();
+        StopRecover();
+    }
     WaterState = State;
     WaterChangedAt = FPlatformTime::Seconds();
+}
+
+void AIslandPlayerController::ClientExcavationEcho_Implementation(bool bStrong)
+{
+    LastEchoAt = FPlatformTime::Seconds();
+    bStrongEcho = bStrong;
+    UGameplayStatics::PlaySound2D(this, EchoSound, bStrong ? .74f : .41f, bStrong ? 1.17f : .77f);
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
+        UE_LOG(LogTemp, Display, TEXT("ISLAND_EXCAVATION_ECHO strong=%d"), bStrong);
+#endif
+}
+
+bool AIslandPlayerController::HasChestClue(const AIslandChest& Chest) const
+{
+    if (Chest.IsPrize()) return false;
+    for (int32 Index = 0; Index < LocalClues.Points.Num(); ++Index)
+        if ((LocalClues.Mask & (1u << Index)) && LocalClues.Points[Index].Equals(FVector2D(Chest.GetActorLocation()), 1.))
+            return true;
+    return false;
 }
 
 FString AIslandPlayerController::WaterStatus() const

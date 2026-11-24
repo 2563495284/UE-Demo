@@ -2,13 +2,16 @@
 
 #include "Island/IslandRules.h"
 #include "Island/IslandRoomSettings.h"
+#include "Island/ExpeditionMudRules.h"
 #include "Voxel/VoxelGameMode.h"
 #include "IslandGameMode.generated.h"
 
 class AIslandChest;
+class AIslandNeutralProp;
 class APartyPawn;
 class APartySession;
 class AIslandPlayerController;
+class AExpeditionMudBall;
 
 UCLASS(Config = Game)
 class ACTDEMO_API AIslandGameMode : public AVoxelGameMode
@@ -18,6 +21,7 @@ class ACTDEMO_API AIslandGameMode : public AVoxelGameMode
 public:
     AIslandGameMode();
     void TryOpen(AIslandPlayerController& Player);
+    void RallyCrew(AIslandPlayerController& Sender);
     void RestartIsland();
     void ChooseTeam(AIslandPlayerController& Player, int32 Team);
     void SetRoomReady(AIslandPlayerController& Player, bool bReady);
@@ -28,6 +32,10 @@ public:
     void PartyUnloaded(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess);
     void RecoverPlayer(AVoxelPlayerController& Player) override;
     bool CanPlayerAct(const AVoxelPlayerController& Player) const override;
+    void QueueHopperSand(AIslandNeutralProp& Hopper, const TArray<FVector>& Centers);
+    void OnPlayerJumped(AVoxelCharacter& Hero) override;
+    void ThrowExpeditionMud(AIslandPlayerController& Player, const FVector& Aim);
+    int32 GetMudMarks(const AVoxelCharacter& Target) const;
 
 protected:
     void InitGame(const FString& MapName, const FString& Options, FString& Error) override;
@@ -47,12 +55,19 @@ protected:
     bool PrepareRound(FString& Error) override;
     bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim) override;
     void OnRoundStarted() override;
-    void OnTerrainCommitted(const FVoxelEdit& Edit) override;
+    void OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source) override;
     void UpdateEnvironment() override;
     bool CanFillAt(const FVoxelEdit& Edit) const override;
+    void GetProtectedMudVolumes(TArray<FBox>& OutVolumes) const override;
 
 private:
     friend class AIslandProbe;
+    friend class AExpeditionMudBall;
+    AVoxelCharacter* ResolveMudImpact(AIslandPlayerController& Thrower, const FHitResult& Hit, uint8& Marks);
+    void AddMudShellLayer(AIslandPlayerController& Target);
+    void CheckMudLandings();
+    TMap<AIslandPlayerController*, FExpeditionBurialSite> BurialSites;
+    UPROPERTY() TArray<TObjectPtr<AIslandNeutralProp>> NeutralProps;
     struct FSeaState
     {
         double ImmersedAt = 0.0;
@@ -92,6 +107,26 @@ private:
     int32 FindReachableChest(const AIslandPlayerController& Player) const;
     void GiveClue(int32 Team, int32 Index);
     void PublishWinner(int32 Team);
+
+    struct FChestLock
+    {
+        int32 Team = INDEX_NONE;
+        TWeakObjectPtr<AIslandPlayerController> Leader;
+        TWeakObjectPtr<AIslandPlayerController> Helper;
+        double FinishAt = 0.0;
+        bool bAssisted = false;
+        bool bSeized = false;
+
+        void SetHelper(AIslandPlayerController* NewHelper, double Now);
+    };
+    bool CanClaimChest(int32 Team, int32 Index) const;
+    void WorkChest(AIslandPlayerController& Player, int32 Index);
+    void UpdateChestLocks(double Now);
+    void PublishLockViews();
+
+    TMap<int32, FChestLock> ChestLocks;
+    double NextLockCheck = 0.0;
+    TMap<const AIslandPlayerController*, double> NextRallyAt;
 
     FIslandTreasureLayout HiddenLayout;
     TArray<FIslandClues> TeamClues;

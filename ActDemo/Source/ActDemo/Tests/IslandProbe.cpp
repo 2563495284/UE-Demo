@@ -113,9 +113,9 @@ namespace
                         continue;
                     }
                     // Use the actual punch brush center and radius to pick a wall that reaches the chest.
-                    const FVector Center = Side.ImpactPoint + Aim * 44.0 - FVector(0,0,37.0);
+                    const FVector Center = Side.ImpactPoint;
                     const int32 Reached = Algo::CountIf(Residual, [&Center](const FVector& P)
-                        { return FVector::DistSquared(P, Center) < FMath::Square(118.0); });
+                        { return FVector::DistSquared(P, Center) < FMath::Square(46.0); });
                     if (Reached > MostResidualReached)
                     {
                         MostResidualReached = Reached;
@@ -137,7 +137,7 @@ namespace
         }
         else
         {
-            Player.SubmitEdit(EVoxelAction::DigDown, -FVector::UpVector);
+            Player.SubmitEdit(EVoxelAction::Punch, -FVector::UpVector);
         }
         UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_SIDE_APPROACH action=%s stand=%s aim=%s"),
             SideStand ? TEXT("punch") : TEXT("dig"), *Stand->ToCompactString(), *SideAim.ToCompactString());
@@ -207,6 +207,12 @@ void AIslandProbePeer::ClientOpenChest_Implementation()
     if (AIslandPlayerController* Player = Cast<AIslandPlayerController>(GetOwner()))
     {
         UE_LOG(LogTemp, Display, TEXT("ISLAND_QA_INTERACT team=%d"), Player->GetTeam());
+        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA")) || FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA")))
+        {
+            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E, IE_Pressed, 1.f));
+            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E, IE_Released, 0.f));
+            return;
+        }
         Player->Interact();
     }
 }
@@ -265,6 +271,10 @@ void AIslandProbePeer::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
     const auto* Controller = Cast<AIslandPlayerController>(GetOwner());
+    if (Controller && Controller->IsLocalController() && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA")))
+        TickFieldInput();
+    else if (Controller && Controller->IsLocalController() && (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA")) || FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMudQA"))))
+        TickFieldWalk(DeltaSeconds);
     const double Now = FPlatformTime::Seconds();
     if (Controller && Now < ObserveJumpUntil)
     {
@@ -318,6 +328,9 @@ AIslandProbe::AIslandProbe()
     PrimaryActorTick.bCanEverTick = true;
     FParse::Value(FCommandLine::Get(), TEXT("ExpeditionPlayers="), ExpeditionPlayers);
     bOneCrew = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionTogether"));
+    bMudScenario = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMudQA"));
+    bNeutralScenario = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA"));
+    bFieldScenario = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA"));
     bProfileFrames = FParse::Param(FCommandLine::Get(), TEXT("VoxelProfile"));
 }
 
@@ -519,7 +532,7 @@ void AIslandProbe::TickExpedition(double Now)
             Peer->Seat = Seat;
             Peer->Coordinator = this;
             Peers.Add(Peer);
-            Peer->ClientJoinCrew(bOneCrew ? 0 : Seat, true);
+            Peer->ClientJoinCrew(ExpeditionTeamForSeat(Seat), true);
         }
         RoomCheck = ERoomCheck::Ready;
         StepAt = Now;
@@ -558,7 +571,7 @@ void AIslandProbe::TickExpedition(double Now)
         TArray<FVector> Starts;
         for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
         {
-            Require(Players[Seat]->GetPlayerState<AIslandPlayerState>()->Team == (bOneCrew ? 0 : Seat), TEXT("requested team assignment applied"));
+            Require(Players[Seat]->GetPlayerState<AIslandPlayerState>()->Team == ExpeditionTeamForSeat(Seat), TEXT("requested team assignment applied"));
             const FVector Position = Players[Seat]->StartTransform.GetLocation();
             for (const FVector& Previous : Starts)
             {
@@ -570,7 +583,7 @@ void AIslandProbe::TickExpedition(double Now)
         Require(Round->Phase == EIslandPhase::Starting, TEXT("host starts synchronized countdown"));
         if (Players.Num() > 1)
         {
-            Peers.Last()->ClientJoinCrew(bOneCrew ? 0 : Players.Num() - 1, false);
+            Peers.Last()->ClientJoinCrew(ExpeditionTeamForSeat(Players.Num() - 1), false);
             RoomCheck = ERoomCheck::Withdraw;
         }
         else
@@ -584,7 +597,7 @@ void AIslandProbe::TickExpedition(double Now)
         if (Round->Phase == EIslandPhase::Waiting && !bIssued)
         {
             Require(!Round->CanLaunch(), TEXT("guest withdrawing cancels departure and unlocks the room"));
-            Peers.Last()->ClientJoinCrew(bOneCrew ? 0 : Players.Num() - 1, true);
+            Peers.Last()->ClientJoinCrew(ExpeditionTeamForSeat(Players.Num() - 1), true);
             bIssued = true;
         }
         if (Round->CanLaunch() && bIssued)
@@ -596,8 +609,24 @@ void AIslandProbe::TickExpedition(double Now)
     }
     if (RoomCheck == ERoomCheck::Depart && Mode->IsPlaying())
     {
-        Require(Round->ActiveTeams == (bOneCrew ? 1 : ExpeditionPlayers) && Mode->HiddenLayout.Num() == 5
+        Require(Round->ActiveTeams == ExpeditionTeamForSeat(Players.Num() - 1) + 1 && Mode->HiddenLayout.Num() == 5
             && Mode->HiddenLayout.Decoys.IsEmpty(), TEXT("occupied crews depart with exactly four clues and one prize"));
+        if (bMudScenario)
+        {
+            RoomCheck = ERoomCheck::Mud;
+            SetMudStep(0, Now);
+            return;
+        }
+        if (bNeutralScenario)
+        {
+            StartNeutralCheck(Now);
+            return;
+        }
+        if (bFieldScenario)
+        {
+            StartFieldCheck(Now);
+            return;
+        }
         if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDrop")))
         {
             DepartureTeams = Round->LaunchedTeams;
@@ -620,6 +649,17 @@ void AIslandProbe::TickExpedition(double Now)
         }
         RoomCheck = ERoomCheck::Dig;
         PrepareDig(FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")) ? 3 : 0);
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Mud) { TickMudCheck(Now); return; }
+    if (RoomCheck == ERoomCheck::Neutral)
+    {
+        TickNeutralCheck(Now);
+        return;
+    }
+    if (RoomCheck == ERoomCheck::Field)
+    {
+        TickFieldCheck(Now);
         return;
     }
     if (RoomCheck == ERoomCheck::Stress)
@@ -753,8 +793,13 @@ void AIslandProbe::TickExpedition(double Now)
                     Highest ? *Highest->ToCompactString() : TEXT("none"), *GetNameSafe(Aim.GetActor()), *GetNameSafe(Aim.GetComponent()),
                     *Aim.ImpactPoint.ToCompactString(), Solid, Inside, *Residue);
             }
-            Host->SubmitEdit(EVoxelAction::DigDown, -FVector::UpVector);
+            Host->SubmitEdit(EVoxelAction::Punch, -FVector::UpVector);
             LastAction = Now;
+            return;
+        }
+        if (bFieldScenario)
+        {
+            BeginLockCheck(Now);
             return;
         }
         // Cooperative players alternate discoveries. In a race, the final crew wins.

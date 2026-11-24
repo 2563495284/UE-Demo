@@ -2,6 +2,7 @@
 
 #include "GameFramework/PlayerController.h"
 #include "Voxel/VoxelDensity.h"
+#include "Abilities/ExpeditionAbility.h"
 #include "VoxelPlayerController.generated.h"
 
 class AVoxelCharacter;
@@ -17,6 +18,14 @@ class ACTDEMO_API AVoxelPlayerController : public APlayerController
 public:
     AVoxelPlayerController();
     AVoxelCharacter* GetHero() const;
+    FVector GetExcavationAim(const AVoxelCharacter& Hero) const;
+    bool UsesExpeditionAbilities() const;
+    FVector GetExpeditionThrowAim(const AVoxelCharacter& Hero) const;
+    FVector GetExpeditionActionAim(EExpeditionAction Action) const;
+    void SubmitExpeditionThrow(const FVector& Aim);
+    void OnMudStunChanged(bool bStunned);
+    void SetExpeditionDigHeld(bool bHeld);
+    void SetExpeditionThrowHeld(bool bHeld);
     bool IsPlaying() const { return bPlaying; }
     bool IsVoxelInputEnabled() const { return bVoxelInputEnabled; }
     void SetVoxelInputEnabled(bool bEnabled);
@@ -48,6 +57,8 @@ public:
 
 protected:
     void BeginPlay() override;
+    void DispatchExpeditionAction(EExpeditionAction Action, bool bHeld = false, FVector Aim = FVector::ZeroVector);
+    void ReleaseHeldExpeditionInputs();
     void SetupInputComponent() override;
     void PlayerTick(float DeltaTime) override;
 
@@ -63,6 +74,20 @@ private:
     void Jump();
     void Punch();
     void DigDown();
+    void StopDig();
+    void StopThrow();
+    void SendHeldExpeditionAim();
+    void TriggerExpeditionEvent(EExpeditionAction Action, bool bHeld);
+    UFUNCTION(Server, Reliable) void ServerExpeditionAction(EExpeditionAction Action, bool bHeld, FVector_NetQuantizeNormal Aim);
+    UFUNCTION(Server, Reliable) void ServerReleaseExpeditionAction(EExpeditionAction Action);
+    UFUNCTION(Server, Unreliable) void ServerUpdateExpeditionAim(EExpeditionAction Action, FVector_NetQuantizeNormal Aim);
+    bool bDigHeld = false;
+    bool bThrowHeld = false;
+    bool bServerDigHeld = false;
+    bool bServerThrowHeld = false;
+    FVector DigAim = FVector::ForwardVector;
+    FVector ThrowAim = FVector::ForwardVector;
+    double NextAimUpdate = 0.;
     void Fill();
     void ApplyNextEdit();
     void UpdateVoxelMapping();

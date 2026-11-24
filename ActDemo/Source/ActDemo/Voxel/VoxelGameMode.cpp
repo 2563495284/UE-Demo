@@ -3,6 +3,7 @@
 #include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerStart.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Tests/VoxelPlaygroundProbe.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelHUD.h"
@@ -75,7 +76,7 @@ void AVoxelGameMode::Logout(AController* Exiting)
     if (Players.Remove(Cast<AVoxelPlayerController>(Exiting)) > 0 && bLocked && StopOnGuestExit())
     {
         bPlaying = false;
-        Requests.Reset();
+        CancelPendingEdits();
         for (AVoxelPlayerController* Player : Players)
         {
             Player->ClientSetRoundActive(false, TEXT("Player left. Reopen the map to play again."));
@@ -192,7 +193,9 @@ void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Ac
         return;
     }
     const double Now = FPlatformTime::Seconds();
-    if (Now - Player.LastRequestAt < EditCooldown || WorkingPlayer.Get() == &Player
+    const bool bAbilityPaced = Terrain && Terrain->Layout == EVoxelLayout::Expedition
+        && Action == EVoxelAction::Punch && !ProbeCenter.IsSet();
+    if ((!bAbilityPaced && Now - Player.LastRequestAt < EditCooldown) || WorkingPlayer.Get() == &Player
         || Requests.ContainsByPredicate([&](const FRequest& Request) { return Request.Player.Get() == &Player; }))
     {
         return;
@@ -201,8 +204,148 @@ void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Ac
     // A sliding capsule can leave the lip of a shaft while another edit is cooking.
     // Use the pose the server observed at input time and recheck reach on resolution.
     const FVector Origin = Action == EVoxelAction::DigDown ? Hero->GetActorLocation() : Hero->GetAimOrigin();
-    Requests.Add({&Player, Action, Origin, Aim.GetSafeNormal(), Now, ProbeCenter});
+    Requests.Add({&Player, Action, Origin, Aim.GetSafeNormal(), Now, ProbeCenter, {}, {}});
     StartNextEdit();
+}
+
+void AVoxelGameMode::EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFunction<void(bool)> Completion)
+{
+    if (!bPlaying || !Terrain || Centers.IsEmpty() || Centers.Num() > FVoxelEdit::MaxFillCenters)
+    {
+        Completion(false);
+        return;
+    }
+    FVoxelEdit Fill;
+    Fill.Action = EVoxelAction::Fill;
+    Fill.BrushId = VoxelPlayground::BrushFor(Fill.Action);
+    Fill.Center = VoxelPlayground::QuantizeCenter(Centers[0]);
+    for (int32 Index = 1; Index < Centers.Num(); ++Index)
+    {
+        const auto P = VoxelPlayground::QuantizeCenter(Centers[Index]);
+        if (P != Fill.Center) Fill.ExtraFillCenters.AddUnique(P);
+    }
+    if (!Terrain->IsValidEdit(Fill))
+    {
+        Completion(false);
+        return;
+    }
+    FRequest Request{};
+    Request.EnvironmentFill = MoveTemp(Fill);
+    Request.ReceivedAt = FPlatformTime::Seconds();
+    Request.Completion = MoveTemp(Completion);
+    Requests.Add(MoveTemp(Request));
+    StartNextEdit();
+}
+
+void AVoxelGameMode::QueueMudLanding(const FVector& Impact, const FVector& Normal, TFunction<void(bool)> Completion)
+{
+    FVoxelEdit Edit;
+    Edit.Action = EVoxelAction::Fill;
+    Edit.BrushId = VoxelPlayground::MudPad;
+    if (Impact.ContainsNaN() || Normal.ContainsNaN() || Normal.IsNearlyZero())
+    {
+        if (Completion) Completion(false);
+        return;
+    }
+    Edit.Center = VoxelPlayground::QuantizeCenter(Impact);
+    Edit.SurfaceNormal = VoxelPlayground::QuantizeNormal(Normal);
+    EnqueueMud(MoveTemp(Edit), MoveTemp(Completion));
+}
+
+void AVoxelGameMode::QueueBurialLayer(AVoxelCharacter& Victim, const FVector& FootAnchor, int32 Layer, TFunction<void(bool)> Completion)
+{
+    if (!HasAuthority() || Victim.GetWorld() != GetWorld() || !Players.Contains(Cast<AVoxelPlayerController>(Victim.GetController()))
+        || FootAnchor.ContainsNaN() || Layer < 1 || Layer > 3)
+    {
+        if (Completion) Completion(false);
+        return;
+    }
+    FVoxelEdit Edit;
+    Edit.Action = EVoxelAction::Fill;
+    Edit.BrushId = VoxelPlayground::FirstBurialLayer + Layer - 1;
+    Edit.Center = VoxelPlayground::QuantizeCenter(FootAnchor);
+    EnqueueMud(MoveTemp(Edit), MoveTemp(Completion));
+}
+
+void AVoxelGameMode::EnqueueMud(FVoxelEdit Edit, TFunction<void(bool)> Completion)
+{
+    if (!HasAuthority() || !bPlaying || !Terrain || Terrain->Layout != EVoxelLayout::Expedition || !Terrain->IsValidEdit(Edit))
+    {
+        if (Completion) Completion(false);
+        return;
+    }
+    FRequest Request{};
+    Request.EnvironmentFill = MoveTemp(Edit);
+    Request.ReceivedAt = FPlatformTime::Seconds();
+    Request.Completion = MoveTemp(Completion);
+    Requests.Add(MoveTemp(Request));
+    StartNextEdit();
+}
+
+bool AVoxelGameMode::CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts) const
+{
+    const FVector Center(Edit.Center);
+    const bool bPad = Edit.BrushId == VoxelPlayground::MudPad;
+    const FBox Bounds = VoxelPlayground::PartyBrushBounds(Edit).ExpandBy(4.);
+    if (bPad)
+    {
+        // A queued impact can lose its support if another player digs before this edit commits.
+        const FVector Normal = FVector(Edit.SurfaceNormal) * .001;
+        FHitResult Support;
+        if (!Terrain->TraceRock(Center + Normal * 14., Center - Normal * 28., nullptr, Support)) return false;
+    }
+    for (const AVoxelPlayerController* Player : Players)
+    {
+        AVoxelCharacter* Hero = Player->GetHero();
+        if (!Hero) continue;
+        const UCapsuleComponent* Capsule = Hero->GetCapsuleComponent();
+        const double Radius = Capsule->GetScaledCapsuleRadius();
+        const double HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+        const FVector Position = Capsule->GetComponentLocation();
+        if (!Bounds.Intersect(FBox::BuildAABB(Position, FVector(Radius, Radius, HalfHeight)))) continue;
+        const double Segment = HalfHeight - Radius;
+        const int32 Steps = FMath::Max(1, FMath::CeilToInt(2. * Segment / 12.));
+        bool bOverlap = false;
+        for (int32 Step = 0; Step <= Steps; ++Step)
+        {
+            const FVector Point = Position + FVector::UpVector * FMath::Lerp(-Segment, Segment, double(Step) / Steps);
+            if (VoxelPlayground::PartyBrushDistance(Edit, FIntVector(Point)) < Radius + 3.)
+            {
+                bOverlap = true;
+                break;
+            }
+        }
+        if (!bOverlap) continue;
+        // Only a pad directly beneath a standing capsule can raise it. Wall impacts cannot shove a bystander.
+        const double FootZ = Position.Z - HalfHeight;
+        if (!bPad || Edit.SurfaceNormal.Z < 650 || FVector::DistSquared2D(Position, Center) > FMath::Square(57.)
+            || FootZ < Center.Z - 10. || FootZ > Center.Z + 40.) return false;
+        const FVector Destination(Position.X, Position.Y, Center.Z + 42. + HalfHeight);
+        FCollisionQueryParams Query(SCENE_QUERY_STAT(MudLift), false, Hero);
+        FHitResult Hit;
+        const FCollisionShape Shape = FCollisionShape::MakeCapsule(Radius, HalfHeight);
+        if (GetWorld()->SweepSingleByChannel(Hit, Position, Destination, FQuat::Identity, ECC_Pawn, Shape, Query)
+            && (Hit.bStartPenetrating || Hit.ImpactNormal.Z < .7)) return false;
+        if (GetWorld()->OverlapBlockingTestByChannel(Destination, FQuat::Identity, ECC_Pawn, Shape, Query)) return false;
+        if (Lifts) Lifts->Add(Hero, Destination);
+    }
+    return true;
+}
+
+bool AVoxelGameMode::IsFillAreaFree(const FVoxelEdit& Edit) const
+{
+    if (Edit.BrushId >= VoxelPlayground::MudPad) return CheckMudPlacement(Edit);
+    FVoxelEdit Lobe;
+    Lobe.Action = EVoxelAction::Fill;
+    Lobe.BrushId = Edit.BrushId;
+    Lobe.Center = Edit.Center;
+    if (!CanFillAt(Lobe) || !CanPlaceAgainstPlayers(Lobe)) return false;
+    for (const FIntVector& Center : Edit.ExtraFillCenters)
+    {
+        Lobe.Center = Center;
+        if (!CanFillAt(Lobe) || !CanPlaceAgainstPlayers(Lobe)) return false;
+    }
+    return true;
 }
 
 void AVoxelGameMode::StartNextEdit()
@@ -217,45 +360,76 @@ void AVoxelGameMode::StartNextEdit()
 
 void AVoxelGameMode::StartFrontRequest()
 {
-    const FRequest Request = Requests[0];
+    const FRequest Request = MoveTemp(Requests[0]);
     Requests.RemoveAt(0, 1, EAllowShrinking::No);
     AVoxelPlayerController* Player = Request.Player.Get();
     AVoxelCharacter* Hero = Player && Players.Contains(Player) ? Player->GetHero() : nullptr;
-    if (!Hero || !CanPlayerAct(*Player))
+    if (!Request.EnvironmentFill && (!Hero || !CanPlayerAct(*Player)))
     {
         return;
     }
 
-    if (!Request.ProbeCenter.IsSet() && Request.Action == EVoxelAction::Punch && TryStrikeProp(*Hero, Request.Aim))
+    if (Hero && !Request.ProbeCenter.IsSet() && Request.Action == EVoxelAction::Punch && TryStrikeProp(*Hero, Request.Aim))
     {
         return;
     }
 
     FVoxelEdit Edit;
-    if (!ResolveEdit(Request, *Hero, Edit))
+    if (Request.EnvironmentFill)
+    {
+        Edit = Request.EnvironmentFill.GetValue();
+        Edit.Sequence = Terrain->GetAppliedSequence() + 1;
+        if (Edit.BrushId >= VoxelPlayground::MudPad)
+        {
+            const FBox Bounds = VoxelPlayground::PartyBrushBounds(Edit).ExpandBy(VoxelPlayground::Spacing);
+            TArray<FBox> Protected;
+            GetProtectedMudVolumes(Protected);
+            for (const FBox& Box : Protected)
+            {
+                if (!Bounds.Intersect(Box)) continue;
+                FVoxelProtectedBox& Clip = Edit.ProtectedBoxes.AddDefaulted_GetRef();
+                Clip.Low = FIntVector(Box.Min) - FIntVector(2);
+                Clip.High = FIntVector(Box.Max) + FIntVector(2);
+            }
+        }
+    }
+    else if (!ResolveEdit(Request, *Hero, Edit))
     {
         Player->ClientEditRejected(TEXT("Aim at rock within reach"));
         return;
     }
     const bool bFill = Edit.Action == EVoxelAction::Fill;
-    if (bFill && !CanFillAt(Edit))
+    if (Player && bFill && !CanFillAt(Edit))
     {
         Player->ClientEditRejected(TEXT("Cannot fill over a chest"));
         return;
     }
-    if (bFill && !CanPlaceAgainstPlayers(Edit))
+    if (bFill && !IsFillAreaFree(Edit))
     {
-        Player->ClientEditRejected(TEXT("Someone is in the way"));
+        if (Player) Player->ClientEditRejected(TEXT("Someone is in the way"));
+        if (Request.Completion) Request.Completion(false);
         return;
     }
 
     const TWeakObjectPtr<AVoxelGameMode> WeakMode(this);
     WorkingPlayer = Player;
-    const bool bStarted = Terrain->BuildEdit(Edit, [WeakMode, Edit, PlayerRef = Request.Player]()
+    const bool bStarted = Terrain->BuildEdit(Edit, [WeakMode, Edit, PlayerRef = Request.Player, bEnvironment = Request.EnvironmentFill.IsSet()]()
     {
         const AVoxelGameMode* Mode = WeakMode.Get();
-        return Mode && PlayerRef.IsValid() && Mode->CanPlayerAct(*PlayerRef.Get())
-            && (Edit.Action != EVoxelAction::Fill || (Mode->CanFillAt(Edit) && Mode->CanPlaceAgainstPlayers(Edit)));
+        if (!Mode || !Mode->bPlaying || (!bEnvironment && (!PlayerRef.IsValid() || !Mode->CanPlayerAct(*PlayerRef.Get())))) return false;
+        if (Edit.Action != EVoxelAction::Fill) return true;
+        if (Edit.BrushId < VoxelPlayground::MudPad) return Mode->IsFillAreaFree(Edit);
+        // Validate everyone first, then lift on the game thread immediately before swapping all collision meshes.
+        TMap<AVoxelCharacter*, FVector> Lifts;
+        if (!Mode->CheckMudPlacement(Edit, &Lifts)) return false;
+        for (const auto& Lift : Lifts)
+        {
+            Lift.Key->SetActorLocation(Lift.Value, false, nullptr, ETeleportType::TeleportPhysics);
+            Lift.Key->GetCharacterMovement()->bForceNextFloorCheck = true;
+            Lift.Key->GetCharacterMovement()->ForceClientAdjustment();
+            Lift.Key->ForceNetUpdate();
+        }
+        return true;
     }, [WeakMode, Edit, Request](bool bCommitted)
     {
         AVoxelGameMode* Mode = WeakMode.Get();
@@ -266,6 +440,7 @@ void AVoxelGameMode::StartFrontRequest()
         Mode->WorkingPlayer.Reset();
         if (!bCommitted)
         {
+            if (Request.Completion) Request.Completion(false);
             if (AVoxelPlayerController* Sender = Request.Player.Get(); Sender && Mode->bPlaying)
             {
                 Sender->ClientEditRejected(TEXT("Someone moved into the fill area"));
@@ -279,13 +454,15 @@ void AVoxelGameMode::StartFrontRequest()
         {
             Peer->ClientReceiveEdit(Edit);
         }
-        Mode->OnTerrainCommitted(Edit);
+        Mode->OnTerrainCommitted(Edit, Request.Player.Get());
+        if (Request.Completion) Request.Completion(true);
         Mode->StartNextEdit();
     });
     if (!bStarted)
     {
         WorkingPlayer.Reset();
-        Player->ClientEditRejected(TEXT("No rock changed"));
+        if (Player) Player->ClientEditRejected(TEXT("No rock changed"));
+        if (Request.Completion) Request.Completion(false);
     }
 }
 
@@ -319,6 +496,13 @@ bool AVoxelGameMode::ResolveEdit(const FRequest& Request, AVoxelCharacter& Hero,
         return false;
     }
 
+    if (Terrain->Layout == EVoxelLayout::Expedition && Request.Action == EVoxelAction::Punch)
+    {
+        Edit.BrushId = VoxelPlayground::ShallowCut;
+        Edit.SurfaceNormal = VoxelPlayground::QuantizeNormal(Rock.ImpactNormal);
+        Edit.Center = VoxelPlayground::QuantizeCenter(Rock.ImpactPoint);
+        return true;
+    }
     FVector BrushCenter = Rock.ImpactPoint;
     if (bFill)
     {
@@ -380,9 +564,16 @@ bool AVoxelGameMode::CanPlayerAct(const AVoxelPlayerController& Player) const
 void AVoxelGameMode::FinishRound(const FString& Message)
 {
     bPlaying = false;
-    Requests.Reset();
+    CancelPendingEdits();
     for (AVoxelPlayerController* Player : Players)
     {
         Player->ClientSetRoundActive(false, Message);
     }
+}
+
+void AVoxelGameMode::CancelPendingEdits()
+{
+    auto Pending = MoveTemp(Requests);
+    for (const auto& Request : Pending)
+        if (Request.Completion) Request.Completion(false);
 }

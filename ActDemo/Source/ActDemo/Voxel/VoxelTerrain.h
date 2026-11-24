@@ -2,6 +2,7 @@
 
 #include "GameFramework/Actor.h"
 #include "Island/IslandRules.h"
+#include "Island/IslandNeutralLayout.h"
 #include "Voxel/VoxelDensity.h"
 #include "VoxelTerrain.generated.h"
 
@@ -35,6 +36,7 @@ public:
     bool IsVolumeClear(const FBox& Box) const { return Density && Density->IsVolumeClear(Box); }
 
     UPROPERTY(EditAnywhere, Category = "Voxel") EVoxelLayout Layout = EVoxelLayout::Playground;
+    UPROPERTY(EditAnywhere, Category = "Expedition|Neutral props") FIslandNeutralSettings NeutralPropSettings;
     bool TraceRock(const FVector& Start, const FVector& End, const AActor* Ignore, FHitResult& Hit) const;
 
     bool BuildEdit(const FVoxelEdit& Edit, TFunction<bool()> CanCommit, TFunction<void(bool)> Completion);
@@ -60,6 +62,7 @@ private:
     void Commit(FVoxelMeshBuild& Build);
     UProceduralMeshComponent* CreateChunk(int32 Index);
     void ConfigureChunk(UProceduralMeshComponent& Chunk);
+    bool CanSeeExcavation(const FVoxelEdit& Edit) const;
     void SpawnFragments(const FVoxelEdit& Edit);
 
     UPROPERTY() TArray<FVoxelBrushStamp> AuthoredStamps;

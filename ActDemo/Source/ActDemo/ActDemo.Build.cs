@@ -8,7 +8,7 @@ public class ActDemo : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "OnlineSubsystem" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "OnlineSubsystem", "GameplayAbilities", "GameplayTags", "GameplayTasks" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "GeometryCore", "ProceduralMeshComponent", "GameFeatures", "PartyFramework", "Projects", "OnlineSubsystemUtils", "Slate", "SlateCore", "UMG", "MoviePlayer", "Sockets", "Networking", "RenderCore", "RHI" });
 		PublicIncludePaths.Add(ModuleDirectory);

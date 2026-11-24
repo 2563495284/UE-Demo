@@ -69,6 +69,7 @@ namespace IslandRules
     inline constexpr int32 MinSearchRadius = 200;
     inline constexpr int32 MaxSearchRadius = 1000;
     inline constexpr double OpenReach = 200.0;
+    inline constexpr double LockSeconds = 4.0;
     inline constexpr double DrownTime = 3.0;
     inline constexpr double RespawnTime = 1.0;
     inline const FVector ChestExtent(45, 34, 32);

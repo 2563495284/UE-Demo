@@ -1,5 +1,6 @@
 #include "Voxel/VoxelTerrain.h"
 #include "Voxel/ExpeditionSurface.h"
+#include "Voxel/ExpeditionImpact.h"
 #if !UE_BUILD_SHIPPING
 #include "Tests/ExpeditionWalk.h"
 #endif
@@ -201,7 +202,11 @@ void AVoxelTerrain::ConfigureChunk(UProceduralMeshComponent& Chunk)
 
 UProceduralMeshComponent* AVoxelTerrain::CreateChunk(int32 Index)
 {
-    UProceduralMeshComponent* Mesh = NewObject<UProceduralMeshComponent>(this);
+    // A guest can stand on this chunk as soon as a sand spill or dig is committed.
+    // Give CharacterMovement the same base name even when peers build chunks in a different order.
+    const FName Name(*FString::Printf(TEXT("VoxelCollision_%d"), Index));
+    UProceduralMeshComponent* Mesh = NewObject<UProceduralMeshComponent>(this, Name);
+    Mesh->SetNetAddressable();
     ConfigureChunk(*Mesh);
     MeshChunks[Index] = Mesh;
     Mesh->RegisterComponent();
@@ -217,6 +222,9 @@ AVoxelTerrain* AVoxelTerrain::Find(UWorld* World)
 uint32 AVoxelTerrain::GetInitialChecksum() const
 {
     uint32 Hash = GetChecksum();
+    // Include the terrain edit protocol revision in the expedition room readiness check.
+    constexpr uint32 ExpeditionEditProtocol = 4;
+    if (Layout == EVoxelLayout::Expedition) Hash = HashCombineFast(Hash, ExpeditionEditProtocol);
     if (Layout != EVoxelLayout::Playground)
     {
         for (const FIslandSearchCircle& Circle : SearchCircles)
@@ -566,7 +574,12 @@ void AVoxelTerrain::StartBuild(FVoxelDensityPatch Patch, TOptional<FVoxelEdit> E
                 if (Edit.IsSet())
                 {
                     Terrain->AppliedSequence = Edit->Sequence;
-                    Terrain->SpawnFragments(Edit.GetValue());
+                    if (Terrain->CanSeeExcavation(Edit.GetValue()))
+                    {
+                        Terrain->SpawnFragments(Edit.GetValue());
+                        if (Terrain->Layout == EVoxelLayout::Expedition)
+                            AExpeditionImpactCamera::Play(*Terrain, Edit.GetValue());
+                    }
 #if !UE_BUILD_SHIPPING
                     static const bool bProfile = FParse::Param(FCommandLine::Get(), TEXT("VoxelProfile"));
                     if (bProfile) UE_LOG(LogTemp, Display, TEXT("VOXEL_BUILD seq=%u chunks=%d tiles=%d worker_wait=%.2f mesh=%.2f game_wait=%.2f commit=%.2f"),
@@ -621,6 +634,19 @@ void AVoxelTerrain::Commit(FVoxelMeshBuild& Build)
     Density->Apply(Build.Patch);
 }
 
+bool AVoxelTerrain::CanSeeExcavation(const FVoxelEdit& Edit) const
+{
+    if (Edit.BrushId != VoxelPlayground::ShallowCut) return true;
+    const auto* Player = GetWorld()->GetFirstPlayerController();
+    if (!Player || !Player->IsLocalController() || !Player->PlayerCameraManager) return false;
+    const FVector Start = Player->PlayerCameraManager->GetCameraLocation();
+    const FVector End(Edit.Center);
+    FCollisionQueryParams Query(SCENE_QUERY_STAT(MudImpactSight), false, Player->GetPawn());
+    FHitResult Hit;
+    return !GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Query)
+        || FVector::DistSquared(Hit.ImpactPoint, End) <= 9.;
+}
+
 void AVoxelTerrain::SpawnFragments(const FVoxelEdit& Edit)
 {
     if (!FragmentMesh || Edit.Action == EVoxelAction::Fill || !FApp::CanEverRender()) return;
@@ -641,7 +667,7 @@ void AVoxelTerrain::SpawnFragments(const FVoxelEdit& Edit)
     }
     for (int32 Index = 0; Index < 7; ++Index)
     {
-        FTransform Transform(FMath::VRand().Rotation(), FVector(Edit.Center) + FMath::VRand() * 65., FVector(FMath::FRandRange(.055f, .13f)));
+        FTransform Transform(FMath::VRand().Rotation(), FVector(Edit.Center) + FMath::VRand() * 40., FVector(FMath::FRandRange(.055f, .13f)));
         Fragments.Add({Transform, FMath::VRand() * 210. + FVector(0, 0, 180), 0.f});
         if (Fragments.Num() > Debris->GetInstanceCount()) Debris->AddInstance(Transform, true);
     }
@@ -666,8 +692,8 @@ void AVoxelTerrain::Tick(float DeltaSeconds)
         Fragment.Transform.ConcatenateRotation(Spin);
     }
     DebrisTransforms.Reset(Debris->GetInstanceCount());
-    for (const FFragment& Fragment : Fragments) DebrisTransforms.Add(Fragment.Transform);
     const FTransform Hidden(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
+    for (const FFragment& Fragment : Fragments) DebrisTransforms.Add(Fragment.Transform);
     while (DebrisTransforms.Num() < Debris->GetInstanceCount()) DebrisTransforms.Add(Hidden);
     Debris->BatchUpdateInstancesTransforms(0, DebrisTransforms, true, true, true);
     SetActorTickEnabled(!Fragments.IsEmpty());

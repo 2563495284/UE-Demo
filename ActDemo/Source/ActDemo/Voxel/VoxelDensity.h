@@ -20,6 +20,14 @@ enum class EVoxelLayout : uint8
 };
 
 USTRUCT()
+struct FVoxelProtectedBox
+{
+    GENERATED_BODY()
+    UPROPERTY() FIntVector Low = FIntVector::ZeroValue;
+    UPROPERTY() FIntVector High = FIntVector::ZeroValue;
+};
+
+USTRUCT()
 struct FVoxelEdit
 {
     GENERATED_BODY()
@@ -28,6 +36,12 @@ struct FVoxelEdit
     UPROPERTY() EVoxelAction Action = EVoxelAction::Punch;
     UPROPERTY() FIntVector Center = FIntVector::ZeroValue;
     UPROPERTY() uint8 BrushId = 0;
+    // Surface direction as fixed-point thousandths; all peers evaluate the same cut.
+    UPROPERTY() FIntVector SurfaceNormal = FIntVector(0, 0, 1000);
+    UPROPERTY() TArray<FVoxelProtectedBox> ProtectedBoxes;
+    // All lobes of an environmental sand spill share one sequence and collision commit.
+    UPROPERTY() TArray<FIntVector> ExtraFillCenters;
+    static constexpr int32 MaxFillCenters = 64;
 };
 
 USTRUCT()
@@ -46,6 +60,15 @@ namespace VoxelPlayground
     inline constexpr int32 CellsPerChunk = 16;
     inline constexpr int32 ChunkCount = 24;
 
+    constexpr uint8 ShallowCut = 2;
+    constexpr uint8 MudPad = 3;
+    constexpr uint8 FirstBurialLayer = 4;
+    constexpr uint8 LastBurialLayer = 6;
+    inline bool IsBurial(uint8 Brush) { return Brush >= FirstBurialLayer && Brush <= LastBurialLayer; }
+    FIntVector QuantizeNormal(const FVector& Normal);
+    bool IsBurialSurface(const FVector& FootAnchor, int32 CompletedLayers, const FVector& Point);
+    FBox PartyBrushBounds(const FVoxelEdit& Edit);
+    int32 PartyBrushDistance(const FVoxelEdit& Edit, FIntVector World);
     uint8 BrushFor(EVoxelAction Action);
     int32 RadiusFor(uint8 BrushId);
     ACTDEMO_API FIntVector QuantizeCenter(const FVector& Position);
@@ -98,6 +121,7 @@ struct FVoxelDensity
     const EVoxelLayout Layout;
 
 private:
+    FVoxelDensityPatch PrepareStamp(const FVoxelBrushStamp& Stamp, const FVoxelEdit* PartyEdit) const;
     bool VolumeMatches(const FBox& Box, bool bSolid) const;
     TArray<int16> Samples;
     // The expedition base is a cooked height surface. Retain only column boundaries and changed samples.

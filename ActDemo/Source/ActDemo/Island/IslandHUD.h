@@ -4,6 +4,7 @@
 #include "IslandHUD.generated.h"
 
 class AIslandPlayerController;
+class AIslandChest;
 class ACameraActor;
 class SIslandRoomPanel;
 class SWidget;
@@ -31,6 +32,8 @@ private:
     void UpdateInput(AIslandPlayerController& Player, bool bMenu);
     void UpdateResultCamera(AIslandPlayerController& Player);
     void DrawHunt(AIslandPlayerController& Player);
+    void DrawNearbyCrews(const AIslandPlayerController& Player, float Scale);
+    void DrawLockPrompt(const AIslandPlayerController& Player, const AIslandChest& Chest, float Scale);
     TSharedPtr<SIslandRoomPanel> Panel;
     TSharedPtr<SWidget> ViewportLayer;
     TWeakObjectPtr<ACameraActor> DockCamera, ResultCamera;

@@ -28,6 +28,8 @@ namespace IslandHudColors
     const FLinearColor Ink(.91f, .94f, .92f);
     const FLinearColor Sea(.48f, .60f, .60f);
     const FLinearColor Alert(.99f, .76f, .48f);
+    const FLinearColor Amber(1.f, .68f, .20f);
+    const FLinearColor Ally(.42f, .94f, .76f);
 }
 
 namespace
@@ -296,6 +298,8 @@ void AIslandHUD::Tick(float DeltaSeconds)
 
 FString AIslandHUD::ControlsText() const
 {
+    if (const auto* State = GetWorld()->GetGameState<AIslandGameState>(); State && State->bRoomLobby)
+        return TEXT("左键 挖地    右键 丢土    空格 跳跃    E 交互    按住 Tab 看海图    按住 R 回码头");
     return TEXT("左键 凿岩    右键 挖脚下    Q 回填    Shift 攀爬    按住 Tab 看海图    按住 R 回码头");
 }
 
@@ -334,17 +338,59 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     };
     const int32 Team=PC.GetTeam();
     Box(FString::Printf(TEXT("第 %d 队    线索 %d / 4"),Team+1,PC.GetLocalClues().Count()),22*S,20*S);
-    Box(PC.GetLocalClues().Complete() ? TEXT("挖开海图交点，打开宝藏") : TEXT("前往海图搜索圈，挖出线索箱"),22*S,52*S);
+    const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
+    const bool bExpedition = Round && Round->bRoomLobby;
+    const bool bHasMate = bExpedition && Round->PlayerArray.ContainsByPredicate([&PC, Team](const auto& Entry)
+    {
+        const auto* Member = Cast<AIslandPlayerState>(Entry.Get());
+        return Member && Member != PC.GetPlayerState<AIslandPlayerState>() && Member->Team == Team;
+    });
+    Box(PC.GetLocalClues().Complete() ? TEXT("挖开海图交点，打开宝藏") :
+        TEXT("前往海图搜索圈，挖出线索箱"),22*S,52*S);
     if (ChartVisibility>.01f || (bLegacyProbe && PC.IsMapOpen()))
     {
         DrawChart(PC,bLegacyProbe?1.f:ChartVisibility);
         return;
     }
-    const auto* Chest=PC.GetReachableChest();
     const float X=W*.5f,Y=H*.5f;
+    if (bExpedition)
+    {
+        DrawNearbyCrews(PC,S);
+        const auto* Hero = PC.GetHero();
+        if (Hero && Hero->IsMudStunned()) Box(TEXT("晕啦！醒来后按住左键挖"),X,Y+75*S,IslandHudColors::Amber,true);
+        else if (Hero && Hero->IsMudCompact()) Box(TEXT("瞄准土壁或脚下，按住左键开路"),X,Y+75*S,IslandHudColors::Ally,true);
+    }
+    FVector Rally;
+    bool bAtChest;
+    if (PC.GetHero() && PC.GetCrewRally(Rally,bAtChest))
+    {
+        const FVector Offset = Rally - PC.GetHero()->GetActorLocation();
+        const double Distance = Offset.Size2D();
+        const double Bearing = FMath::FindDeltaAngleDegrees(PC.GetControlRotation().Yaw, Offset.Rotation().Yaw);
+        const TCHAR* Side = TEXT("身边");
+        if (Distance > 250.)
+            Side = FMath::Abs(Bearing) < 40. ? TEXT("前方") : FMath::Abs(Bearing) > 140. ? TEXT("后方")
+                : Bearing > 0. ? TEXT("右侧") : TEXT("左侧");
+        Box(FString::Printf(TEXT("%s  ·  %s %d m"), bAtChest ? TEXT("集合撬锁") : TEXT("队伍集合"), Side,
+            FMath::RoundToInt(Distance / 100.)), X, 20*S, IslandHudColors::Ally, true);
+    }
     DrawRect(IslandHudColors::Panel,X-3*S,Y-3*S,6*S,6*S);
     DrawRect(IslandHudColors::Ink,X-S,Y-S,2*S,2*S);
-    if (Chest)
+    const auto* Chest = PC.GetReachableChest();
+    if (bExpedition && Chest)
+    {
+        DrawLockPrompt(PC,*Chest,S);
+    }
+    else if (bExpedition && PC.GetEchoAge() < 1.05)
+    {
+        Box(PC.HasStrongEcho() ? TEXT("清晰的空响 · 箱子很近") : TEXT("微弱的空响"),
+            X,Y+30*S,IslandHudColors::Amber,true);
+    }
+    else if (bExpedition)
+    {
+        Box(PC.GetNeutralHint(),X,Y+30*S,IslandHudColors::Ink,true);
+    }
+    else if (Chest)
     {
         FVector2D Screen;
         if (PC.ProjectWorldLocationToScreen(Chest->GetActorLocation()+FVector(0,0,50),Screen))
@@ -352,7 +398,7 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     }
     const FString Water=PC.WaterStatus();
     if (!Water.IsEmpty()) Box(Water,X,H*.30f,IslandHudColors::Alert,true);
-    if (PC.IsNoticeVisible()) Box(PC.GetDisplayNotice(),X,H*.65f,IslandHudColors::Ink,true);
+    if (PC.IsNoticeVisible()) Box(PC.GetDisplayNotice(),X,H*.36f,IslandHudColors::Ink,true);
     const double Progress=PC.GetRecoverProgress();
     if (Progress>0)
     {
@@ -362,10 +408,86 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     }
     if (PC.ShowControlHelp())
     {
-        Box(TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下"),X,H-115*S,IslandHudColors::Ink,true);
-        Box(TEXT("Q 回填    按住 Shift 攀爬    E 开箱    按住 R 回码头"),X,H-81*S,IslandHudColors::Ink,true);
+        if (bExpedition)
+        {
+            Box(TEXT("凿岩时空响越清，埋箱越近"),X,H-182*S,IslandHudColors::Amber,true);
+            Box(TEXT("两人合撬能防夺锁   ·   单人撬锁时，对手可抢一次"),X,H-148*S,IslandHudColors::Ally,true);
+        }
+        Box(bExpedition ? TEXT("左键 连续挖    右键 连续丢    向脚边丢土可垫高") : TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下"),X,H-115*S,IslandHudColors::Ink,true);
+        Box(bExpedition ? TEXT("WASD 移动    空格 跳跃    E 开箱或拉帆    按住 R 回码头") : TEXT("Q 回填    按住 Shift 攀爬    E 开箱    按住 R 回码头"),X,H-81*S,IslandHudColors::Ink,true);
     }
-    Box(TEXT("按住 Tab 看海图    按住 F1 看操作"),X,H-40*S,IslandHudColors::Ink,true);
+    Box(bHasMate ? TEXT("G  呼叫队友    按住 Tab 看海图    按住 F1 看操作") :
+        TEXT("按住 Tab 看海图    按住 F1 看操作"),X,H-40*S,IslandHudColors::Ink,true);
+}
+
+void AIslandHUD::DrawNearbyCrews(const AIslandPlayerController& PC, float S)
+{
+    const auto* GS = GetWorld()->GetGameState<AIslandGameState>();
+    const APawn* Hero = PC.GetPawn();
+    if (!Hero || !GS) return;
+    FVector Eye;
+    FRotator Rotation;
+    PC.GetPlayerViewPoint(Eye, Rotation);
+    const FCollisionQueryParams Query(SCENE_QUERY_STAT(ExpeditionCrewLabels), false, Hero);
+    for (const APlayerState* State : GS->PlayerArray)
+    {
+        const auto* Crew = Cast<AIslandPlayerState>(State);
+        const APawn* Other = Crew ? Crew->GetPawn() : nullptr;
+        if (!Other || Other == Hero || Crew->Team < 0 || FVector::DistSquared(Other->GetActorLocation(), Hero->GetActorLocation()) > FMath::Square(1500.)) continue;
+        const auto* Animal = Cast<AVoxelCharacter>(Other);
+        const FVector Head = Other->GetActorLocation() + FVector(0,0, Animal && Animal->IsMudCompact() ? 8. : 65.);
+        FVector2D Point;
+        if (!PC.ProjectWorldLocationToScreen(Head + FVector(0,0,45), Point) ||
+            GetWorld()->LineTraceTestByChannel(Eye, Head, ECC_Visibility, Query)) continue;
+        const bool bAlly = Crew->Team == PC.GetTeam();
+        const FString Label = bAlly ? TEXT("队友") : FString::Printf(TEXT("对手 · %d 队"), Crew->Team+1);
+        float W,H;
+        GetTextSize(Label,W,H,GEngine->GetMediumFont(),S*.83f);
+        DrawRect(IslandHudColors::Panel,Point.X-W*.5f-5*S,Point.Y-H,W+10*S,H+3*S);
+        DrawText(Label,bAlly ? IslandHudColors::Ally : IslandHudColors::Alert,Point.X-W*.5f,Point.Y-H,GEngine->GetMediumFont(),S*.83f);
+    }
+}
+
+void AIslandHUD::DrawLockPrompt(const AIslandPlayerController& PC, const AIslandChest& Chest, float S)
+{
+    const auto* Member = PC.GetPlayerState<AIslandPlayerState>();
+    const auto* GS = GetWorld()->GetGameState<AIslandGameState>();
+    if (!Member || !GS) return;
+    const auto& Lock = Member->LockView;
+    const bool bActive = Lock.Chest.Get() == &Chest;
+    const bool bOurs = Lock.Team == Member->Team;
+    FLinearColor Color = IslandHudColors::Ink;
+    FString Hint;
+    const bool bEligible = bActive ? Lock.bEligible :
+        (Chest.IsPrize() ? PC.GetLocalClues().Complete() : !PC.HasChestClue(Chest));
+    if (!bEligible) Hint = Chest.IsPrize() ? TEXT("宝藏 · 需要四条线索") : TEXT("本队已取得这条线索");
+    else if (!bActive) Hint = Chest.IsPrize() ? TEXT("E   撬开宝藏") : TEXT("E   撬开线索箱");
+    else if (bOurs)
+    {
+        Color = IslandHudColors::Ally;
+        if (Lock.bAssisted) Hint = TEXT("双人合撬 · 箱盖已稳住");
+        else if (Lock.Role == EIslandLockRole::Observer) Hint = TEXT("E   帮队友合撬");
+        else Hint = Lock.bSeized ? TEXT("已夺锁 · 留在箱边") : TEXT("撬锁中 · 留在箱边");
+    }
+    else
+    {
+        Color = IslandHudColors::Alert;
+        if (Lock.bAssisted) Hint = TEXT("对手合撬 · 无法夺锁");
+        else if (Lock.bSeized) Hint = TEXT("对手已夺锁 · 等待开箱");
+        else Hint = TEXT("E   夺走对手的锁");
+    }
+    const float X = Canvas->ClipX*.5f, Y = Canvas->ClipY*.60f;
+    float LabelW,H;
+    GetTextSize(Hint,LabelW,H,GEngine->GetMediumFont(),S);
+    const float W = FMath::Max(LabelW,140*S);
+    DrawRect(IslandHudColors::Panel,X-W*.5f-10*S,Y-5*S,W+20*S,H+(bActive ? 17 : 10)*S);
+    DrawText(Hint,Color,X-LabelW*.5f,Y,GEngine->GetMediumFont(),S);
+    if (bActive)
+    {
+        const float Progress = Lock.ProgressAt(GS->GetServerWorldTimeSeconds());
+        DrawRect(IslandHudColors::Sea,X-W*.5f,Y+H+3*S,W,4*S);
+        DrawRect(Color,X-W*.5f,Y+H+3*S,W*Progress,4*S);
+    }
 }
 
 void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
@@ -408,6 +530,18 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha)
     }
     for (TActorIterator<AExpeditionLandmark> It(GetWorld());It;++It)
         Mark(Project(FVector2D(It->GetActorLocation())),FString::Printf(TEXT("%c"),'A'+It->ClueIndex),IslandHudColors::Sea);
+    FVector Rally;
+    bool bAtChest;
+    if (PC.GetCrewRally(Rally,bAtChest))
+    {
+        const FVector2D P = Project(FVector2D(Rally));
+        const FVector2D Vert(0,7), Horiz(7,0);
+        Line(P-Vert,P+Horiz,IslandHudColors::Ally,2);
+        Line(P+Horiz,P+Vert,IslandHudColors::Ally,2);
+        Line(P+Vert,P-Horiz,IslandHudColors::Ally,2);
+        Line(P-Horiz,P-Vert,IslandHudColors::Ally,2);
+        Mark(P+FVector2D(4,-14), bAtChest ? TEXT("集合撬锁") : TEXT("集合"), IslandHudColors::Ally);
+    }
     if (const auto* GS=GetWorld()->GetGameState<AIslandGameState>())
     {
         const TArray<int32>& Teams=GS->LaunchedTeams;

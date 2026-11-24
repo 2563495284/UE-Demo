@@ -43,6 +43,81 @@ namespace
     }
 }
 
+FIntVector VoxelPlayground::QuantizeNormal(const FVector& Normal)
+{
+    const FVector Scaled = Normal.GetSafeNormal() * 1000.;
+    return FIntVector(FMath::RoundToInt(Scaled.X), FMath::RoundToInt(Scaled.Y), FMath::RoundToInt(Scaled.Z));
+}
+
+namespace
+{
+    int32 BurialDistance(FIntVector Local, int32 Layer)
+    {
+        // A single 40 cm course. Adjacent courses overlap and do not replace dug-out earlier courses.
+        const int32 Radius = IntegerSqrt(Local.X * Local.X + Local.Y * Local.Y);
+        const int32 Top = Layer * 40;
+        const int32 Bottom = (Layer - 1) * 40 - 16;
+        const int32 Outer = FMath::Max3(Radius - 106, Local.Z - Top, Bottom - Local.Z);
+        // An open-bottom cavity preserves the original floor, and 30 cm of roof remains at layer 3.
+        return FMath::Max(Outer, FMath::Min(55 - Radius, 90 - Local.Z));
+    }
+}
+
+FBox VoxelPlayground::PartyBrushBounds(const FVoxelEdit& Edit)
+{
+    const FVector Center(Edit.Center);
+    if (Edit.BrushId == ShallowCut) return FBox::BuildAABB(Center, FVector(90.));
+    if (Edit.BrushId == MudPad) return FBox(Center - FVector(110.,110.,65.), Center + FVector(110.,110.,45.));
+    const int32 Top = 40 * (Edit.BrushId - FirstBurialLayer + 1);
+    return FBox(Center + FVector(-108.,-108.,Top - 56.), Center + FVector(108.,108.,Top));
+}
+
+int32 VoxelPlayground::PartyBrushDistance(const FVoxelEdit& Edit, FIntVector World)
+{
+    const FIntVector Local = World - Edit.Center;
+    const FIntVector N = Edit.SurfaceNormal;
+    const int32 Along = (Local.X * N.X + Local.Y * N.Y + Local.Z * N.Z) / 1000;
+    int32 Distance;
+    if (Edit.BrushId == ShallowCut)
+    {
+        const int32 Radius = IntegerSqrt(FMath::Max(0, LengthSquared(Local) - Along * Along));
+        // Flat-bottomed scoop normal to the contacted floor, wall or ceiling.
+        Distance = FMath::Max3(Radius - 62, -40 - Along, Along - 40);
+    }
+    else if (Edit.BrushId == MudPad)
+    {
+        const bool bWall = FMath::Abs(N.Z) < 650;
+        const int32 X = Local.X - (bWall ? 30 * N.X / 1000 : 0);
+        const int32 Y = Local.Y - (bWall ? 30 * N.Y / 1000 : 0);
+        const int32 Z = Local.Z + (N.Z < -650 ? 40 : 0);
+        const int32 Radius = IntegerSqrt(X * X + Y * Y);
+        // A flat tread with a sloping skirt, trimmed at the back so a thin wall shields its far side.
+        const int32 Side = Radius - 76 + FMath::Clamp(Z, 0, 40) / 3;
+        Distance = FMath::Max(FMath::Max3(Side, Z - 40, -20 - Z), -16 - Along);
+    }
+    else
+    {
+        Distance = BurialDistance(Local, Edit.BrushId - FirstBurialLayer + 1);
+    }
+    for (const auto& Box : Edit.ProtectedBoxes)
+    {
+        const int32 ToBox = FMath::Max((Box.Low - World).GetMax(), (World - Box.High).GetMax());
+        Distance = FMath::Max(Distance, -ToBox);
+    }
+    return Distance;
+}
+
+bool VoxelPlayground::IsBurialSurface(const FVector& FootAnchor, int32 CompletedLayers, const FVector& Point)
+{
+    if (CompletedLayers < 1 || CompletedLayers > 3) return false;
+    const FVector Local = Point - FVector(QuantizeCenter(FootAnchor));
+    if (Local.GetAbsMax() > 150.) return false;
+    const FIntVector P(FMath::RoundToInt(Local.X), FMath::RoundToInt(Local.Y), FMath::RoundToInt(Local.Z));
+    int32 Distance = MAX_int32;
+    for (int32 Layer = 1; Layer <= CompletedLayers; ++Layer) Distance = FMath::Min(Distance, BurialDistance(P, Layer));
+    return FMath::Abs(Distance) <= 16;
+}
+
 uint8 VoxelPlayground::BrushFor(EVoxelAction Action)
 {
     return Action == EVoxelAction::Fill ? 1 : 0;
@@ -50,6 +125,9 @@ uint8 VoxelPlayground::BrushFor(EVoxelAction Action)
 
 int32 VoxelPlayground::RadiusFor(uint8 BrushId)
 {
+    if (BrushId == ShallowCut) return 62;
+    if (BrushId == MudPad) return 110;
+    if (IsBurial(BrushId)) return 165;
     return BrushId == 1 ? 75 : 125;
 }
 
@@ -138,15 +216,36 @@ int32 FVoxelGrid::SampleIndex(const FIntVector& Point) const
 bool FVoxelGrid::IsValidEdit(const FVoxelEdit& Edit) const
 {
     using namespace VoxelPlayground;
-    if (Edit.Action > EVoxelAction::Fill || Edit.BrushId != BrushFor(Edit.Action))
+    const bool bPartyBrush = Edit.BrushId >= ShallowCut && Edit.BrushId <= LastBurialLayer;
+    const bool bCorrectBrush = bPartyBrush
+        ? Edit.Action == (Edit.BrushId == ShallowCut ? EVoxelAction::Punch : EVoxelAction::Fill)
+        : Edit.BrushId == BrushFor(Edit.Action);
+    if (Edit.Action > EVoxelAction::Fill || !bCorrectBrush
+        || (bPartyBrush && !Edit.ExtraFillCenters.IsEmpty())
+        || ((!bPartyBrush || Edit.Action != EVoxelAction::Fill) && !Edit.ProtectedBoxes.IsEmpty())
+        || Edit.ProtectedBoxes.Num() > 32
+        || Edit.ExtraFillCenters.Num() >= FVoxelEdit::MaxFillCenters
+        || (Edit.Action != EVoxelAction::Fill && !Edit.ExtraFillCenters.IsEmpty()))
     {
         return false;
     }
+    if (bPartyBrush)
+    {
+        if (Edit.SurfaceNormal.GetMax() > 1000 || Edit.SurfaceNormal.GetMin() < -1000) return false;
+        const int32 NormalSquared = LengthSquared(Edit.SurfaceNormal);
+        if (NormalSquared < 990000 || NormalSquared > 1010000) return false;
+    }
     const int32 Radius = RadiusFor(Edit.BrushId);
     const FIntVector Max = Origin + Cells * Spacing;
-    return Edit.Center.X >= Origin.X - Radius && Edit.Center.X <= Max.X + Radius
-        && Edit.Center.Y >= Origin.Y - Radius && Edit.Center.Y <= Max.Y + Radius
-        && Edit.Center.Z >= Origin.Z - Radius && Edit.Center.Z <= Max.Z + Radius;
+    const auto InBounds = [&](const FIntVector& P)
+    {
+        return P.X >= Origin.X - Radius && P.X <= Max.X + Radius
+            && P.Y >= Origin.Y - Radius && P.Y <= Max.Y + Radius
+            && P.Z >= Origin.Z - Radius && P.Z <= Max.Z + Radius;
+    };
+    if (!InBounds(Edit.Center)) return false;
+    for (const auto& P : Edit.ExtraFillCenters) if (!InBounds(P)) return false;
+    return true;
 }
 
 FVoxelDensity::FVoxelDensity(EVoxelLayout InLayout) : Grid(FVoxelGrid::ForLayout(InLayout)), Layout(InLayout)
@@ -294,18 +393,45 @@ int16 FVoxelDensity::Sample(const FIntVector& GridPoint, const FVoxelDensityPatc
 
 FVoxelDensityPatch FVoxelDensity::PrepareEdit(const FVoxelEdit& Edit) const
 {
-    return PrepareBrush({Edit.Center, VoxelPlayground::RadiusFor(Edit.BrushId), Edit.Action == EVoxelAction::Fill});
+    const int32 Radius = VoxelPlayground::RadiusFor(Edit.BrushId);
+    if (Edit.BrushId >= VoxelPlayground::ShallowCut)
+        return PrepareStamp({Edit.Center, Radius, Edit.Action == EVoxelAction::Fill}, &Edit);
+    auto Result = PrepareBrush({Edit.Center, Radius, Edit.Action == EVoxelAction::Fill});
+    for (const FIntVector& Center : Edit.ExtraFillCenters)
+    {
+        auto Lobe = PrepareBrush({Center, Radius, true});
+        for (const auto& Entry : Lobe.Samples)
+        {
+            if (int16* Previous = Result.Samples.Find(Entry.Key))
+                *Previous = FMath::Min(*Previous, Entry.Value);
+            else
+                Result.Samples.Add(Entry.Key, Entry.Value);
+        }
+        for (int32 Chunk : Lobe.Chunks) Result.Chunks.AddUnique(Chunk);
+    }
+    return Result;
 }
 
 FVoxelDensityPatch FVoxelDensity::PrepareBrush(const FVoxelBrushStamp& Stamp) const
+{
+    return PrepareStamp(Stamp, nullptr);
+}
+
+FVoxelDensityPatch FVoxelDensity::PrepareStamp(const FVoxelBrushStamp& Stamp, const FVoxelEdit* PartyEdit) const
 {
     using namespace VoxelPlayground;
     const int32 Radius = Stamp.Radius;
     const int32 Reach = Radius + Band;
     const FIntVector Relative = Stamp.Center - Grid.Origin;
     const FIntVector Extent(Reach);
-    const FIntVector Low = ((Relative - Extent) / Spacing).ComponentMax(FIntVector(1));
-    const FIntVector High = ((Relative + Extent) / Spacing).ComponentMin(Grid.Cells - FIntVector(1));
+    FIntVector Low = ((Relative - Extent) / Spacing).ComponentMax(FIntVector(1));
+    FIntVector High = ((Relative + Extent) / Spacing).ComponentMin(Grid.Cells - FIntVector(1));
+    if (PartyEdit)
+    {
+        const FBox Bounds = PartyBrushBounds(*PartyEdit).ExpandBy(Band + Spacing);
+        Low = (FIntVector(Bounds.Min - FVector(Grid.Origin)) / Spacing).ComponentMax(FIntVector(1));
+        High = (FIntVector(Bounds.Max - FVector(Grid.Origin)) / Spacing).ComponentMin(Grid.Cells - FIntVector(1));
+    }
     FIntVector MinChanged = Grid.Cells;
     FIntVector MaxChanged = FIntVector(-1);
     FVoxelDensityPatch Patch;
@@ -321,7 +447,9 @@ FVoxelDensityPatch FVoxelDensity::PrepareBrush(const FVoxelBrushStamp& Stamp) co
                 {
                     continue;
                 }
-                const int32 Distance = FMath::Clamp(IntegerSqrt(LengthSquared(Point * Spacing - Relative)) - Radius, -Band, Band);
+                const int32 Shape = PartyEdit ? PartyBrushDistance(*PartyEdit, World)
+                    : IntegerSqrt(LengthSquared(Point * Spacing - Relative)) - Radius;
+                const int32 Distance = FMath::Clamp(Shape, -Band, Band);
                 const int32 Index = Grid.SampleIndex(Point);
                 const int16 Value = Sample(Point);
                 const int16 Updated = Stamp.bAdd
@@ -432,8 +560,28 @@ TOptional<double> FVoxelDensity::SurfaceAt(FVector2D Position) const
         const double B = FMath::Lerp<double>(Sample({X, Y + 1, Z}), Sample({X + 1, Y + 1, Z}), Local.X - X);
         return FMath::Lerp(A, B, Local.Y - Y);
     };
-    double Above = Column(Grid.Cells.Z);
-    for (int32 Z = Grid.Cells.Z - 1; Z >= 0; --Z)
+    int32 Top = Grid.Cells.Z;
+    if (Layout == EVoxelLayout::Expedition)
+    {
+        // A footprint outside edited tiles still has the original height field.
+        // Its highest corner bounds the first possible crossing exactly. This skips
+        // empty sky while sampling thousands of candidate routes at round start.
+        const auto Chunks = Grid.Chunks();
+        const int32 Tile = (X / CellsPerChunk) + (Y / CellsPerChunk) * Chunks.X;
+        if (!PromotedColumns.Contains(Tile))
+        {
+            const int32 Row = Grid.Cells.X + 1, Index = X + Y * Row;
+            const auto& A = BaseColumns[Index];
+            const auto& B = BaseColumns[Index+1];
+            const auto& C = BaseColumns[Index+Row];
+            const auto& D = BaseColumns[Index+Row+1];
+            if (FMath::Min(FMath::Min(A.X,B.X), FMath::Min(C.X,D.X)) >= 0) return {};
+            const int32 Height = FMath::Max(FMath::Max(A.Y,B.Y), FMath::Max(C.Y,D.Y));
+            Top = FMath::Clamp(FMath::DivideAndRoundUp(Height - Grid.Origin.Z, Spacing), 0, Top);
+        }
+    }
+    double Above = Column(Top);
+    for (int32 Z = Top - 1; Z >= 0; --Z)
     {
         const double Below = Column(Z);
         if (Below < 0.0 && Above >= 0.0)

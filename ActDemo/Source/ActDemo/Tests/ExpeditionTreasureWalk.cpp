@@ -9,6 +9,7 @@
 #include "Voxel/VoxelTerrain.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "UnrealClient.h"
 
 namespace
@@ -29,7 +30,7 @@ namespace
         const FVector Low=(Bounds.Min-Origin)/Spacing, High=(Bounds.Max-Origin)/Spacing;
         const FVector Eye=Player.GetHero()->GetAimOrigin();
         TOptional<FVector> Best;
-        double Nearest = 235.*235.;
+        double Nearest = MAX_dbl;
         for (int32 Z=FMath::FloorToInt(Low.Z); Z<=FMath::CeilToInt(High.Z); ++Z)
             for (int32 Y=FMath::FloorToInt(Low.Y); Y<=FMath::CeilToInt(High.Y); ++Y)
                 for (int32 X=FMath::FloorToInt(Low.X); X<=FMath::CeilToInt(High.X); ++X)
@@ -40,9 +41,10 @@ namespace
                     const double Distance=FVector::DistSquared(Point,Eye);
                     if (Distance>=Nearest) continue;
                     FHitResult Hit;
-                    if (!Terrain.TraceRock(Eye,Point+(Point-Eye).GetSafeNormal()*22.,Player.GetHero(),Hit)) continue;
+                    if (!Terrain.TraceRock(Eye,Point+(Point-Eye).GetSafeNormal()*22.,Player.GetHero(),Hit)
+                        || FVector::DistSquared(Hit.ImpactPoint,Eye)>FMath::Square(AVoxelGameMode::AimReach-1.)) continue;
                     Nearest=Distance;
-                    Best=Point;
+                    Best=Hit.ImpactPoint;
                 }
         return Best;
     }
@@ -133,26 +135,28 @@ void AExpeditionWalk::TickTreasure(float DeltaSeconds)
     {
         if (bExposed) { SetHuntStep(EHuntStep::Open); return; }
         if (Now-StageStarted<.4 || Terrain.IsBusy()) return;
-        const FVector2D Error=FVector2D(Position)-FVector2D(ChestTarget);
-        if (Error.Size()>42. && Hero.GetCharacterMovement()->IsMovingOnGround())
+        const FVector2D Offset=FVector2D(Position)-FVector2D(ChestTarget);
+        if (Offset.Size()>85. && Hero.GetCharacterMovement()->IsMovingOnGround())
         {
-            WalkTo(*Player,FVector2D(ChestTarget),DeltaSeconds,23.);
+            WalkTo(*Player,FVector2D(ChestTarget),DeltaSeconds,32.);
             return;
         }
-        const bool bNearBox=Position.Z-92.<ChestTarget.Z+75.;
-        const TOptional<FVector> Rock=bNearBox?VisibleRock(*Player,Terrain,ChestTarget):TOptional<FVector>();
-        const FRotator Look=Rock ? (Rock.GetValue()-Hero.GetAimOrigin()).Rotation()
-            : FRotator(-46.,Player->GetControlRotation().Yaw,0.);
-        Turn(*Player,Look,DeltaSeconds);
-        if (Now-LastInput<.78) return;
-        if (Rock)
-        {
-            Player->SubmitEdit(EVoxelAction::Punch,(Rock.GetValue()-Hero.GetAimOrigin()).GetSafeNormal());
-        }
-        else
-        {
-            Player->SubmitEdit(EVoxelAction::DigDown);
-        }
+        if (!Hero.GetCharacterMovement()->IsMovingOnGround()) return;
+        const double FootZ=Position.Z-Hero.GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+        TOptional<FVector> Rock;
+        if (FootZ<=ChestTarget.Z+100.) Rock=VisibleRock(*Player,Terrain,ChestTarget);
+        if (!Rock) Rock=HighestSupportingRock(*Player,Terrain);
+        if (!Rock) Rock=VisibleRock(*Player,Terrain,ChestTarget);
+        if (!Rock) return;
+        const FVector Aim=(*Rock-Hero.GetAimOrigin()).GetSafeNormal();
+        Turn(*Player,Aim.Rotation(),DeltaSeconds);
+        if (Now-LastInput<.61) return;
+        // This is the same GAS Dig event as a single left press, with a fresh physical ray each time.
+        // It cannot choose a brush centre or edit the density directly.
+        Player->SubmitEdit(EVoxelAction::Punch,Aim);
+        if ((DigAttempts%12)==0)
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_TREASURE_SHOVEL box=%d attempt=%d foot=%.1f targetZ=%.1f seq=%u"),
+                TreasureIndex,DigAttempts,FootZ,ChestTarget.Z,Terrain.GetAppliedSequence());
         LastInput=Now;
         ++DigAttempts;
         return;

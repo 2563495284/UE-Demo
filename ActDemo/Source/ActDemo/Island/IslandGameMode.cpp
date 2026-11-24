@@ -1,5 +1,8 @@
 #include "Island/IslandGameMode.h"
+#include "Abilities/ExpeditionMudEffect.h"
 #include "Island/IslandBreakable.h"
+#include "Island/IslandNeutralProp.h"
+#include "Island/IslandNeutralLayout.h"
 #include "Island/ExpeditionDock.h"
 #include "Island/IslandLocalPlayer.h"
 #include "Island/IslandRoomSession.h"
@@ -134,6 +137,7 @@ void AIslandGameMode::Tick(float DeltaSeconds)
         }
     }
     Super::Tick(DeltaSeconds);
+    if (!BurialSites.IsEmpty()) CheckMudLandings();
 }
 
 bool AIslandGameMode::IsStartRequested() const
@@ -185,8 +189,8 @@ bool AIslandGameMode::PrepareRound(FString& Error)
     FIslandTreasureLayout RandomLayout;
     int32 LayoutSeed = static_cast<int32>(FPlatformTime::Cycles64());
 #if !UE_BUILD_SHIPPING
-    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
-        FParse::Value(FCommandLine::Get(), TEXT("ExpeditionSeed="), LayoutSeed);
+    // Designers can replay a layout in the normal front end without starting an automated probe.
+    FParse::Value(FCommandLine::Get(), TEXT("ExpeditionSeed="), LayoutSeed);
 #endif
     if (IslandRules::GenerateLayout(LayoutSeed, Decoys, Circles, Density, RandomLayout))
     {
@@ -199,7 +203,8 @@ bool AIslandGameMode::PrepareRound(FString& Error)
         if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionRepro")))
         {
             // Captured D shelf from crew-eight. Recompute the puzzle's actual line intersection.
-            HiddenLayout.Centers[3] = FVector(1830,-4673,423);
+            const FVector2D D(1830., -4673.);
+            HiddenLayout.Centers[3] = FVector(D, Density.SurfaceAt(D).Get(0.) - 150.);
             FVector Intersection;
             if (!FMath::SegmentIntersection2D(HiddenLayout.Centers[0], HiddenLayout.Centers[2],
                 HiddenLayout.Centers[1], HiddenLayout.Centers[3], Intersection))
@@ -208,11 +213,36 @@ bool AIslandGameMode::PrepareRound(FString& Error)
                 return false;
             }
             HiddenLayout.Crossing = FVector2D(Intersection);
-            HiddenLayout.Centers[IslandRules::PrizeIndex] = FVector(HiddenLayout.Crossing, Density.SurfaceAt(HiddenLayout.Crossing).Get(0.0) - 700.0);
+            HiddenLayout.Centers[IslandRules::PrizeIndex] = FVector(HiddenLayout.Crossing, Density.SurfaceAt(HiddenLayout.Crossing).Get(0.0) - 275.);
             if (!IslandRules::IsValidLayout(HiddenLayout, Circles, Density, &Error)) return false;
         }
     }
 #endif
+    if (bExpeditionRoom)
+    {
+#if !UE_BUILD_SHIPPING
+        if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA"))
+            && FParse::Param(FCommandLine::Get(), TEXT("NeutralLayoutAudit"))
+            && !IslandNeutral::Audit(*GetWorld(), *Terrain, Decoys))
+        {
+            Error = TEXT("中立场景物体种子复验失败");
+            return false;
+        }
+#endif
+        TArray<FIslandNeutralPlacement> Layout;
+        IslandNeutral::Generate(*GetWorld(), *Terrain, LayoutSeed, HiddenLayout, Layout);
+        for (const auto& Placement : Layout)
+        {
+            const FTransform Transform(FRotator(0., Placement.Yaw, 0.), FVector(Placement.Location));
+            auto* Prop = GetWorld()->SpawnActorDeferred<AIslandNeutralProp>(AIslandNeutralProp::StaticClass(),
+                Transform, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+            if (!Prop) continue;
+            Prop->Initialize(Placement.Kind);
+            Prop->FinishSpawning(Transform);
+            NeutralProps.Add(Prop);
+            if (Placement.Kind == EIslandNeutralKind::Tide) Prop->RefreshTide(*Terrain);
+        }
+    }
     Exposed.SetNum(HiddenLayout.Num());
     TeamClues.SetNum(bExpeditionRoom ? Settings.MaxTeams : IslandRules::TeamCount);
     return true;
@@ -245,6 +275,8 @@ void AIslandGameMode::Logout(AController* Exiting)
     {
         RemovePartyPlayer(*Player);
         SeaStates.Remove(Player);
+        NextRallyAt.Remove(Player);
+        BurialSites.Remove(Player);
     }
     Super::Logout(Exiting);
     if (bExpeditionRoom && !bRestarting)
@@ -500,6 +532,10 @@ bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim)
     FHitResult Hit;
     if (GetWorld()->LineTraceSingleByChannel(Hit, Start, Start + Aim * AimReach, ECC_Visibility, Query))
     {
+        if (auto* Neutral = Cast<AIslandNeutralProp>(Hit.GetActor()))
+        {
+            if (auto* Player = Cast<AIslandPlayerController>(Hero.GetController())) return Neutral->Strike(*Player, Hit);
+        }
         if (AIslandBreakable* Prop = Cast<AIslandBreakable>(Hit.GetActor()))
         {
             return Prop->Break(Aim);
@@ -508,12 +544,18 @@ bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim)
     return false;
 }
 
-void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit)
+void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source)
 {
+    for (AIslandNeutralProp* Prop : NeutralProps)
+        if (Prop->GetKind() == EIslandNeutralKind::Tide) Prop->RefreshTide(*GetTerrain());
     if (Edit.Action == EVoxelAction::Fill)
     {
         return;
     }
+    AIslandPlayerController* Digger = bExpeditionRoom ? Cast<AIslandPlayerController>(Source) : nullptr;
+    const FVector BrushCenter(Edit.Center);
+    const double BrushRadius = VoxelPlayground::RadiusFor(Edit.BrushId);
+    double NearestBuriedGap = MAX_dbl;
     for (int32 Index = 0; Index < Exposed.Num(); ++Index)
     {
         const FVector Center = HiddenLayout.GetCenter(Index);
@@ -526,7 +568,33 @@ void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit)
                 Exposed[Index] = Chest;
             }
         }
+        if (Digger && !Exposed[Index] && CanClaimChest(Digger->GetTeam(), Index))
+        {
+            const double ToBox = FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(BrushCenter));
+            NearestBuriedGap = FMath::Min(NearestBuriedGap, ToBox - BrushRadius);
+        }
     }
+    if (Digger && NearestBuriedGap <= 550.0)
+    {
+        Digger->ClientExcavationEcho(NearestBuriedGap <= 250.0);
+    }
+}
+
+void AIslandGameMode::QueueHopperSand(AIslandNeutralProp& Hopper, const TArray<FVector>& Centers)
+{
+    const TWeakObjectPtr<AIslandNeutralProp> Target(&Hopper);
+    EnqueueEnvironmentFill(Centers, [Target](bool bCommitted)
+    {
+        if (auto* Prop = Target.Get()) Prop->CompleteSandRelease(bCommitted);
+    });
+}
+
+void AIslandGameMode::OnPlayerJumped(AVoxelCharacter& Hero)
+{
+    const auto* Player = Cast<AIslandPlayerController>(Hero.GetController());
+    if (!bExpeditionRoom || !Player || !CanPlayerAct(*Player)) return;
+    for (AIslandNeutralProp* Prop : NeutralProps)
+        if (Prop->GetKind() == EIslandNeutralKind::Tide && Prop->TryTideJump(Hero)) break;
 }
 
 bool AIslandGameMode::CanFillAt(const FVoxelEdit& Edit) const
@@ -547,13 +615,51 @@ bool AIslandGameMode::CanPlayerAct(const AVoxelPlayerController& Player) const
 {
     const FSeaState* Sea = SeaStates.Find(&Player);
     return GetGameState<AIslandGameState>()->Phase == EIslandPhase::Hunting
-        && Super::CanPlayerAct(Player) && (!Sea || Sea->RespawnAt == 0.0);
+        && Super::CanPlayerAct(Player) && (!Sea || Sea->RespawnAt == 0.0)
+        && (!bExpeditionRoom || !Player.GetHero()->IsMudStunned());
 }
 
 int32 AIslandGameMode::FindReachableChest(const AIslandPlayerController& Player) const
 {
     const AIslandChest* Chest = Player.GetReachableChest();
     return Chest ? Exposed.IndexOfByKey(Chest) : INDEX_NONE;
+}
+
+void AIslandGameMode::RallyCrew(AIslandPlayerController& Sender)
+{
+    const int32 Team = Sender.GetTeam();
+    if (!bExpeditionRoom || !CanPlayerAct(Sender) || !TeamClues.IsValidIndex(Team)) return;
+    const double Now = GetGameState<AIslandGameState>()->GetServerWorldTimeSeconds();
+    double& NextAllowed = NextRallyAt.FindOrAdd(&Sender);
+    if (Now < NextAllowed) return;
+    NextAllowed = Now + 2.0;
+
+    TArray<AIslandPlayerController*, TInlineAllocator<8>> Crew;
+    for (AVoxelPlayerController* Controller : GetPlayers())
+    {
+        auto* Member = CastChecked<AIslandPlayerController>(Controller);
+        if (Member->GetTeam() == Team) Crew.Add(Member);
+    }
+    if (Crew.Num() < 2)
+    {
+        Sender.ClientEditRejected(TEXT("当前没有同队玩家可以集合"));
+        return;
+    }
+
+    if (!ChestLocks.IsEmpty())
+    {
+        UpdateChestLocks(Now);
+        PublishLockViews();
+        if (!CanPlayerAct(Sender)) return;
+    }
+    const AVoxelCharacter* Hero = Sender.GetHero();
+    const FVector Feet = Hero->GetActorLocation() - FVector::UpVector * Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    const bool bAtChest = CanClaimChest(Team, FindReachableChest(Sender));
+    // Each owner's reliable channel delivers team replacements in server order.
+    for (AIslandPlayerController* Member : Crew)
+    {
+        Member->ClientCrewRally(Feet, bAtChest, Now + 15.0);
+    }
 }
 
 void AIslandGameMode::TryOpen(AIslandPlayerController& Player)
@@ -566,6 +672,12 @@ void AIslandGameMode::TryOpen(AIslandPlayerController& Player)
     const int32 Index = FindReachableChest(Player);
     if (Index == INDEX_NONE)
     {
+        if (bExpeditionRoom)
+            if (auto* Sail = Player.GetReachableSail())
+            {
+                Sail->UseRope(Player);
+                return;
+            }
         Player.ClientEditRejected(TEXT("Reach an exposed chest"));
     }
     else if (HiddenLayout.IsDecoy(Index))
@@ -578,6 +690,11 @@ void AIslandGameMode::TryOpen(AIslandPlayerController& Player)
         {
             BeginParty(Index);
         }
+    }
+    else if (bExpeditionRoom)
+    {
+        WorkChest(Player, Index);
+        PublishLockViews();
     }
     else if (Index == IslandRules::PrizeIndex)
     {
@@ -759,6 +876,8 @@ void AIslandGameMode::ReturnToSafeGround(AVoxelPlayerController& Player)
 {
     if (AVoxelCharacter* Hero = Player.GetHero())
     {
+        BurialSites.Remove(Cast<AIslandPlayerController>(&Player));
+        UExpeditionMudMarkEffect::Clear(*Hero);
         const FTransform Target = FindSafeReturn(Player);
         Hero->ReturnToStart(Target);
         Player.ClientResetView(Target.Rotator());
@@ -835,6 +954,16 @@ void AIslandGameMode::UpdateEnvironment()
             {
                 RecoverPlayer(Player);
             }
+        }
+    }
+    if (!ChestLocks.IsEmpty())
+    {
+        const double ServerTime = GetGameState<AIslandGameState>()->GetServerWorldTimeSeconds();
+        if (ServerTime >= NextLockCheck)
+        {
+            NextLockCheck = ServerTime + .1;
+            UpdateChestLocks(ServerTime);
+            PublishLockViews();
         }
     }
 }
