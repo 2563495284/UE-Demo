@@ -160,7 +160,15 @@ python3 Scripts/island_qa.py --scenario neutral --seed 25 --mode both --screensh
 
 ## 双视角与搜索圈复验
 
-在默认远征岛上复验 256 个种子，相同种子的四箱及大奖坐标逐一重现。用圈心连线猜大奖，最近偏差 10.01 米，中位偏差 12.42 米，最远偏差 20.17 米。改用开箱得到的四个坐标，256 次都命中真交点。另测 64 个种子的中立物体，所有已选布局都在物体同时触发后保留通路。种子 25 可以在同一局看到五种物体。
+Mac 试玩包在同机房主与来宾双进程下通过视角切换。模拟 2% 丢包时，两端都能用 V 往返切换，第一人称的水平和陡俯视准星都与挖、丢的方向一致。海图打开时按 V，关闭后保留原视角。[第三人称](Screenshots/ExpeditionThirdPerson.jpg) · [第一人称](Screenshots/ExpeditionFirstPerson.jpg)
+
+单人从码头步行 30.2 米，挖开并取得第一条线索。本队海图随即在实际 A 箱位置留下实点，B、C、D 仍显示为搜索区。[开局海图](Screenshots/ExpeditionSearchChartStart.jpg) · [取得 A 线索](Screenshots/ExpeditionSearchChartFirstClue.jpg)
+
+在默认远征岛上复验 256 个种子，相同种子的四箱及大奖坐标逐一重现。用圈心连线猜大奖，最近偏差 10.01 米，中位偏差 12.42 米，最远偏差 20.17 米。改用开箱得到的四个坐标，256 次都命中真交点。另测 64 个种子的中立物体，所有已选布局都在物体同时触发后保留通路。编辑器与 Mac 试玩包对同种子的 321 件物体给出了相同的种类、位置和朝向。种子 25 可以在同一局看到五种物体。
+
+在种子 25 的两队三进程对局中，后来的一队从倒树下穿过 3.41 米，穿过船舱 7.55 米，再用土坡登上甲板。落砂成坡后走了 2.88 米、爬升 0.93 米，坡脚随后被挖低 0.79 米。两队先后收放同一面帆。潮喷实际把角色向前送出 8.58 米。模拟 80 毫秒往返延迟、2% 丢包后，五种互动也全部完成。[五种白模触发前后](Screenshots/ExpeditionNeutralProps.jpg)
+
+在本机多进程复验期间，macOS 记录过游戏窗口打开前的 UE 内存跟踪器启动崩溃。同一试玩包使用相同参数再次启动后，完成了从首页到第一条线索的实玩。
 
 ```sh
 python3 Scripts/expedition_ui_qa.py --scenario pair --perspective --shots
@@ -183,7 +191,7 @@ python3 Scripts/expedition_ui_qa.py --scenario chart --shots
 
 另一场三进程对局中，两种网络都复现了单人用五团土封顶、受击者侧挖穿出并反投命中，以及仅用右键垫出队友挖好的窄坑。鼠标左右键可同时按住，松开左键后右键继续投掷。土壳在三个进程测得高度同为 1.20 米。模拟丢包时，两名投手相隔 0.101 秒打中同一角色，只算一次；苏醒保护期间两人各打中三团，保护结束后的第一团重新从第一层累计。[正常网络与实机截图](../ActDemo/Saved/GasMudReleaseQA/mud/normal/summary.json) · [模拟丢包](../ActDemo/Saved/GasMudReleaseQA/mud/emulated/summary.json)
 
-种子 25 的三进程对局中，一队放倒树，另一队用浅铲挖低树下路面，从树下穿过 2.11 米。这条测试路线清出了整个胶囊宽度的通道，共用 29 铲。角色还实际穿过 4.58 米船舱，沿土坡登上甲板，走上砂斗堆出的 78 厘米砂坡后挖开坡脚。两队先后放帆、收帆，堵住一侧潮孔后成功借水柱登台。模拟丢包也通过了全部五种交互。[五种场景的前后实拍](Screenshots/ExpeditionNeutralProps.jpg) · [普通网络](../ActDemo/Saved/GasNeutralFinalQA/neutral/normal/summary.json) · [模拟丢包](../ActDemo/Saved/GasNeutralFinalQA/neutral/emulated/summary.json)
+种子 25 的三进程对局中，一队放倒树，另一队用浅铲挖低树下路面，从树下穿过 2.11 米。这条测试路线清出了整个胶囊宽度的通道，共用 29 铲。角色还实际穿过 4.58 米船舱，沿土坡登上甲板，走上砂斗堆出的 78 厘米砂坡后挖开坡脚。两队先后放帆、收帆，堵住一侧潮孔后成功借水柱登台。模拟丢包也通过了全部五种交互。[普通网络](../ActDemo/Saved/GasNeutralFinalQA/neutral/normal/summary.json) · [模拟丢包](../ActDemo/Saved/GasNeutralFinalQA/neutral/emulated/summary.json)
 
 ## 此前版本的本机验收
 

@@ -207,6 +207,26 @@ namespace
         if (Stage>=4) return true;
         auto* Hero=Cast<AVoxelCharacter>(PC.GetPawn());
         if (!Hero) return false;
+        // The first replication burst can include an opposing player as they spawn,
+        // then cull them on the next frame. Move both pawns well inside 150 m.
+        static bool WalkingInland=false;
+        const auto* State=PC.GetWorld()->GetGameState<AIslandGameState>();
+        if (Stage==0 && State && State->ActiveTeams>1 && Hero->GetActorLocation().Size2D()>6700.)
+        {
+            if (!WalkingInland)
+            {
+                PC.SetControlRotation((-Hero->GetActorLocation().GetSafeNormal2D()).Rotation());
+                Key(PC,EKeys::W,true);
+                WalkingInland=true;
+            }
+            return false;
+        }
+        if (WalkingInland)
+        {
+            Key(PC,EKeys::W,false);
+            WalkingInland=false;
+            return false;
+        }
         int32 Body=0, Paws=0, Others=0;
         for (TActorIterator<AVoxelCharacter> It(PC.GetWorld()); It; ++It)
         {
@@ -222,25 +242,7 @@ namespace
             if (*It==Hero) { Body=BodyParts; Paws=EyeParts; }
             else if (BodyParts>=6 && EyeParts==0) ++Others;
         }
-        // Opposing docks are beyond the pawn's 150 m net relevance. Walk inland
-        // through the real input mapping before checking the opponent's model.
-        static bool WalkingInland=false;
-        if (Others<Seats-1)
-        {
-            if (Stage==0 && !WalkingInland)
-            {
-                PC.SetControlRotation((-Hero->GetActorLocation().GetSafeNormal2D()).Rotation());
-                Key(PC,EKeys::W,true);
-                WalkingInland=true;
-            }
-            return false;
-        }
-        if (WalkingInland)
-        {
-            Key(PC,EKeys::W,false);
-            WalkingInland=false;
-            return false;
-        }
+        if (Others<Seats-1) return false;
 
         FVector Eye;
         FRotator View;
