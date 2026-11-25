@@ -15,9 +15,17 @@ void AIslandGameMode::FChestLock::SetHelper(AIslandPlayerController* NewHelper, 
 
 bool AIslandGameMode::CanClaimChest(int32 Team, int32 Index) const
 {
-    if (!TeamClues.IsValidIndex(Team)) return false;
-    if (Index == IslandRules::PrizeIndex) return TeamClues[Team].Complete();
-    return Index >= 0 && Index < IslandRules::ClueCount && (TeamClues[Team].Mask & (1u << Index)) == 0;
+    if (!TeamClues.IsValidIndex(Team) || Index < 0 || Index >= HiddenLayout.Num()) return false;
+    if (Index == IslandRules::PrizeIndex) return TeamClues[Team].CanOpenPrize();
+    if (HiddenLayout.IsDecoy(Index))
+    {
+        const FName Feature = PartyFeatureForChest(Index);
+        return !ConsumedDecoys.Contains(Index) && (!bExpeditionRoom || !Feature.IsNone())
+            && !UnavailablePartyFeatures.Contains(Feature);
+    }
+    if (TeamClues[Team].Mask & (1u << Index)) return false;
+    return !bExpeditionRoom || (Exposed[Index] && Exposed[Index]->IsChallengeResolved())
+        || !PartyFeatureForChest(Index).IsNone();
 }
 
 void AIslandGameMode::WorkChest(AIslandPlayerController& Player, int32 Index)
@@ -34,8 +42,15 @@ void AIslandGameMode::WorkChest(AIslandPlayerController& Player, int32 Index)
     {
         // This input may have just completed the crew's timed lock.
         if (bCouldClaimBeforeUpdate) return;
-        Player.ClientEditRejected(Index == IslandRules::PrizeIndex
-            ? TEXT("Collect all four clues to open the prize") : TEXT("Your crew already has this clue"));
+        if (bExpeditionRoom && Index == IslandRules::PrizeIndex)
+        {
+            Player.ClientEditRejected(TeamClues[Team].HasKey() ? TEXT("钥匙已合成，还需集齐四个真箱点位")
+                : TEXT("需要集齐四个真箱点位和三片碎片合成的钥匙"));
+            return;
+        }
+        Player.ClientEditRejected(
+            HiddenLayout.IsDecoy(Index) ? TEXT("此箱的小游戏暂时无法进入") :
+            Index == IslandRules::PrizeIndex ? TEXT("Collect all four clues to open the prize") : TEXT("Your crew already has this clue"));
         return;
     }
 
@@ -62,7 +77,7 @@ void AIslandGameMode::WorkChest(AIslandPlayerController& Player, int32 Index)
     {
         if (Lock->bAssisted)
         {
-            Player.ClientEditRejected(TEXT("已有两人合撬"));
+            Player.ClientEditRejected(Round->IsIdentityDisguised() ? TEXT("箱锁已被占用") : TEXT("已有两人合撬"));
             return;
         }
         Lock->SetHelper(&Player, Now);
@@ -71,13 +86,14 @@ void AIslandGameMode::WorkChest(AIslandPlayerController& Player, int32 Index)
     }
     if (Lock->bAssisted || Lock->bSeized)
     {
-        Player.ClientEditRejected(Lock->bAssisted ? TEXT("对手正在合撬，箱盖已稳住") : TEXT("对手已经接锁，守住了这次开箱"));
+        Player.ClientEditRejected(Round->IsIdentityDisguised() ? TEXT("箱锁已被占用") :
+            Lock->bAssisted ? TEXT("对手正在合撬，箱盖已稳住") : TEXT("对手已经接锁，守住了这次开箱"));
         return;
     }
 
     if (AIslandPlayerController* Previous = Lock->Leader.Get())
     {
-        Previous->ClientEditRejected(TEXT("对手夺走箱锁"));
+        Previous->ClientEditRejected(Round->IsIdentityDisguised() ? TEXT("箱锁已易手") : TEXT("对手夺走箱锁"));
     }
     UE_LOG(LogTemp, Display, TEXT("ISLAND_LOCK seize chest=%d from=%d to=%d"), Index, Lock->Team, Team);
     Lock->Team = Team;
@@ -88,7 +104,10 @@ void AIslandGameMode::WorkChest(AIslandPlayerController& Player, int32 Index)
 
 void AIslandGameMode::UpdateChestLocks(double Now)
 {
-    int32 WinningTeam = INDEX_NONE;
+    // Several locks can expire between two server ticks. Resolve them in gameplay time
+    // order so a trap cannot interrupt an earlier treasure win by TMap iteration order.
+    struct FFinishedLock { int32 Index; double At; };
+    TArray<FFinishedLock, TInlineAllocator<8>> Finished;
     for (auto It = ChestLocks.CreateIterator(); It; ++It)
     {
         const int32 Index = It.Key();
@@ -106,6 +125,7 @@ void AIslandGameMode::UpdateChestLocks(double Now)
             It.RemoveCurrent();
             continue;
         }
+        const double PreviousFinish = Lock.FinishAt;
         if (!bLeaderPresent)
         {
             Lock.Leader = Lock.Helper;
@@ -116,22 +136,30 @@ void AIslandGameMode::UpdateChestLocks(double Now)
         {
             Lock.SetHelper(nullptr, Now);
         }
-        if (Now < Lock.FinishAt) continue;
-
-        const int32 Team = Lock.Team;
+        if (PreviousFinish <= Now) Lock.FinishAt = PreviousFinish;
+        if (Now >= Lock.FinishAt) Finished.Add({Index, Lock.FinishAt});
+    }
+    Finished.Sort([](const FFinishedLock& A, const FFinishedLock& B)
+    {
+        if (A.At != B.At) return A.At < B.At;
+        const auto Priority = [](int32 Index) { return Index == IslandRules::PrizeIndex ? -1 : Index; };
+        return Priority(A.Index) < Priority(B.Index);
+    });
+    for (const FFinishedLock& Completion : Finished)
+    {
+        const int32 Index = Completion.Index;
+        const int32 Team = ChestLocks.FindChecked(Index).Team;
+        ChestLocks.Remove(Index);
         UE_LOG(LogTemp, Display, TEXT("ISLAND_LOCK complete chest=%d team=%d"), Index, Team);
-        It.RemoveCurrent();
         if (Index == IslandRules::PrizeIndex)
         {
-            WinningTeam = Team;
-            break;
+            ChestLocks.Reset();
+            PublishWinner(Team);
+            const auto* Round = GetGameState<AIslandGameState>();
+            if (bExpeditionRoom && Round->Phase == EIslandPhase::Finished && IsValid(Exposed[Index]))
+                Exposed[Index]->RevealPrize(Round->GetServerWorldTimeSeconds());
+            return;
         }
-        GiveClue(Team, Index);
-    }
-    if (WinningTeam != INDEX_NONE)
-    {
-        ChestLocks.Reset();
-        PublishWinner(WinningTeam);
     }
 }
 

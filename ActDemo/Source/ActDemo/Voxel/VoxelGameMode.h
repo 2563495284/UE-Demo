@@ -45,7 +45,7 @@ protected:
     virtual void RoundSetupFailed(const FString& Error) {}
     virtual bool StopOnGuestExit() const { return true; }
     virtual bool PrepareRound(FString& Error) { return true; }
-    virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim) { return false; }
+    virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim);
     virtual void OnRoundStarted() {}
     virtual void OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source) {}
     virtual void UpdateEnvironment();

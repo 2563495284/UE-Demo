@@ -7,7 +7,7 @@
 
 class AVoxelCharacter;
 class AVoxelTerrain;
-class UActInputConfig;
+class UVoxelInputConfig;
 struct FInputActionValue;
 
 UCLASS()
@@ -16,7 +16,6 @@ class ACTDEMO_API AVoxelPlayerController : public APlayerController
     GENERATED_BODY()
 
 public:
-    AVoxelPlayerController();
     AVoxelCharacter* GetHero() const;
     FVector GetExcavationAim(const AVoxelCharacter& Hero) const;
     bool UsesExpeditionAbilities() const;
@@ -27,13 +26,13 @@ public:
     void SetExpeditionDigHeld(bool bHeld);
     void SetExpeditionThrowHeld(bool bHeld);
     bool IsPlaying() const { return bPlaying; }
-    bool IsVoxelInputEnabled() const { return bVoxelInputEnabled; }
+    virtual bool IsVoxelInputEnabled() const { return bVoxelInputEnabled; }
     bool WantsFirstPersonView() const { return bFirstPersonView && bPlaying && IsLocalController(); }
     void SetVoxelInputEnabled(bool bEnabled);
     void SetIslandUIInput(bool bOpen);
     double GetRecoverProgress() const;
     const FString& GetNotice() const { return Notice; }
-    const FString& GetDisplayNotice() const;
+    FString GetDisplayNotice() const;
     bool IsNoticeVisible() const;
 
     // The same input-to-RPC entry points are exercised by the multiplayer acceptance probe.
@@ -57,7 +56,9 @@ public:
     double LastRequestAt = -1e9;
 
 protected:
+    FVector2D GetLocalLookScale() const;
     void BeginPlay() override;
+    void EndPlay(const EEndPlayReason::Type Reason) override;
     void DispatchExpeditionAction(EExpeditionAction Action, bool bHeld = false, FVector Aim = FVector::ZeroVector);
     void ReleaseHeldExpeditionInputs();
     void SetupInputComponent() override;
@@ -100,7 +101,7 @@ private:
     UFUNCTION(Server, Reliable) void ServerSetClimb(bool bEnabled);
     UFUNCTION(Server, Reliable) void ServerSetRecover(bool bEnabled);
 
-    UPROPERTY() TObjectPtr<UActInputConfig> InputConfig;
+    UPROPERTY(Transient) TObjectPtr<UVoxelInputConfig> InputConfig;
     TWeakObjectPtr<AVoxelTerrain> Terrain;
     TArray<FIncomingEdit> Incoming;
     bool bApplyingEdits = false;

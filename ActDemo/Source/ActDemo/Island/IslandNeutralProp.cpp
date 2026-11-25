@@ -8,6 +8,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "Island/IslandGameMode.h"
+#include "Island/IslandBreakable.h"
 #include "Island/IslandPlayerController.h"
 #include "Materials/MaterialInterface.h"
 #include "Net/UnrealNetwork.h"
@@ -61,6 +62,7 @@ void AIslandNeutralProp::Initialize(EIslandNeutralKind Kind)
 {
     if (!HasAuthority() || State.bInitialized) return;
     State.Kind = Kind;
+    SetActorScale3D(IslandNeutral::SiteScale(Kind));
     State.bInitialized = true;
     // The first sight of a rolled sail is fully at rest. Subsequent rope pulls
     // interpolate both directions from the timestamp shared by the server.
@@ -86,6 +88,24 @@ void AIslandNeutralProp::Initialize(EIslandNeutralKind Kind)
 void AIslandNeutralProp::OnRep_State()
 {
     if (!State.bInitialized || !GetWorld()) return;
+    if (State.bDemolished)
+    {
+        if (bBuilt && !IsHidden() && ServerNow() - State.ChangedAt < .8)
+        {
+            TInlineComponentArray<UStaticMeshComponent*> Parts(this);
+            // Spread debris over the full building footprint; distant peers reconstruct only the final state.
+            for (int32 I = 0; I < Parts.Num(); I += FMath::Max(1, Parts.Num()/5))
+            {
+                auto* Part = Parts[I];
+                if (Part->IsVisible()) AIslandSceneryDamage::PlayDebris(*GetWorld(), Part->Bounds.Origin,
+                    (Part->Bounds.Origin - GetActorLocation()).GetSafeNormal2D(), Part->GetMaterial(0));
+            }
+        }
+        SetActorHiddenInGame(true);
+        SetActorEnableCollision(false);
+        SetActorTickEnabled(false);
+        return;
+    }
     if (!bBuilt)
     {
         SetActorScale3D(IslandNeutral::SiteScale(State.Kind));
@@ -127,27 +147,65 @@ FVector AIslandNeutralProp::GetInteractionPoint() const
     }
 }
 
-bool AIslandNeutralProp::Strike(AIslandPlayerController& Player, const FHitResult& Hit)
+bool AIslandNeutralProp::TraceShovel(UWorld& World, FHitResult& Hit, const FVector& Start, const FVector& End,
+    const FCollisionQueryParams& Query)
 {
-    if (!HasAuthority() || !bBuilt || !HitTarget || Hit.GetComponent() != HitTarget || !Player.GetHero()) return false;
-    if (State.Kind == EIslandNeutralKind::Tree && State.Phase < 2)
+    // Thin attachments are touches so normal visibility and interaction traces still pass through.
+    // UE returns touches in distance order followed by the first blocking surface.
+    TArray<FHitResult> Contacts;
+    World.LineTraceMultiByChannel(Contacts, Start, End, ECC_Visibility, Query);
+    for (const FHitResult& Contact : Contacts)
     {
-        SetPhase(State.Phase + 1);
-        return true;
-    }
-    if (State.Kind == EIslandNeutralKind::Hopper && State.Phase == 0)
-    {
-        bSandQueued = false;
-        SetPhase(1);
-        return true;
+        if (Contact.bBlockingHit || Cast<AIslandNeutralProp>(Contact.GetActor()))
+        {
+            Hit = Contact;
+            return true;
+        }
     }
     return false;
+}
+
+bool AIslandNeutralProp::Strike(AIslandPlayerController& Player, const FHitResult& Hit)
+{
+    if (!HasAuthority() || !bBuilt || IsDemolished() || !Player.GetHero() || !Hit.GetComponent()) return false;
+    if (Hit.GetComponent() == HitTarget)
+    {
+        if (State.Kind == EIslandNeutralKind::Tree && State.Phase < 2)
+        {
+            SetPhase(State.Phase + 1);
+            return true;
+        }
+        if (State.Kind == EIslandNeutralKind::Hopper && State.Phase == 0)
+        {
+            bSandQueued = false;
+            SetPhase(1);
+            return true;
+        }
+    }
+#if !UE_BUILD_SHIPPING
+    if (!Hit.bBlockingHit && FParse::Param(FCommandLine::Get(),TEXT("NeutralDemolitionQA")))
+        UE_LOG(LogTemp, Display, TEXT("SCENERY_QA_ATTACHMENT_STRIKE kind=%d part=%s"), int32(State.Kind), *Hit.GetComponent()->GetName());
+#endif
+    MulticastChip(Hit.ImpactPoint, Hit.ImpactNormal);
+    if (++BodyStrikes >= 3)
+    {
+        State.bDemolished = true;
+        State.ChangedAt = ServerNow();
+        OnRep_State();
+        ForceNetUpdate();
+    }
+    return true;
+}
+
+void AIslandNeutralProp::MulticastChip_Implementation(FVector_NetQuantize Point, FVector_NetQuantizeNormal Normal)
+{
+    AIslandSceneryDamage::PlayDebris(*GetWorld(), Point, Normal, HitTarget ? HitTarget->GetMaterial(0) : nullptr);
 }
 
 bool AIslandNeutralProp::CanUseRope(const AIslandPlayerController& Player) const
 {
     const AVoxelCharacter* Hero = Player.GetHero();
-    if (State.Kind != EIslandNeutralKind::Sail || !Hero || !bBuilt) return false;
+    if (IsDemolished() || State.Kind != EIslandNeutralKind::Sail || !Hero || !bBuilt) return false;
     const FVector Aim = Hero->GetAimOrigin();
     const FVector Knot = GetInteractionPoint();
     if (FVector::DistSquared(Aim, Knot) > FMath::Square(200.)) return false;
@@ -168,7 +226,7 @@ bool AIslandNeutralProp::AnySailObscures(UWorld& World, const FVector& Start, co
 {
     for (TActorIterator<AIslandNeutralProp> It(&World); It; ++It)
     {
-        if (It->GetKind() != EIslandNeutralKind::Sail) continue;
+        if (It->IsDemolished() || It->GetKind() != EIslandNeutralKind::Sail) continue;
         // Check the current cloth panels in mesh space, including their movement as a pawn crosses.
         for (int32 I = 0; I < It->Cloth.Num(); I += 2)
         {
@@ -202,7 +260,7 @@ FVector AIslandNeutralProp::GetTideMouth(int32 Index) const
 void AIslandNeutralProp::RefreshTide(const AVoxelTerrain& Terrain)
 {
     const FVoxelDensity* Density = Terrain.GetDensity();
-    if (!HasAuthority() || State.Kind != EIslandNeutralKind::Tide || !Density) return;
+    if (!HasAuthority() || IsDemolished() || State.Kind != EIslandNeutralKind::Tide || !Density) return;
     uint8 Mask = 0;
     constexpr double D = 40.;
     const FVector2D Offsets[] = {{0,0},{D,0},{-D,0},{0,D},{0,-D}};
@@ -240,7 +298,7 @@ bool AIslandNeutralProp::IsTideBoostReady() const
 
 bool AIslandNeutralProp::TryTideJump(AVoxelCharacter& Hero)
 {
-    if (!HasAuthority() || State.Kind != EIslandNeutralKind::Tide || !IsTideBoostReady()) return false;
+    if (!HasAuthority() || IsDemolished() || State.Kind != EIslandNeutralKind::Tide || !IsTideBoostReady()) return false;
     const FVector Mouth = GetTideMouth(State.PlugMask == 1 ? 1 : 0);
     const FVector Foot = Hero.GetActorLocation() - FVector::UpVector * Hero.GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
     if (FVector::DistSquared2D(Mouth, Foot) > FMath::Square(IslandNeutral::TideRadius) ||
@@ -249,11 +307,11 @@ bool AIslandNeutralProp::TryTideJump(AVoxelCharacter& Hero)
     const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
     const FVoxelDensity* Density = Terrain ? Terrain->GetDensity() : nullptr;
     const double Ground = Density ? Density->SurfaceAt(FVector2D(Target)).Get(Mouth.Z) : Mouth.Z;
-    constexpr double UpSpeed = 920.;
+    constexpr double UpSpeed = 1100.;
     const double Gravity = FMath::Max(1., double(-Hero.GetCharacterMovement()->GetGravityZ()));
     const double Flight = (UpSpeed + FMath::Sqrt(FMath::Max(0., UpSpeed*UpSpeed - 2.*Gravity*(Ground-Foot.Z)))) / Gravity;
     const FVector Horizontal = FVector(Target.X-Foot.X, Target.Y-Foot.Y, 0.) / Flight;
-    Hero.LaunchCharacter(Horizontal.GetClampedToMaxSize(750.) + FVector::UpVector * UpSpeed, true, true);
+    Hero.LaunchCharacter(Horizontal.GetClampedToMaxSize(1050.) + FVector::UpVector * UpSpeed, true, true);
     return true;
 }
 
@@ -265,11 +323,11 @@ TArray<FVector> AIslandNeutralProp::GetSandCenters() const
     const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
     const FVoxelDensity* Density = Terrain ? Terrain->GetDensity() : nullptr;
     const FTransform& Frame = GetActorTransform();
-    for (int32 Step = 0; Step < 10; ++Step)
+    for (int32 Step = 0; Step < 12; ++Step)
     {
-        const double X = 25. + 37.5 * Step;
-        const double Top = -38. + 14.5 * Step;
-        for (double Y : {-48., 0., 48.})
+        const double X = 25. + 33. * Step;
+        const double Top = -38. + 13. * Step;
+        for (double Y : {-64., -32., 0., 32., 64.})
         {
             FVector Center = Frame.TransformPosition(FVector(X,Y,Top));
             const double Ground = Density ? Density->SurfaceAt(FVector2D(Center)).Get(Center.Z-125.) : Center.Z-125.;
@@ -283,7 +341,7 @@ TArray<FVector> AIslandNeutralProp::GetSandCenters() const
 
 void AIslandNeutralProp::CompleteSandRelease(bool bCommitted)
 {
-    if (!HasAuthority() || State.Kind != EIslandNeutralKind::Hopper || State.Phase != 1) return;
+    if (!HasAuthority() || IsDemolished() || State.Kind != EIslandNeutralKind::Hopper || State.Phase != 1) return;
     bSandQueued = false;
     SetPhase(bCommitted ? 2 : 0);
 }

@@ -41,7 +41,7 @@ public:
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     bool HasLocalPartyInput() const override;
     void ReleaseLocalPartyInput() override;
-    void DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize) const override;
+    void DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, bool bAnonymous) const override;
 
 protected:
     void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;

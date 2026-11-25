@@ -12,11 +12,11 @@ FVector IslandNeutral::SiteScale(EIslandNeutralKind Kind)
 {
     switch (Kind)
     {
-        case EIslandNeutralKind::Tree:   return FVector(2.2);
-        case EIslandNeutralKind::Ship:   return {1.65,2.2,1.};
-        case EIslandNeutralKind::Hopper: return {2.,2.,1.6};
-        case EIslandNeutralKind::Sail:   return {2.6,2.6,1.7};
-        case EIslandNeutralKind::Tide:   return {2.,2.,1.8};
+        case EIslandNeutralKind::Tree:   return FVector(3.);
+        case EIslandNeutralKind::Ship:   return {2.25,3.10,1.};
+        case EIslandNeutralKind::Hopper: return {2.8,2.8,1.8};
+        case EIslandNeutralKind::Sail:   return {3.6,3.6,2.1};
+        case EIslandNeutralKind::Tide:   return {2.8,2.8,2.5};
     }
     return FVector::OneVector;
 }
@@ -53,7 +53,7 @@ namespace NeutralLayoutDetail
         switch (Kind)
         {
             case EIslandNeutralKind::Tree: return {{-100,-165},{650,165}};
-            case EIslandNeutralKind::Ship: return {{-295,-440},{295,440}};
+            case EIslandNeutralKind::Ship: return {{-195,-413},{195,413}};
             case EIslandNeutralKind::Hopper: return {{-275,-230},{415,230}};
             case EIslandNeutralKind::Sail: return {{-75,-260},{75,260}};
             case EIslandNeutralKind::Tide: return {{-125,-270},{525,270}};
@@ -86,6 +86,7 @@ namespace NeutralLayoutDetail
         TArray<FBox2D> Reserved;
         TArray<FBox> Scenery;
         TArray<int32> Docks;
+        TBitArray<> DockReachable;
         TStaticArray<TArray<FCandidate>,KindCount> Candidates;
         bool bDockConnections = true;
 
@@ -128,6 +129,8 @@ namespace NeutralLayoutDetail
                 else Docks.Add(Anchor);
             }
             bDockConnections &= !Docks.IsEmpty();
+            DockReachable.Init(false,Cells.Num());
+            if (bDockConnections) FloodFrom(Docks[0],DockReachable);
             FindCandidates();
             UE_LOG(LogTemp,Display,TEXT("NEUTRAL_TERRAIN cells=%d docks=%d connected=%d candidates=%d,%d,%d,%d,%d ms=%.1f"),
                 Cells.Num(),Docks.Num(),bDockConnections,Candidates[0].Num(),Candidates[1].Num(),Candidates[2].Num(),
@@ -213,7 +216,7 @@ namespace NeutralLayoutDetail
             return true;
         }
 
-        int32 NearestCell(FVector2D P, double Range) const
+        int32 NearestCell(FVector2D P, double Range, bool bFromDock = false) const
         {
             const int32 CX=FMath::RoundToInt((P.X-Min.X)/Step), CY=FMath::RoundToInt((P.Y-Min.Y)/Step);
             const int32 Radius=FMath::CeilToInt(Range/Step);
@@ -224,7 +227,7 @@ namespace NeutralLayoutDetail
                 {
                     const int32 Id=X+Y*Width;
                     const double DS=FVector2D::DistSquared(P,FVector2D(Cells[Id].Point));
-                    if (Cells[Id].Links && DS<BestDS) {BestDS=DS; Best=Id;}
+                    if (Cells[Id].Links && (!bFromDock || DockReachable[Id]) && DS<BestDS) {BestDS=DS; Best=Id;}
                 }
             return Best;
         }
@@ -244,9 +247,10 @@ namespace NeutralLayoutDetail
         bool ForkAt(FVector2D P, FVector2D Axis, FVector2D Side, double Z) const
         {
             // Two diverging exits around a higher patch and a lower incoming branch.
-            const double Left=HeightAt(P+Axis*580.+Side*560.);
-            const double Right=HeightAt(P+Axis*580.-Side*560.);
-            const double Divider=HeightAt(P+Axis*580.);
+            const double ExitWidth=215.*IslandNeutral::SiteScale(EIslandNeutralKind::Sail).Y;
+            const double Left=HeightAt(P+Axis*720.+Side*ExitWidth);
+            const double Right=HeightAt(P+Axis*720.-Side*ExitWidth);
+            const double Divider=HeightAt(P+Axis*720.);
             const double Approach=HeightAt(P-Axis*720.);
             return FMath::Min3(Left,Right,Approach)>-25. && FMath::Abs(Left-Z)<175. &&
                 FMath::Abs(Right-Z)<175. && FMath::Abs(Approach-Z)<175. &&
@@ -294,27 +298,31 @@ namespace NeutralLayoutDetail
                         }
                         Candidates[int32(Kind)].Add({Prop,Envelope,Region});
                     };
-                    const double TreeEnd=HeightAt(P+Axis*1067.);
-                    const double UnderTree=HeightAt(P+Axis*540.);
+                    const double TreeEnd=HeightAt(P+Axis*(485.*IslandNeutral::SiteScale(EIslandNeutralKind::Tree).X));
+                    const double UnderTree=HeightAt(P+Axis*(245.*IslandNeutral::SiteScale(EIslandNeutralKind::Tree).X));
                     if (FMath::Abs(TreeEnd-Z)<78. && UnderTree<FMath::Min(Z,TreeEnd)-2. && UnderTree>Z-56. &&
                         FMath::Abs(Left-Right)<125. && FMath::Max(Fwd,Aft)-FMath::Min(Fwd,Aft)>10.)
                         Add(EIslandNeutralKind::Tree);
-                    const double Port=HeightAt(P+Axis*610.), Starboard=HeightAt(P-Axis*610.);
-                    if (Shore>-4900 && FMath::Max(Port,Starboard)<Z-12. && FMath::Min(Port,Starboard)>Z-155. &&
-                        FMath::Abs(HeightAt(P+Side*704.)-Z)<120. && FMath::Abs(HeightAt(P-Side*704.)-Z)<120.)
+                    const double Port=HeightAt(P+Axis*(370.*IslandNeutral::SiteScale(EIslandNeutralKind::Ship).X)), Starboard=HeightAt(P-Axis*(370.*IslandNeutral::SiteScale(EIslandNeutralKind::Ship).X));
+                    // The open hull only needs its crossing and both approach banks on dry land.
+                    // Bow and stern may sit on different contours along the ridge.
+                    if (Shore>-6400 && FMath::Max(Port,Starboard)<Z+28. && FMath::Min(Port,Starboard)>Z-185. &&
+                        FMath::Min(Port,Starboard)<Z-12. &&
+                        FMath::Abs(HeightAt(P+Side*(320.*IslandNeutral::SiteScale(EIslandNeutralKind::Ship).Y))-Z)<200. &&
+                        FMath::Abs(HeightAt(P-Side*(320.*IslandNeutral::SiteScale(EIslandNeutralKind::Ship).Y))-Z)<200.)
                         Add(EIslandNeutralKind::Ship);
-                    const double Landing=HeightAt(P+Axis*735.);
-                    const double PinGround=HeightAt(P-Axis*190.-Side*314.);
+                    const double Landing=HeightAt(P+Axis*(380.*IslandNeutral::SiteScale(EIslandNeutralKind::Hopper).X));
+                    const double PinGround=HeightAt(P-Axis*(95.*IslandNeutral::SiteScale(EIslandNeutralKind::Hopper).X)-Side*(157.*IslandNeutral::SiteScale(EIslandNeutralKind::Hopper).Y));
                     if (Landing>Z+86. && Landing<Z+218. && PinGround>Z-78. && PinGround<Z+75. &&
                         FMath::Abs(Left-Right)<150.) Add(EIslandNeutralKind::Hopper);
-                    if (FMath::Abs(HeightAt(P+Side*564.)-Z)<98. && FMath::Abs(HeightAt(P-Side*564.)-Z)<98. &&
+                    if (FMath::Abs(HeightAt(P+Side*(217.*IslandNeutral::SiteScale(EIslandNeutralKind::Sail).Y))-Z)<98. && FMath::Abs(HeightAt(P-Side*(217.*IslandNeutral::SiteScale(EIslandNeutralKind::Sail).Y))-Z)<98. &&
                         ForkAt(P,Axis,Side,Z)) Add(EIslandNeutralKind::Sail);
                     if (Shore>-2250 && FMath::Abs(Left-Z)<100. && FMath::Abs(Right-Z)<100.)
                     {
                         bool bBothLandings=true;
                         for (double Sign : {-1.,1.})
                         {
-                            const FVector2D Mouth=P+Side*(300.*Sign);
+                            const FVector2D Mouth=P+Side*(150.*Sign*IslandNeutral::SiteScale(EIslandNeutralKind::Tide).Y);
                             const double Rise=HeightAt(Mouth+Axis*IslandNeutral::TideTravel)-HeightAt(Mouth);
                             if (Rise<46. || Rise>264. || NearestCell(Mouth+Axis*IslandNeutral::TideTravel,145.)==INDEX_NONE)
                                 bBothLandings=false;
@@ -328,12 +336,31 @@ namespace NeutralLayoutDetail
         TArray<int32> Endpoints(const FIslandTreasureLayout& Treasure) const
         {
             TArray<int32> Result=Docks;
-            for (int32 I=0; I<=IslandRules::PrizeIndex; ++I)
+            for (int32 I=0; I<Treasure.Num(); ++I)
             {
                 // Reach the surface immediately over each actual box; players dig from here.
-                Result.Add(NearestCell(FVector2D(Treasure.Centers[I]),210.));
+                Result.AddUnique(NearestCell(FVector2D(Treasure.GetCenter(I)),210.,true));
             }
             return Result;
+        }
+
+        void FloodFrom(int32 Start,TBitArray<>& Visited) const
+        {
+            TArray<int32> Queue;
+            Queue.Reserve(Cells.Num());
+            Queue.Add(Start);
+            Visited[Start]=true;
+            const int32 Offset[]={1,Width,-1,-Width};
+            for (int32 Head=0; Head<Queue.Num(); ++Head)
+            {
+                const int32 Id=Queue[Head];
+                for (int32 D=0; D<4; ++D)
+                {
+                    if (!(Cells[Id].Links & (1<<D))) continue;
+                    const int32 Next=Id+Offset[D];
+                    if (!Visited[Next]) {Visited[Next]=true; Queue.Add(Next);}
+                }
+            }
         }
 
         bool RoutesOpen(TConstArrayView<FBox2D> Taken,TConstArrayView<int32> Destinations) const
@@ -350,21 +377,7 @@ namespace NeutralLayoutDetail
                 for (int32 Y=A.Y; Y<=B.Y; ++Y) for (int32 X=A.X; X<=B.X; ++X) Blocked[X+Y*Width]=true;
             }
             for (int32 Id : Destinations) if (Blocked[Id]) return false;
-            TArray<int32> Queue;
-            Queue.Reserve(Cells.Num());
-            Queue.Add(Destinations[0]);
-            Blocked[Destinations[0]]=true;
-            const int32 Offset[]={1,Width,-1,-Width};
-            for (int32 Head=0; Head<Queue.Num(); ++Head)
-            {
-                const int32 Id=Queue[Head];
-                for (int32 D=0; D<4; ++D)
-                {
-                    if (!(Cells[Id].Links & (1<<D))) continue;
-                    const int32 Next=Id+Offset[D];
-                    if (!Blocked[Next]) {Blocked[Next]=true; Queue.Add(Next);}
-                }
-            }
+            FloodFrom(Destinations[0],Blocked);
             for (int32 Id : Destinations) if (!Blocked[Id]) return false;
             return true;
         }
@@ -427,32 +440,41 @@ namespace NeutralLayoutDetail
     };
 }
 
-void IslandNeutral::Generate(UWorld& World,const AVoxelTerrain& Terrain,int32 RoundSeed,
-    const FIslandTreasureLayout& Treasure,TArray<FIslandNeutralPlacement>& Out)
+IslandNeutral::FSurface IslandNeutral::Survey(UWorld& World,const AVoxelTerrain& Terrain)
 {
-    using NeutralLayoutDetail::FIslandSurface;
+    if (Terrain.Layout!=EVoxelLayout::Expedition || !Terrain.GetDensity()) return {};
+    return MakeShared<NeutralLayoutDetail::FIslandSurface>(World,Terrain);
+}
+
+bool IslandNeutral::CanReachDigSite(const FSurface& Surface,FVector2D Point)
+{
+    return Surface && Surface->NearestCell(Point,210.,true)!=INDEX_NONE;
+}
+
+void IslandNeutral::Generate(const FSurface& Surface,int32 RoundSeed,const FIslandTreasureLayout& Treasure,TArray<FIslandNeutralPlacement>& Out)
+{
     Out.Reset();
-    if (Terrain.Layout!=EVoxelLayout::Expedition || !Terrain.GetDensity()) return;
-    FIslandSurface Surface(World,Terrain);
-    const bool bReachable=Surface.Roll(RoundSeed,Treasure,Out);
+    if (!Surface) return;
+    const bool bReachable=Surface->Roll(RoundSeed,Treasure,Out);
     UE_LOG(LogTemp,Display,TEXT("NEUTRAL_LAYOUT count=%d routes=%d"),Out.Num(),bReachable);
 }
 
 #if !UE_BUILD_SHIPPING
-bool IslandNeutral::Audit(UWorld& World,const AVoxelTerrain& Terrain,int32 DecoyCount)
+bool IslandNeutral::Audit(const FSurface& Surveyed,int32 DecoyCount,TConstArrayView<FBox2D> Obstacles)
 {
     using namespace NeutralLayoutDetail;
-    if (!Terrain.GetDensity() || Terrain.Layout!=EVoxelLayout::Expedition) return false;
-    const FIslandSurface Surface(World,Terrain);
+    if (!Surveyed) return false;
+    const FIslandSurface& Surface=*Surveyed;
+    const AVoxelTerrain& Terrain=Surface.Terrain;
+    const auto CanReach=[&Surveyed](FVector2D P){return CanReachDigSite(Surveyed,P);};
     int32 Counts[KindCount]={};
-    const TArray<FBox2D> Obstacles=IslandRules::CollectSearchObstacles(World);
     int32 FullSeed=INDEX_NONE;
     TSet<uint32> Unique;
     bool bPassed=true;
     for (int32 Seed=1; Seed<=64; ++Seed)
     {
         FIslandTreasureLayout Treasure;
-        bool bValid=IslandRules::GenerateLayout(Seed,DecoyCount,Terrain.GetSearchCircles(),*Terrain.GetDensity(),Treasure,nullptr,false,Obstacles);
+        bool bValid=IslandRules::GenerateLayout(Seed,DecoyCount,Terrain.GetSearchCircles(),*Terrain.GetDensity(),Treasure,nullptr,false,Obstacles,CanReach);
         TArray<FIslandNeutralPlacement> A,B;
         bool bRoutes=bValid && Surface.Roll(Seed,Treasure,A);
         const bool bReplay=bRoutes && Surface.Roll(Seed,Treasure,B) && A==B;

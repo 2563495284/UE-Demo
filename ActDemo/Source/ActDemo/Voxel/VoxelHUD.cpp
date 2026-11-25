@@ -1,5 +1,6 @@
 #include "Voxel/VoxelHUD.h"
 
+#include "ExpeditionText.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Voxel/VoxelPlayerController.h"
@@ -27,7 +28,7 @@ void AVoxelHUD::DrawHUD()
     Centered(ControlsText(), Canvas->ClipY - 38 * Scale);
     if (Player->IsNoticeVisible())
     {
-        Centered(Player->GetNotice(), Y + 33 * Scale);
+        Centered(Player->GetDisplayNotice(), Y + 33 * Scale);
     }
     if (Player->IsPlaying())
     {
@@ -36,7 +37,7 @@ void AVoxelHUD::DrawHUD()
     }
     if (const double Progress = Player->GetRecoverProgress(); Progress > 0.0)
     {
-        Centered(TEXT("Returning to start"), Y + 63 * Scale);
+        Centered(EXPEDITION_TEXT("正在返回起点", "Returning to start"), Y + 63 * Scale);
         DrawRect(FLinearColor(0.03f, .035f, .04f, .9f), X - 53 * Scale, Y + 87 * Scale, 106 * Scale, 4 * Scale);
         DrawRect(FLinearColor(.87f, .92f, .97f), X - 53 * Scale, Y + 87 * Scale, 106 * Scale * Progress, 4 * Scale);
     }
@@ -44,5 +45,5 @@ void AVoxelHUD::DrawHUD()
 
 FString AVoxelHUD::ControlsText() const
 {
-    return TEXT("WASD  Move    Space  Jump    LMB  Punch    RMB  Dig    Shift  Climb    Q  Fill    Hold R  Return");
+    return EXPEDITION_TEXT("WASD 移动   空格 跳跃   左键 凿岩   右键 挖地   Shift 攀爬   Q 回填   按住 R 返回", "WASD  Move    Space  Jump    LMB  Punch    RMB  Dig    Shift  Climb    Q  Fill    Hold R  Return");
 }

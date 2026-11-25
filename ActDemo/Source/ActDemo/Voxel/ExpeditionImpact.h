@@ -6,6 +6,9 @@
 struct FVoxelEdit;
 class USoundWave;
 class USoundAttenuation;
+class UMaterialInstanceDynamic;
+class UGameViewportClient;
+class SIslandPassage;
 
 UCLASS()
 class AExpeditionImpactCamera : public APlayerCameraManager
@@ -15,14 +18,21 @@ class AExpeditionImpactCamera : public APlayerCameraManager
 public:
     AExpeditionImpactCamera();
     static void Play(AActor& Terrain, const FVoxelEdit& Edit);
+    void UpdateCamera(float DeltaTime) override;
+    bool HasPaintedPassageBlack(uint32 Round, bool bReturning) const;
 
 protected:
     void ApplyCameraModifiers(float DeltaTime, FMinimalViewInfo& View) override;
+    void BeginPlay() override;
+    void EndPlay(const EEndPlayReason::Type Reason) override;
 
 private:
     UPROPERTY() TObjectPtr<USoundWave> Chip;
     UPROPERTY() TObjectPtr<USoundAttenuation> Attenuation;
     float ImpactAge = 1.f;
     float ImpactStrength = 0.f;
+    UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> PassageMaterial;
+    TSharedPtr<SIslandPassage> PassageLayer;
+    TWeakObjectPtr<UGameViewportClient> PassageViewport;
     static constexpr float ImpactDuration = .14f;
 };

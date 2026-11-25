@@ -179,7 +179,8 @@ bool IslandRules::IsValidLayout(const FIslandTreasureLayout& Layout, TConstArray
 }
 
 bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<FIslandSearchCircle> Circles,
-    const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error, bool bFixedOnly, TConstArrayView<FBox2D> Obstacles)
+    const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error, bool bFixedOnly, TConstArrayView<FBox2D> Obstacles,
+    const TFunction<bool(FVector2D)>& CanReachDecoy)
 {
     if (Circles.Num() != ClueCount)
     {
@@ -208,6 +209,48 @@ bool IslandRules::GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<F
     }
 
     DecoyCount = FMath::Clamp(DecoyCount, 0, MaxDecoys);
+    if (bExpedition && DecoyCount > 0)
+    {
+        // Draw traps after the four genuine sites. Adding a challenge never moves a real clue.
+        if (!GenerateLayout(Seed, 0, Circles, Density, Layout, Error, bFixedOnly, Obstacles)) return false;
+        FRandomStream Traps(static_cast<int32>(uint32(bFixedOnly ? 7319 : Seed) ^ 0xC4874B89u));
+        int32 Order[] = {0, 1, 2, 3};
+        for (int32 I = ClueCount - 1; I > 0; --I) Swap(Order[I], Order[Traps.RandRange(0, I)]);
+        for (int32 Slot = 0; Slot < DecoyCount; ++Slot)
+        {
+            const int32 Area = Order[Slot % ClueCount];
+            const FIslandSearchCircle& Circle = Circles[Area];
+            bool bPlaced = false;
+            for (int32 Attempt = 0; Attempt < 256 && !bPlaced; ++Attempt)
+            {
+                const double Angle = Traps.FRand() * UE_TWO_PI;
+                const double Radius = FMath::Sqrt(Traps.FRand()) * (Circle.Radius - ChestExtent.Size2D());
+                const FVector2D XY = FVector2D(Circle.Center) + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Radius;
+                const TOptional<double> Surface = Density.SurfaceAt(XY);
+                const int32 Depth = Traps.RandRange(125, 175);
+                if (!Surface || (CanReachDecoy && !CanReachDecoy(XY))) continue;
+                const FVector Site(XY, Surface.GetValue() - Depth);
+                // Leave enough space to excavate and open either chest independently.
+                bool bSeparate = true;
+                for (int32 Existing = 0; Existing < Layout.Num(); ++Existing)
+                    if (FVector::DistSquaredXY(Layout.GetCenter(Existing), Site) < FMath::Square(300.))
+                    {
+                        bSeparate = false;
+                        break;
+                    }
+                if (!bSeparate) continue;
+                Layout.Decoys.Add({Site, Area});
+                bPlaced = IsValidLayout(Layout, Circles, Density, nullptr, Obstacles);
+                if (!bPlaced) Layout.Decoys.Pop();
+            }
+            if (!bPlaced)
+            {
+                if (Error) *Error = CircleError(Area);
+                return false;
+            }
+        }
+        return true;
+    }
     FRandomStream Random(Seed);
     FRandomStream Fixed(7319);
     constexpr int32 RandomAttempts = 64;

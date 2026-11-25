@@ -2,6 +2,7 @@
 
 #include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
+#include "Island/IslandBreakable.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Tests/VoxelPlaygroundProbe.h"
@@ -358,6 +359,16 @@ void AVoxelGameMode::StartNextEdit()
     }
 }
 
+bool AVoxelGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim)
+{
+    const FVector From = Hero.GetAimOrigin();
+    FHitResult Hit;
+    if (!GetWorld()->LineTraceSingleByChannel(Hit, From, From + Aim * AimReach, ECC_Visibility,
+        FCollisionQueryParams(SCENE_QUERY_STAT(VoxelScenery), false, &Hero))) return false;
+    if (auto* Prop=Cast<AIslandBreakable>(Hit.GetActor())) return Prop->Break(Aim);
+    return AIslandSceneryDamage::RemoveAuthoredPiece(Hit);
+}
+
 void AVoxelGameMode::StartFrontRequest()
 {
     const FRequest Request = MoveTemp(Requests[0]);
@@ -551,8 +562,33 @@ void AVoxelGameMode::RecoverPlayer(AVoxelPlayerController& Player)
 {
     if (AVoxelCharacter* Hero = Player.GetHero())
     {
-        Hero->ReturnToStart(Player.StartTransform);
-        Player.ClientResetView(Player.StartTransform.Rotator());
+        FTransform Safe=Player.StartTransform;
+        const FVector Origin=Safe.GetLocation();
+        auto* Capsule=Hero->GetCapsuleComponent();
+        const double Half=Capsule->GetScaledCapsuleHalfHeight();
+        const auto Shape=FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Half);
+        const FCollisionQueryParams Query(SCENE_QUERY_STAT(VoxelReturnFloor), false, Hero);
+        const auto Landing=[&](FVector From)
+        {
+            FHitResult Floor;
+            if (!GetWorld()->LineTraceSingleByChannel(Floor,From,From-FVector(0,0,1400),ECC_Visibility,Query)
+                || Floor.ImpactNormal.Z < .72 || Cast<APawn>(Floor.GetActor())) return false;
+            const FVector Center=Floor.ImpactPoint+FVector(0,0,Half+4.);
+            if (GetWorld()->OverlapBlockingTestByChannel(Center,FQuat::Identity,Capsule->GetCollisionObjectType(),Shape,Query,
+                FCollisionResponseParams(Capsule->GetCollisionResponseToChannels()))) return false;
+            Safe.SetLocation(Center);
+            return true;
+        };
+        bool bFound=Landing(Origin);
+        for (int32 Radius=150; !bFound && Radius<=2250; Radius+=150)
+            for (int32 Spoke=0; !bFound && Spoke<12; ++Spoke)
+                bFound=Landing(Origin+FRotator(0,Spoke*30.,0).Vector()*Radius+FVector(0,0,650));
+        if (!bFound)
+        {
+            GetWorld()->SpawnActor<AIslandRescueRaft>(AIslandRescueRaft::StaticClass(),Origin-FVector(0,0,Half+22.),FRotator::ZeroRotator);
+        }
+        Hero->ReturnToStart(Safe);
+        Player.ClientResetView(Safe.Rotator());
     }
 }
 

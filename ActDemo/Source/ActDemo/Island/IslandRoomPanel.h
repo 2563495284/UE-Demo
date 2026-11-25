@@ -9,8 +9,10 @@ class AIslandPlayerState;
 class UIslandRoomSession;
 class SEditableTextBox;
 class SVerticalBox;
+class SIslandClientSettingsPanel;
+enum class EIslandRoomNetwork : uint8;
 
-enum class EIslandPanel : uint8 { Home, Arriving, Create, Search, Lobby, Settings, Result, Pause, Hidden };
+enum class EIslandPanel : uint8 { Home, Arriving, Create, Search, Lobby, Settings, Result, Pause, Hidden, ClientSettings };
 
 class SIslandRoomPanel : public SCompoundWidget
 {
@@ -41,6 +43,7 @@ private:
     void Focus(const TSharedPtr<SWidget>& Widget) const;
     void Add(TSharedRef<SWidget> Widget, float Gap = 8.f);
     void AddTitle(const FString& Title);
+    void AddClientSettingsButton();
     void AddMessage(TAttribute<FText> Value, bool bWarning = false);
     TSharedRef<SWidget> Button(TAttribute<FText> Label, TFunction<void()> Press,
         TAttribute<bool> Enabled = true, bool bPrimary = false, FName Tag = NAME_None);
@@ -51,10 +54,15 @@ private:
     TSharedPtr<SVerticalBox> Body, List;
     TSharedPtr<SEditableTextBox> NameField, AddressField;
     TSharedPtr<SWidget> Primary, RefreshButton;
+    TSharedPtr<SIslandClientSettingsPanel> ClientSettings;
+    TSharedPtr<SWidget> ClientSettingsButton;
+    EIslandPanel SettingsOrigin = EIslandPanel::Home;
     TMap<FString, TSharedPtr<SWidget>> Entries;
     FIslandRoomSettings Draft;
+    EIslandRoomNetwork SelectedNetwork{};
     FString Address, LocalError, LastListings, LastRoomId;
     EIslandPanel Page = EIslandPanel::Hidden;
+    bool bSubmittedDraft = false;
     bool bHostLayout = false;
     bool bChooseEmpty = false;
     uint32 Actions = 0;

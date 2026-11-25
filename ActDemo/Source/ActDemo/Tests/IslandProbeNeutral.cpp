@@ -3,6 +3,9 @@
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMeshActor.h"
+#include "Island/ExpeditionDock.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "HAL/FileManager.h"
@@ -95,6 +98,81 @@ namespace
             Terrain->GetChecksum(), FCrc::StrCrc32(*Text));
     }
 
+    constexpr int32 SceneryReportStage = 96;
+
+    struct FSceneryObservation
+    {
+        TArray<UStaticMeshComponent*> Remaining;
+        int32 AttachmentCount = 0;
+        int32 Static = 0, Landmarks = 0, Docks = 0, Neutral = 0, KindMask = 0;
+        FString Digest() const
+        {
+            return FString::Printf(TEXT("static=%d landmark_parts=%d docks=%d neutral=%d kinds=%d remaining=%d"),
+                Static, Landmarks, Docks, Neutral, KindMask, Remaining.Num());
+        }
+    };
+
+    FSceneryObservation SceneryIn(UWorld& World)
+    {
+        FSceneryObservation Observation;
+        TArray<UStaticMeshComponent*> Attachments;
+        auto CheckMesh = [&](UStaticMeshComponent* Mesh, int32& Count)
+        {
+            if (!Mesh || !Mesh->GetStaticMesh()) return;
+            if (!Mesh->IsVisible() && Mesh->GetCollisionEnabled() == ECollisionEnabled::NoCollision) ++Count;
+            else Observation.Remaining.Add(Mesh);
+        };
+        for (TActorIterator<AStaticMeshActor> It(&World); It; ++It)
+            CheckMesh(It->GetStaticMeshComponent(), Observation.Static);
+        for (TActorIterator<AExpeditionLandmark> It(&World); It; ++It)
+        {
+            TInlineComponentArray<UStaticMeshComponent*> Parts(*It);
+            for (auto* Mesh : Parts) CheckMesh(Mesh, Observation.Landmarks);
+        }
+        for (TActorIterator<AExpeditionDock> It(&World); It; ++It)
+            CheckMesh(&It->GetMesh(), Observation.Docks);
+        for (TActorIterator<AIslandNeutralProp> It(&World); It; ++It)
+        {
+            if (It->IsDemolished() && It->IsHidden() && !It->GetActorEnableCollision())
+            {
+                ++Observation.Neutral;
+                Observation.KindMask |= 1 << int32(It->GetKind());
+                continue;
+            }
+            TInlineComponentArray<UStaticMeshComponent*> Parts(*It);
+            for (auto* Part : Parts)
+            {
+                if (!Part->IsVisible() || !Part->IsQueryCollisionEnabled()) continue;
+                const auto Visibility = Part->GetCollisionResponseToChannel(ECC_Visibility);
+                if (Visibility == ECR_Overlap) Attachments.Add(Part);
+                if (Visibility == ECR_Block) Observation.Remaining.Add(Part);
+            }
+        }
+        Observation.AttachmentCount = Attachments.Num();
+        Attachments.Append(Observation.Remaining);
+        Observation.Remaining = MoveTemp(Attachments);
+        return Observation;
+    }
+
+    bool FindSceneryFace(UWorld& World, const AVoxelCharacter& Hero, UStaticMeshComponent& Mesh, FVector& Eye, FVector& Aim)
+    {
+        FCollisionQueryParams Query(SCENE_QUERY_STAT(SceneryProof), false, &Hero);
+        for (const FVector& Side : {FVector::UpVector, FVector::ForwardVector, -FVector::ForwardVector,
+            FVector::RightVector, -FVector::RightVector, -FVector::UpVector, FVector(.6,.6,.53), FVector(-.6,-.6,.53),
+            FVector(.6,-.6,.53), FVector(-.6,.6,.53)})
+        {
+            FHitResult Face;
+            const FVector Center = Mesh.Bounds.Origin;
+            if (!Mesh.LineTraceComponent(Face, Center + Side * (Mesh.Bounds.SphereRadius+150.), Center, Query)) continue;
+            Eye = Face.ImpactPoint + Face.ImpactNormal * 72.;
+            Aim = -Face.ImpactNormal;
+            FHitResult First;
+            if (AIslandNeutralProp::TraceShovel(World,First,Eye,Eye+Aim*112.,Query) && First.GetComponent() == &Mesh)
+                return true;
+        }
+        return false;
+    }
+
     void Photo(const TCHAR* Kind, const TCHAR* State)
     {
         if (!FParse::Param(FCommandLine::Get(), TEXT("IslandScreenshot"))) return;
@@ -135,7 +213,7 @@ void AIslandProbePeer::ClientNeutralInput_Implementation(uint8 Action, FVector T
 
 void AIslandProbePeer::ClientNeutralInspect_Implementation(int32 Stage)
 {
-    const FString Result = Digest(*GetWorld());
+    const FString Result = Stage == SceneryReportStage ? SceneryIn(*GetWorld()).Digest() : Digest(*GetWorld());
     if (!Result.IsEmpty())
     {
         UE_LOG(LogTemp, Display, TEXT("NEUTRAL_QA_VIEW stage=%d digest=%s"), Stage, *Result);
@@ -351,6 +429,11 @@ bool AIslandProbe::NeutralRampPair(const AIslandNeutralProp& Prop, FVector& Star
 
 void AIslandProbe::TickNeutralCheck(double Now)
 {
+    if (FParse::Param(FCommandLine::Get(),TEXT("NeutralDemolitionQA")))
+    {
+        TickSceneryCheck(Now);
+        return;
+    }
     const double Age = Now-StepAt;
     auto& Prop = *NeutralProps[NeutralKind].Get();
     auto& Terrain = *Mode->GetTerrain();
@@ -471,6 +554,11 @@ void AIslandProbe::TickNeutralCheck(double Now)
             FHitResult Hit;
             const bool bBlocked = GetWorld()->LineTraceSingleByChannel(Hit,Local(Prop,248,-168,110.),Local(Prop,248,168,110.),ECC_Visibility);
             Require(bBlocked && Hit.GetActor()==&Prop, TEXT("the settled trunk spans the route at character height"));
+            const FVector Far = Local(Prop,440.,0.,90.);
+            const bool bOuter = GetWorld()->LineTraceSingleByChannel(Hit, Far-Prop.GetActorRightVector()*300.,
+                Far+Prop.GetActorRightVector()*300., ECC_Visibility) && Hit.GetActor() == &Prop;
+            Require(bOuter, TEXT("fallen tree blocks the outer crossing over thirteen metres from its root"));
+            UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_RANGE tree_outer_cm=%.0f"),FVector::Dist2D(Far,Prop.GetActorLocation()));
             Next();
             return;
         }
@@ -636,6 +724,14 @@ void AIslandProbe::TickNeutralCheck(double Now)
         const FVector Center=Local(Prop,0,0);
         if (NeutralStep==2)
         {
+            FHitResult Port, Starboard;
+            auto EndCap = [&](double Y, FHitResult& Hit)
+            {
+                return GetWorld()->LineTraceSingleByChannel(Hit,Local(Prop,0,Y,500.),Local(Prop,0,Y,-50.),ECC_Visibility)
+                    && Hit.GetActor() == &Prop;
+            };
+            Require(EndCap(-365.,Port) && EndCap(365.,Starboard),TEXT("ship bow and stern retain solid collision at full length"));
+            UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_RANGE ship_solid_span_cm=%.0f"),FVector::Dist2D(Port.ImpactPoint,Starboard.ImpactPoint));
             NeutralBase=Surface(Terrain,Center);
             Next();
             return;
@@ -868,6 +964,18 @@ void AIslandProbe::TickNeutralCheck(double Now)
             if (Prop.GetPhase()!=2 || Terrain.IsBusy()) return;
             FVector A,B;
             if (!NeutralRampPair(Prop,A,B)) return;
+            FBox2D Changed(ForceInit);
+            for (int32 I=0; I<NeutralSampleLocations.Num(); ++I)
+            {
+                const FVector& P = NeutralSampleLocations[I];
+                if (Surface(Terrain,P) > NeutralSurfaceBefore[I]+12.)
+                {
+                    const FVector Delta = P - Prop.GetActorLocation();
+                    Changed += FVector2D(FVector::DotProduct(Delta,Prop.GetActorForwardVector()),FVector::DotProduct(Delta,Prop.GetActorRightVector()));
+                }
+            }
+            Require(Changed.bIsValid && Changed.GetSize().X > 400. && Changed.GetSize().Y > 260.,TEXT("released sand changes several metres of both lanes"));
+            UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_RANGE hopper_fill_length_cm=%.0f hopper_fill_width_cm=%.0f"),Changed.GetSize().X,Changed.GetSize().Y);
             NeutralWalk(2,A,B);
             Next();
             return;
@@ -897,7 +1005,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
     if (NeutralKind==3)
     {
         const bool bScreensLane = AIslandNeutralProp::AnySailObscures(*GetWorld(),
-            Local(Prop,-100.,150.,110.),Local(Prop,100.,150.,110.));
+            Local(Prop,-100.,180.,110.),Local(Prop,100.,180.,110.));
         if (NeutralStep==2)
         {
             if (Prop.GetPhase()==1) { Next(); return; }
@@ -909,6 +1017,7 @@ void AIslandProbe::TickNeutralCheck(double Now)
             Require(bScreensLane,TEXT("lowered sail hides a crew across the outer half of the fork"));
             if (!bScreensLane) return;
             UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_SHARED kind=Sail state=active peers=3 digest=%s"),*NeutralExpected);
+            UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_RANGE sail_sight_offset_cm=%.0f"),FVector::Dist2D(Local(Prop,0,180.),Prop.GetActorLocation()));
             Capture(TEXT("After"));
             UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_SAIL lowered_by=0"));
             Next();
@@ -937,7 +1046,13 @@ void AIslandProbe::TickNeutralCheck(double Now)
             {
                 Mode->RecoverPlayer(*Players[1]);
                 FVector Foot;
-                if (!NeutralFloorPose(2,B,Foot)) return;
+                bool bFound = false;
+                for (const FVector Dir : {Prop.GetActorRightVector(), -Prop.GetActorRightVector(), Prop.GetActorForwardVector(), -Prop.GetActorForwardVector()})
+                {
+                    if (NeutralFloorPose(2,B+Dir*250.,Foot) && FMath::Abs(B.Z-Foot.Z)<65.) { bFound=true; break; }
+                }
+                if (!bFound) return;
+                NeutralWalkFrom=Foot;
                 Place(2,Foot+FVector(0,0,93));
                 NeutralBase=Foot.Z;
                 NeutralPeak=Foot.Z;
@@ -975,7 +1090,9 @@ void AIslandProbe::TickNeutralCheck(double Now)
             if (!Hero.GetCharacterMovement()->IsMovingOnGround()) return;
             UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_TIDE_BOOST team=1 height=%.0f advance=%.0f landed_rise=%.0f"),NeutralPeak-NeutralBase,
                 FVector::Dist2D(Foot,B),Foot.Z-NeutralBase);
-            Require(Foot.Z-NeutralBase>18. && FVector::Dist2D(Foot,B)>650., TEXT("the boosted guest lands uphill beyond six metres on walkable ground"));
+            UE_LOG(LogTemp,Display,TEXT("NEUTRAL_QA_RANGE tide_entry_offset_cm=%.0f tide_landing_from_mouth_cm=%.0f"),
+                FVector::Dist2D(NeutralWalkFrom,B),FVector::Dist2D(Foot,B));
+            Require(Foot.Z-NeutralBase>18. && FVector::Dist2D(Foot,B)>1000., TEXT("outer spray launches the guest onto walkable ground over ten metres from the mouth"));
             Mode->RecoverPlayer(*Players[2]);
             Next();
             return;
@@ -1009,5 +1126,87 @@ void AIslandProbe::TickNeutralCheck(double Now)
             }
             Aim(1,DigInput,FVector(B.X,B.Y,Surface(Terrain,B)),&Terrain);
         }
+    }
+}
+
+void AIslandProbe::TickSceneryCheck(double Now)
+{
+    if (Now - StepAt > 28.)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SCENERY_QA_STALLED hits=%d %s"), SceneryHits, *SceneryIn(*GetWorld()).Digest());
+        Require(false,TEXT("structure was unreachable or its collision did not replicate"));
+        return;
+    }
+    if (Now - LastAction < .12) return;
+    LastAction = Now;
+    auto& Player = *Mode->GetPlayers()[0];
+    auto& Hero = *Player.GetHero();
+    auto& World = *GetWorld();
+    const FSceneryObservation Observation = SceneryIn(World);
+    if (SceneryHits == 0)
+    {
+        const int32 Expected[] = {10, 2, 5, 7, 0};
+        for (TActorIterator<AIslandNeutralProp> It(&World); It; ++It)
+        {
+            int32 Count = 0;
+            for (int32 I = 0; I < Observation.AttachmentCount; ++I)
+            {
+                auto* Mesh = Observation.Remaining[I];
+                if (Mesh->GetOwner() != *It) continue;
+                ++Count;
+                Require(Mesh->GetCollisionResponseToChannel(ECC_Pawn) == ECR_Ignore &&
+                    Mesh->GetCollisionResponseToChannel(ECC_Camera) == ECR_Ignore, TEXT("shovel attachment admits pawn and camera"));
+                FVector Eye, Aim;
+                if (FindSceneryFace(World, Hero, *Mesh, Eye, Aim))
+                {
+                    FHitResult Ordinary;
+                    FCollisionQueryParams Query(SCENE_QUERY_STAT(AttachmentSight), false, &Hero);
+                    World.LineTraceSingleByChannel(Ordinary, Eye, Eye+Aim*112., ECC_Visibility, Query);
+                    Require(Ordinary.GetComponent() != Mesh, TEXT("shovel attachment admits ordinary sight and use traces"));
+                    UE_LOG(LogTemp, Display, TEXT("SCENERY_QA_ATTACHMENT_FACE kind=%d part=%s"), int32(It->GetKind()), *Mesh->GetName());
+                }
+            }
+            Require(Count == Expected[int32(It->GetKind())], TEXT("all solid attachments have shovel queries"));
+        }
+    }
+    if (!Observation.Remaining.IsEmpty())
+    {
+        for (int32 I = 0; I < Observation.Remaining.Num(); ++I)
+        {
+            const int32 Index = I < Observation.AttachmentCount ? (I + SceneryHits) % Observation.AttachmentCount : I;
+            auto* Mesh = Observation.Remaining[Index];
+            FVector Eye, Aim;
+            if (!FindSceneryFace(World,Hero,*Mesh,Eye,Aim)) continue;
+            Hero.SetActorLocation(Eye-(Hero.GetAimOrigin()-Hero.GetActorLocation()),false,nullptr,ETeleportType::TeleportPhysics);
+            Mode->RequestEdit(Player, EVoxelAction::Punch, Aim);
+            ++SceneryHits;
+            return;
+        }
+        UE_LOG(LogTemp, Error, TEXT("SCENERY_QA_UNREACHABLE %s owner=%s first=%s"), *Observation.Digest(),
+            *GetNameSafe(Observation.Remaining[0]->GetOwner()), *Observation.Remaining[0]->GetName());
+        Require(false, TEXT("could not trace any remaining structure face"));
+        return;
+    }
+    if (NeutralStep != SceneryReportStage)
+    {
+        Require(Observation.Static >= 48 && Observation.Landmarks >= 13 && Observation.Docks == 8 && Observation.KindMask == 31,
+            TEXT("removed every authored category and all five neutral kinds"));
+        Mode->RecoverPlayer(Player);
+        FHitResult Floor;
+        FCollisionQueryParams Q(SCENE_QUERY_STAT(SceneryReturn),false,&Hero);
+        const FVector Center = Hero.GetActorLocation();
+        const auto* Cap = Hero.GetCapsuleComponent();
+        const bool bFloor = World.LineTraceSingleByChannel(Floor, Center, Center - FVector(0,0,Cap->GetScaledCapsuleHalfHeight()+95.), ECC_Visibility, Q);
+        Require(bFloor && Floor.ImpactNormal.Z > .6 && !World.OverlapBlockingTestByChannel(Center,FQuat::Identity,ECC_Pawn,
+            FCollisionShape::MakeCapsule(Cap->GetScaledCapsuleRadius()-2.,Cap->GetScaledCapsuleHalfHeight()-2.),Q), TEXT("safe standing room after destroying every dock"));
+        SetNeutralStep(SceneryReportStage, Now);
+        NeutralExpected = Observation.Digest();
+    }
+    for (int32 Seat=0; Seat<Peers.Num(); ++Seat)
+        if (!Reports.Contains(Seat)) Peers[Seat]->ClientNeutralInspect(SceneryReportStage);
+    if (Reports.Num() == Peers.Num())
+    {
+        UE_LOG(LogTemp, Display, TEXT("SCENERY_QA_DONE %s hits=%d peers=%d recovery=1"), *NeutralExpected, SceneryHits, Reports.Num());
+        Advance(EStep::Done);
     }
 }

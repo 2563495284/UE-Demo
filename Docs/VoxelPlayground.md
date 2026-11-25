@@ -7,11 +7,11 @@ bash Scripts/actdemo.sh voxel-host
 bash Scripts/actdemo.sh voxel-join <房主局域网IP>
 ```
 
-把 `Builds/VoxelPlayground/Mac/ActDemo.app` 单独拷到另一台 Mac 时，可以通过系统的 `open` 直接传入启动参数。
+体素测试使用远征岛试玩包。把 `Builds/TreasureIsland/Mac/远征岛.app` 拷到另一台 Mac 后，可以通过系统的 `open` 指定原型地图。
 
 ```bash
-open -n -a /path/to/ActDemo.app --args '/Game/VoxelPlayground/L_VoxelPlayground?listen' -windowed -ResX=1280 -ResY=720
-open -n -a /path/to/ActDemo.app --args <房主局域网IP> -windowed -ResX=1280 -ResY=720
+open -n /path/to/远征岛.app --args '/Game/VoxelPlayground/L_VoxelPlayground?listen' -windowed -ResX=1280 -ResY=720
+open -n /path/to/远征岛.app --args <房主局域网IP> -windowed -ResX=1280 -ResY=720
 ```
 
 两端加载并核对初始地形后开始。先在 `WALL` 砸穿岩壁，让另一名玩家走过洞口。到 `SHAFT` 对着脚下砸出竖井。到 `CLIMB / FILL` 贴墙攀爬或把岩石补成踏板。回填会避开玩家，长按 R 两秒返回起点。重新开图会恢复初始地形。
@@ -24,7 +24,7 @@ open -n -a /path/to/ActDemo.app --args <房主局域网IP> -windowed -ResX=1280 
 | 回填 | Q |
 | 脱困 | 长按 R 两秒 |
 
-编辑器中可打开 `L_VoxelPlayground`，将 PIE 设为 2 名玩家和 `Play As Listen Server`。构建与复测命令如下。`voxel-map` 在缺少地图时生成白模场景。打包输出在 `Builds/VoxelPlayground/Mac`。
+编辑器中可打开 `L_VoxelPlayground`，将 PIE 设为 2 名玩家和 `Play As Listen Server`。`voxel-map` 在缺少地图时生成白模场景。`voxel-package` 与 `package` 生成同一份远征岛试玩包。
 
 ```bash
 bash Scripts/actdemo.sh build

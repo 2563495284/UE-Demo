@@ -24,10 +24,18 @@ struct FIslandClues
     FIslandClues() { Points.SetNumZeroed(4); }
 
     UPROPERTY() uint8 Mask = 0;
+    // Known exact positions still available for the crew to excavate and claim.
+    UPROPERTY() uint8 ScoutedMask = 0;
     UPROPERTY() TArray<FVector2D> Points;
     UPROPERTY() FVector2D Crossing = FVector2D::ZeroVector;
+    UPROPERTY() bool bUsesKeyFragments = false;
+    UPROPERTY() bool bKeySpent = false;
 
     bool Complete() const { return Mask == 15; }
+    static constexpr int32 FragmentsPerKey = 3;
+    int32 FragmentCount() const { return bUsesKeyFragments ? Count() % FragmentsPerKey : 0; }
+    bool HasKey() const { return bUsesKeyFragments && Count() >= FragmentsPerKey && !bKeySpent; }
+    bool CanOpenPrize() const { return Complete() && (!bUsesKeyFragments || HasKey()); }
     int32 Count() const;
 };
 
@@ -82,11 +90,12 @@ namespace IslandRules
     bool InSea(const FVector& Head);
     ACTDEMO_API TArray<FBox2D> CollectSearchObstacles(UWorld& World);
 #if !UE_BUILD_SHIPPING
-    bool AuditSearchAreas(TConstArrayView<FIslandSearchCircle> Circles, const FVoxelDensity& Density, TConstArrayView<FBox2D> Obstacles);
+    bool AuditSearchAreas(int32 DecoyCount, TConstArrayView<FIslandSearchCircle> Circles, const FVoxelDensity& Density, TConstArrayView<FBox2D> Obstacles,
+        const TFunction<bool(FVector2D)>& CanReachDecoy);
 #endif
     bool IsValidLayout(const FIslandTreasureLayout& Layout, TConstArrayView<FIslandSearchCircle> Circles,
         const FVoxelDensity& Density, FString* Error = nullptr, TConstArrayView<FBox2D> Obstacles = {});
     ACTDEMO_API bool GenerateLayout(int32 Seed, int32 DecoyCount, TConstArrayView<FIslandSearchCircle> Circles,
         const FVoxelDensity& Density, FIslandTreasureLayout& Layout, FString* Error = nullptr, bool bFixedOnly = false,
-        TConstArrayView<FBox2D> Obstacles = {});
+        TConstArrayView<FBox2D> Obstacles = {}, const TFunction<bool(FVector2D)>& CanReachDecoy = {});
 }

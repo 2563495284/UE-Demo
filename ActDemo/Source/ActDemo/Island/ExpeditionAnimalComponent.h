@@ -21,6 +21,9 @@ public:
     void PlayDig();
     void PlayThrow();
     void SetMarks(int32 Count);
+#if !UE_BUILD_SHIPPING
+    bool ShowsOutfit(bool bDisguised) const;
+#endif
 private:
     void Build();
     UStaticMeshComponent* Shape(USceneComponent* Parent, const FVector& At, const FVector& Size,
@@ -30,6 +33,9 @@ private:
     UPROPERTY() TObjectPtr<UStaticMesh> Cone;
     UPROPERTY() TObjectPtr<UMaterialInterface> Base;
     UPROPERTY() TObjectPtr<USceneComponent> Body;
+    UPROPERTY() TObjectPtr<USceneComponent> AnimalFeatures;
+    UPROPERTY() TObjectPtr<USceneComponent> FogSuit;
+    bool bFogged = false;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> CheekMud;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> Badge;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Hands;

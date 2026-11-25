@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "ActDemo" / "ActDemo.uproject"
-APP = ROOT / "Builds/VoxelPlayground/Mac/ActDemo.app"
+APP = ROOT / "Builds/TreasureIsland/Mac/远征岛.app"
 MAP = "/Game/VoxelPlayground/L_VoxelPlayground"
 
 
@@ -82,7 +82,7 @@ def run(args, ip, mode, directory):
         base = [str(binary), str(PROJECT), "-game"]
     else:
         base = [str(args.app / "Contents/MacOS/ActDemo")]
-    shared = ["-VoxelQA", "-unattended", "-nosound", "-NoSplash", "-NoTrace", "-stdout", "-FullStdOutLogOutput",
+    shared = ["-VoxelQA", "-IslandLAN", "-unattended", "-nosound", "-NoSplash", "-NoTrace", "-stdout", "-FullStdOutLogOutput",
               "-ExecCmds=t.MaxFPS 60", "-windowed", "-ResX=960", "-ResY=540"]
     if not args.render:
         shared.append("-nullrhi")
@@ -96,7 +96,7 @@ def run(args, ip, mode, directory):
             processes[role] = process, log
 
         try:
-            launch("host", MAP + "?listen")
+            launch("host", MAP + "?listen?bIsLanMatch")
             wait_for(processes, lambda logs: "VOXEL_INITIAL crc=" in logs["host"], 100, "Host map never initialized")
             launch("client", f"{ip}:{args.port}")
             print(f"{mode}: host and guest started on port {args.port}", flush=True)

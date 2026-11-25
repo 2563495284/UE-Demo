@@ -15,8 +15,19 @@ namespace NeutralPropColors
     const FColor Shale(78,97,106), Slate(113,137,143), Lagoon(57,157,184), Crest(213,240,235);
 }
 
+void AIslandNeutralProp::SetPieceCollision(UStaticMeshComponent& Mesh, EPieceCollision Collision)
+{
+    Mesh.SetCollisionResponseToAllChannels(Collision == EPieceCollision::Solid ? ECR_Block : ECR_Ignore);
+    Mesh.SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+    if (Collision == EPieceCollision::ShovelOnly)
+        Mesh.SetCollisionResponseToChannel(ECC_Visibility, ECR_Overlap);
+    else if (Collision == EPieceCollision::VisibilityOnly)
+        Mesh.SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+    Mesh.SetCollisionEnabled(Collision == EPieceCollision::Effect ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryOnly);
+}
+
 UStaticMeshComponent* AIslandNeutralProp::Piece(UStaticMesh* Shape, FVector Center, FVector Dimensions,
-    FColor Color, bool bSolid, FRotator Rotation, USceneComponent* Parent)
+    FColor Color, EPieceCollision Collision, FRotator Rotation, USceneComponent* Parent)
 {
     // CharacterMovement replicates the component a player stands on. Give the
     // locally reconstructed deck/trunk the same network-resolvable path on all peers.
@@ -29,9 +40,7 @@ UStaticMeshComponent* AIslandNeutralProp::Piece(UStaticMesh* Shape, FVector Cent
     Mesh->SetRelativeLocationAndRotation(Center, Rotation);
     Mesh->SetRelativeScale3D(Dimensions / 100.);
     Mesh->SetCanEverAffectNavigation(false);
-    Mesh->SetCollisionResponseToAllChannels(ECR_Block);
-    Mesh->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-    Mesh->SetCollisionEnabled(bSolid ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+    SetPieceCollision(*Mesh, Collision);
     Mesh->SetGenerateOverlapEvents(false);
     Mesh->SetCastShadow(true);
     const FPaint* Existing = Paints.FindByPredicate([Color](const FPaint& P){ return P.Color == Color; });
@@ -51,14 +60,14 @@ UStaticMeshComponent* AIslandNeutralProp::Piece(UStaticMesh* Shape, FVector Cent
 }
 
 UStaticMeshComponent* AIslandNeutralProp::Beam(FVector A, FVector B, double Width, FColor Color,
-    bool bSolid, USceneComponent* Parent)
+    EPieceCollision Collision, USceneComponent* Parent)
 {
     // UE composes component scale axis by axis. Aim the cylinder after scaling its endpoints
     // so angled spars and the crossbar still join their posts on wide, low structures.
     const FVector ParentScale = (Parent ? Parent : GetRootComponent())->GetComponentScale();
     const FVector Span = (B-A)*ParentScale;
     const double Length = Span.Size() / ParentScale.Z;
-    return Piece(Cylinder, (A+B)*.5, FVector(Width,Width,Length), Color, bSolid,
+    return Piece(Cylinder, (A+B)*.5, FVector(Width,Width,Length), Color, Collision,
         FRotationMatrix::MakeFromZ(Span).Rotator(), Parent);
 }
 
@@ -67,28 +76,28 @@ void AIslandNeutralProp::BuildTree()
     using namespace NeutralPropColors;
     // Only the two supports sit on the ground. The span in between stays editable.
     Piece(Ball, {-9,7,-51}, {170,157,184}, Rock);
-    Piece(Ball, {485,0,12}, {125,172,121}, Rock, true, FRotator(5,12,0));
+    Piece(Ball, {485,0,12}, {125,172,121}, Rock, EPieceCollision::Solid, FRotator(5,12,0));
     Piece(Ball, {495,46,-5}, {98,97,111}, RockLight);
     HitTarget = Piece(Cylinder, {0,0,52}, {123,123,144}, BarkLight);
     for (int32 Index = 0; Index < 5; ++Index)
     {
         const double A = Index * UE_TWO_PI / 5.;
         const FVector End(87.*FMath::Cos(A),87.*FMath::Sin(A),-12.);
-        Beam({0,0,33}, End, 26., Bark, false);
+        Beam({0,0,33}, End, 26., Bark, EPieceCollision::ShovelOnly);
     }
     MovingTree = NewObject<USceneComponent>(this, TEXT("TreePivot"));
     MovingTree->SetupAttachment(GetRootComponent());
     MovingTree->SetRelativeLocation({0,0,90});
     AddInstanceComponent(MovingTree);
     MovingTree->RegisterComponent();
-    TreeSolids.Add(Beam({0,0,-9},{0,0,485},92.,Bark,true,MovingTree));
-    TreeSolids.Add(Beam({0,0,225},{-22,85,363},36.,BarkLight,true,MovingTree));
-    TreeSolids.Add(Beam({0,0,300},{16,-67,423},35.,BarkLight,true,MovingTree));
-    Beam({-10,25,300},{50,42,394},21.,Bark,false,MovingTree);
-    Piece(Ball, {25,80,393},{188,155,122},Leaf,false,FRotator(8,23,4),MovingTree);
-    Piece(Ball, {0,-69,442},{195,165,138},Leaf,false,FRotator(-8,-23,7),MovingTree);
-    Piece(Ball, {32,12,487},{230,183,144},LeafLight,false,FRotator(0,41,12),MovingTree);
-    Piece(Ball, {58,17,528},{154,137,100},Leaf,false,FRotator(0,-20,-4),MovingTree);
+    TreeSolids.Add(Beam({0,0,-9},{0,0,485},92.,Bark,EPieceCollision::Solid,MovingTree));
+    TreeSolids.Add(Beam({0,0,225},{-22,85,363},36.,BarkLight,EPieceCollision::Solid,MovingTree));
+    TreeSolids.Add(Beam({0,0,300},{16,-67,423},35.,BarkLight,EPieceCollision::Solid,MovingTree));
+    Beam({-10,25,300},{50,42,394},21.,Bark,EPieceCollision::ShovelOnly,MovingTree);
+    Piece(Ball, {25,80,393},{188,155,122},Leaf,EPieceCollision::ShovelOnly,FRotator(8,23,4),MovingTree);
+    Piece(Ball, {0,-69,442},{195,165,138},Leaf,EPieceCollision::ShovelOnly,FRotator(-8,-23,7),MovingTree);
+    Piece(Ball, {32,12,487},{230,183,144},LeafLight,EPieceCollision::ShovelOnly,FRotator(0,41,12),MovingTree);
+    Piece(Ball, {58,17,528},{154,137,100},Leaf,EPieceCollision::ShovelOnly,FRotator(0,-20,-4),MovingTree);
 }
 
 void AIslandNeutralProp::AnimateTree(double Age)
@@ -106,7 +115,7 @@ void AIslandNeutralProp::AnimateTree(double Age)
     if (bTreeSolidsEnabled != bSolid)
     {
         for (UStaticMeshComponent* Mesh : TreeSolids)
-            Mesh->SetCollisionEnabled(bSolid ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+            SetPieceCollision(*Mesh, bSolid ? EPieceCollision::Solid : EPieceCollision::ShovelOnly);
         bTreeSolidsEnabled = bSolid;
     }
 }
@@ -125,7 +134,7 @@ void AIslandNeutralProp::BuildShip()
                 const double X = Side * (137. + 8. * Row);
                 Piece(Cube, {X,End*184.,-130.+Row*67.}, {23,168,69}, Row%2 ? HullLight : Hull);
                 Piece(Cube, {Side*(100.+8.*Row), End*310.,-129.+Row*67.}, {24,135,69},
-                    Row%2 ? Hull : HullLight, true, FRotator(0,Side*End*29.,0));
+                    Row%2 ? Hull : HullLight, EPieceCollision::Solid, FRotator(0,Side*End*29.,0));
             }
             Beam({Side*130.,End*108.,-148.},{Side*169.,End*108.,150.},19.,Frame);
             Beam({Side*121.,End*255.,-115.},{Side*163.,End*255.,146.},20.,Frame);
@@ -144,13 +153,13 @@ void AIslandNeutralProp::BuildShip()
     // End panels close only the narrow bow and stern; both side passages are genuinely open.
     for (const double End : {-1.,1.})
     {
-        Piece(Cube, {0,End*365.,6.}, {184,32,250}, Hull, true, FRotator(0,0,End*8.));
+        Piece(Cube, {0,End*365.,6.}, {184,32,250}, Hull, EPieceCollision::Solid, FRotator(0,0,End*8.));
         Beam({0,End*329.,100.},{0,End*394.,192.},25.,Frame);
     }
     Beam({38,217.,153.},{67,220.,590.},29.,Frame);
     Beam({59,145.,465.},{59,295.,489.},16.,Frame);
     for (double Z : {187.,202.})
-        Piece(Cylinder, {39,218.,Z},{29,29,8},Rope,false);
+        Piece(Cylinder, {39,218.,Z},{29,29,8},Rope,EPieceCollision::ShovelOnly);
 }
 
 void AIslandNeutralProp::BuildHopper()
@@ -161,26 +170,26 @@ void AIslandNeutralProp::BuildHopper()
         for (double Y : {-94.,94.})
         {
             Piece(Cube, Leg+FVector(X,Y,72.), {22,22,227}, Frame);
-            Piece(Cube, Leg+FVector(X,Y,169.), {31,31,27}, Iron, false);
+            Piece(Cube, Leg+FVector(X,Y,169.), {31,31,27}, Iron, EPieceCollision::ShovelOnly);
         }
     for (const double Side : {-1.,1.})
     {
         Beam({-190.,Side*96.,22.},{-79.,Side*96.,167.},15.,Ochre);
-        Piece(Cube, {-131.,Side*97.,213.}, {173,17,100}, OchreLight, true, FRotator(0,0,-Side*18.));
+        Piece(Cube, {-131.,Side*97.,213.}, {173,17,100}, OchreLight, EPieceCollision::Solid, FRotator(0,0,-Side*18.));
         Piece(Cube, {-134.,Side*113.,268.}, {186,16,15}, Iron);
     }
-    Piece(Cube, {-211.,0.,217.}, {17,200,102},Ochre,true,FRotator(12,0,0));
-    Piece(Cube, {-57.,0.,224.}, {17,201,87},Ochre,true,FRotator(-13,0,0));
+    Piece(Cube, {-211.,0.,217.}, {17,200,102},Ochre,EPieceCollision::Solid,FRotator(12,0,0));
+    Piece(Cube, {-57.,0.,224.}, {17,201,87},Ochre,EPieceCollision::Solid,FRotator(-13,0,0));
     Piece(Cube, {-133.,0.,179.}, {146,150,14}, Frame);
-    SandLoad = Piece(Ball, {-135.,0.,247.}, {161,183,59}, Sand, false);
-    Piece(Cube, {9.,0.,142.}, {148,70,11}, OchreLight, true, FRotator(-24,0,0));
+    SandLoad = Piece(Ball, {-135.,0.,247.}, {161,183,59}, Sand, EPieceCollision::ShovelOnly);
+    Piece(Cube, {9.,0.,142.}, {148,70,11}, OchreLight, EPieceCollision::Solid, FRotator(-24,0,0));
     for (const double Side : {-1.,1.})
-        Piece(Cube, {8.,Side*35.,150.}, {151,10,21}, Ochre, true, FRotator(-24,0,0));
+        Piece(Cube, {8.,Side*35.,150.}, {151,10,21}, Ochre, EPieceCollision::Solid, FRotator(-24,0,0));
     Gate = Piece(Cube, {-53.,0.,179.}, {16,73,58}, Iron);
     // Pin protrudes toward the player, well clear of the sand landing zone.
     HitTarget = Beam({-95.,-100.,151.},{-95.,-171.,97.},34.,Sand);
     for (int32 I=0; I<5; ++I)
-        SandSpill.Add(Piece(Ball, FVector::ZeroVector, {15,13,15}, Sand, false));
+        SandSpill.Add(Piece(Ball, FVector::ZeroVector, {15,13,15}, Sand, EPieceCollision::Effect));
 }
 
 void AIslandNeutralProp::AnimateHopper(double Age)
@@ -188,7 +197,9 @@ void AIslandNeutralProp::AnimateHopper(double Age)
     const bool bReleased = State.Phase != 0;
     const double Open = bReleased ? (State.Phase == 2 ? 1. : FMath::Clamp(Age/.45,0.,1.)) : 0.;
     Gate->SetRelativeLocation({-53.,0.,179.+53.*Open});
-    SandLoad->SetVisibility(State.Phase != 2 && Open < .99);
+    const bool bLoaded = State.Phase != 2 && Open < .99;
+    SandLoad->SetVisibility(bLoaded);
+    SandLoad->SetCollisionEnabled(bLoaded ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
     SandLoad->SetRelativeLocation({-135.,0.,247.-46.*Open});
     HitTarget->SetVisibility(!bReleased);
     HitTarget->SetCollisionEnabled(bReleased ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryOnly);
@@ -206,19 +217,19 @@ void AIslandNeutralProp::BuildSail()
     for (const double Side : {-1.,1.})
     {
         Beam({0,Side*217.,-76.},{0,Side*217.,309.},20.,Mast);
-        Piece(Cylinder,{0,Side*217.,277.},{27,27,18},Rope,false);
+        Piece(Cylinder,{0,Side*217.,277.},{27,27,18},Rope,EPieceCollision::ShovelOnly);
         Beam({0,Side*217.,172.},{64.,Side*225.,-4.},11.,Mast);
     }
     Beam({0,-239.,291.},{0,239.,291.},19.,Mast);
-    Beam({-10.,-181.,292.},{-29.,-169.,85.},7.,Rope,false);
+    Beam({-10.,-181.,292.},{-29.,-169.,85.},7.,Rope,EPieceCollision::ShovelOnly);
     HitTarget = Piece(Ball, {-30,-169,82},{24,27,34},Rope);
     HitTarget->SetCollisionResponseToChannel(ECC_Pawn,ECR_Ignore);
     for (int32 I=0; I<3; ++I)
     {
-        Cloth.Add(Piece(Cube,{0,0,250.},{7,135,20},I==1 ? VioletLight : Violet,false));
-        Cloth.Add(Piece(Cube,{0,0,250.},{9,135,7},Rope,false));
+        Cloth.Add(Piece(Cube,{0,0,250.},{7,135,20},I==1 ? VioletLight : Violet,EPieceCollision::VisibilityOnly));
+        Cloth.Add(Piece(Cube,{0,0,250.},{9,135,7},Rope,EPieceCollision::ShovelOnly));
     }
-    Beam({0,-209.,282.},{0,209.,282.},31.,Violet,false);
+    Beam({0,-209.,282.},{0,209.,282.},31.,Violet,EPieceCollision::ShovelOnly);
     ClothVolume = NewObject<UBoxComponent>(this, TEXT("SailPassage"));
     ClothVolume->SetupAttachment(GetRootComponent());
     ClothVolume->SetRelativeLocation({0,0,140});
@@ -266,14 +277,14 @@ void AIslandNeutralProp::BuildTide()
             const double T = I*UE_TWO_PI/8.;
             const FVector P = Center + FVector(FMath::Cos(T)*81.,FMath::Sin(T)*81.,1.);
             // Leave the centre ray and the terrain fill brush unobstructed.
-            Piece(Cube,P,{40.,64.,27.+(I%3)*5.},I%2 ? Slate : Shale,false,FRotator(0,I*45.,0));
+            Piece(Cube,P,{40.,64.,27.+(I%3)*5.},I%2 ? Slate : Shale,EPieceCollision::VisibilityOnly,FRotator(0,I*45.,0));
         }
-        Jets.Add(Piece(Ball,Center,{55,58,45},Lagoon,false));
-        Foam.Add(Piece(Ball,Center,{55,52,14},Crest,false));
+        Jets.Add(Piece(Ball,Center,{55,58,45},Lagoon,EPieceCollision::Effect));
+        Foam.Add(Piece(Ball,Center,{55,52,14},Crest,EPieceCollision::Effect));
         for (int32 I=0; I<4; ++I)
-            Spray.Add(Piece(Ball,Center,{11,11,17},I%2 ? Crest : Lagoon,false));
+            Spray.Add(Piece(Ball,Center,{11,11,17},I%2 ? Crest : Lagoon,EPieceCollision::Effect));
     }
-    Spillway = Piece(Ball, {-89,0,11},{174,36,22},Lagoon,false);
+    Spillway = Piece(Ball, {-89,0,11},{174,36,22},Lagoon,EPieceCollision::Effect);
 }
 
 void AIslandNeutralProp::AnimateTide(double Now)

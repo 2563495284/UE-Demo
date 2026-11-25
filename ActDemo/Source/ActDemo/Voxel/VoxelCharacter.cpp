@@ -6,7 +6,6 @@
 #include "Island/ExpeditionAnimalComponent.h"
 
 #include "Animation/AnimInstance.h"
-#include "Animation/AnimSequence.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -17,6 +16,7 @@
 namespace
 {
     constexpr double AimHeight = 49.0;
+    constexpr float ToolStrokeDuration = .32f;
 }
 
 AVoxelCharacter::AVoxelCharacter(const FObjectInitializer& Initializer)
@@ -40,10 +40,8 @@ AVoxelCharacter::AVoxelCharacter(const FObjectInitializer& Initializer)
     GetMesh()->bEnableUpdateRateOptimizations = true;
     static ConstructorHelpers::FObjectFinder<USkeletalMesh> Manny(TEXT("/Game/Characters/Mannequins/Meshes/SKM_Manny_Simple"));
     static ConstructorHelpers::FClassFinder<UAnimInstance> Anim(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/ABP_Unarmed"));
-    static ConstructorHelpers::FObjectFinder<UAnimSequence> Swing(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_01"));
     GetMesh()->SetSkeletalMesh(Manny.Object);
     GetMesh()->SetAnimInstanceClass(Anim.Class);
-    SwingAnimation = Swing.Object;
 
     bUseControllerRotationYaw = false;
     UCharacterMovementComponent* Movement = GetCharacterMovement();
@@ -204,6 +202,13 @@ bool AVoxelCharacter::IsClimbingRock() const
 void AVoxelCharacter::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+    if (ToolStrokeRemaining > 0.f)
+    {
+        ToolStrokeRemaining = FMath::Max(0.f, ToolStrokeRemaining - DeltaSeconds);
+        const float Arc = FMath::Sin(PI * ToolStrokeRemaining / ToolStrokeDuration);
+        const FQuat Lean(FVector::RightVector, FMath::DegreesToRadians(ToolStrokeDegrees * Arc));
+        GetMesh()->SetRelativeRotation(Lean * GetBaseRotationOffset());
+    }
     if (IsLocallyControlled())
     {
         const bool bLow = IsMudCompact();
@@ -249,13 +254,10 @@ void AVoxelCharacter::PlayTerrainSwing(EVoxelAction Action)
         ExpeditionAnimal->PlayDig();
         return;
     }
-    if (UAnimInstance* Anim = GetMesh()->GetAnimInstance(); Anim && SwingAnimation)
-    {
-        // The reused punch has forward root motion. Terrain edits leave movement to CharacterMovement.
-        Anim->SetRootMotionMode(ERootMotionMode::IgnoreRootMotion);
-        Anim->PlaySlotAnimationAsDynamicMontage(SwingAnimation, TEXT("DefaultSlot"), .06f, .12f,
-            Action == EVoxelAction::DigDown ? 1.7f : 2.f);
-    }
+    // Sandbox and classic crews use the locomotion mesh. Pitch the body toward the
+    // tool contact while leaving its walking animation and movement capsule in control.
+    ToolStrokeDegrees = Action == EVoxelAction::Fill ? -9.f : Action == EVoxelAction::DigDown ? 25.f : 16.f;
+    ToolStrokeRemaining = ToolStrokeDuration;
 }
 
 void AVoxelCharacter::MulticastExpeditionDig_Implementation()

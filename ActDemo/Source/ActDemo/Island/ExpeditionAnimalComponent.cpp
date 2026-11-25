@@ -48,6 +48,14 @@ UStaticMeshComponent* UExpeditionAnimalComponent::Shape(USceneComponent* Parent,
     return Mesh;
 }
 
+#if !UE_BUILD_SHIPPING
+bool UExpeditionAnimalComponent::ShowsOutfit(bool bDisguised) const
+{
+    return FogSuit && AnimalFeatures && FogSuit->IsVisible() == bDisguised
+        && AnimalFeatures->IsVisible() == !bDisguised;
+}
+#endif
+
 void UExpeditionAnimalComponent::Build()
 {
     auto* Hero = CastChecked<AVoxelCharacter>(GetOwner());
@@ -67,22 +75,39 @@ void UExpeditionAnimalComponent::Build()
     Hero->AddInstanceComponent(Body);
     Body->RegisterComponent();
     Hero->GetMesh()->SetVisibility(false,true);
-    Shape(Body,{0,0,57},{70,76,74},Fur);
+    auto MakeOutfit = [&]
+    {
+        auto* Outfit = NewObject<USceneComponent>(Hero);
+        Outfit->SetupAttachment(Body);
+        Hero->AddInstanceComponent(Outfit);
+        Outfit->RegisterComponent();
+        return Outfit;
+    };
+    AnimalFeatures = MakeOutfit();
+    FogSuit = MakeOutfit();
+    // Every species uses the same hood, broad oilskin collar and dark visor in the fog.
+    const FColor Canvas(143,161,155), Hood(176,192,182), Visor(52,70,71);
+    Shape(FogSuit,{0,0,56},{78,78,80},Canvas);
+    Shape(FogSuit,{1,0,111},{83,82,79},Hood);
+    Shape(FogSuit,{0,0,81},{91,89,22},Canvas);
+    Shape(FogSuit,{36,0,117},{17,61,25},Visor);
+    FogSuit->SetVisibility(false,true);
+    Shape(AnimalFeatures,{0,0,57},{70,76,74},Fur);
     // The face pieces share the unscaled body parent, so their dimensions remain in centimetres.
-    Shape(Body,{4,0,112},{81,88,78},Fur);
+    Shape(AnimalFeatures,{4,0,112},{81,88,78},Fur);
     CheekMud=Shape(Body,{37,24,111},{9,25,15},FColor(149,95,60));
     CheekMud->SetRelativeRotation(FRotator(0.,29.,-12.));
     CheekMud->SetVisibility(false);
     for (int32 I=0; I<2; ++I)
     {
         const int32 Side = I ? 1 : -1;
-        Shape(Body,{40.,Side*17.,122.},{9,10,15},Dark);
-        Shape(Body,{44.,Side*17.,125.},{3,4,4},FColor::White);
+        Shape(AnimalFeatures,{40.,Side*17.,122.},{9,10,15},Dark);
+        Shape(AnimalFeatures,{44.,Side*17.,125.},{3,4,4},FColor::White);
         const FVector EarSize = Species == 1 ? FVector(21,30,34) : FVector(27,25,38);
-        auto* Ear = Shape(Body,{-1.,Side*(Species==1?43.:28.),Species==1?123.:148.},EarSize,Fur,
+        auto* Ear = Shape(AnimalFeatures,{-1.,Side*(Species==1?43.:28.),Species==1?123.:148.},EarSize,Fur,
             Species == 0 || Species == 2 ? Cone.Get() : Ball.Get());
         Ear->SetRelativeRotation(FRotator(Species==0 && I==0 ? -26. : 0.,0.,Side*16.));
-        if (Species == 3) Shape(Body,{-1.,Side*20.,157.},{14,15,24},Cream,Cone);
+        if (Species == 3) Shape(AnimalFeatures,{-1.,Side*20.,157.},{14,15,24},Cream,Cone);
         Hands.Add(Shape(Body,{8.,Side*35.,62.},{24,22,Species==1?46.:33.},Dark));
         Feet.Add(Shape(Body,{8.,Side*18.,13.},{31,25,26},Dark));
         const FColor Gold(252,198,58);
@@ -97,13 +122,13 @@ void UExpeditionAnimalComponent::Build()
         Mark->SetVisibility(false,true);
         Marks.Add(Mark);
     }
-    Shape(Body,{39.,0.,104.},Species==2 ? FVector(31,33,23) : FVector(25,47,27),Cream);
+    Shape(AnimalFeatures,{39.,0.,104.},Species==2 ? FVector(31,33,23) : FVector(25,47,27),Cream);
     if (Species==0 || Species==3)
-        for (const double Side : {-1.,1.}) Shape(Body,{50.,Side*9.,106.},{3,6,8},Dark);
-    else Shape(Body,{52,0,110},{9,15,9},Dark);
+        for (const double Side : {-1.,1.}) Shape(AnimalFeatures,{50.,Side*9.,106.},{3,6,8},Dark);
+    else Shape(AnimalFeatures,{52,0,110},{9,15,9},Dark);
     if (Species == 2 || Species == 1)
-        Shape(Body,{-38,0,52},Species==2 ? FVector(52,30,36) : FVector(39,13,14),Fur)->SetRelativeRotation(FRotator(-28,0,0));
-    Badge = Shape(Body,{-28,0,64},{18,57,39},FColor::White);
+        Shape(AnimalFeatures,{-38,0,52},Species==2 ? FVector(52,30,36) : FVector(39,13,14),Fur)->SetRelativeRotation(FRotator(-28,0,0));
+    Badge = Shape(AnimalFeatures,{-28,0,64},{18,57,39},FColor::White);
 }
 
 void UExpeditionAnimalComponent::PlayDig() { bThrow=false; Swing=1.f; }
@@ -132,6 +157,17 @@ void UExpeditionAnimalComponent::TickComponent(float Delta,ELevelTick TickType,F
     const bool FirstPerson = Hero->IsInFirstPersonView();
     const bool Visible = !FirstPerson && !(Compact && Hero->IsLocallyControlled());
     if (Body->IsVisible()!=Visible) Body->SetVisibility(Visible,true);
+    const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
+    const bool Fogged = Round && Round->IsIdentityDisguised();
+    if (AnimalFeatures->IsVisible() != (Visible && !Fogged)) AnimalFeatures->SetVisibility(Visible && !Fogged,true);
+    if (FogSuit->IsVisible() != (Visible && Fogged)) FogSuit->SetVisibility(Visible && Fogged,true);
+    if (Fogged != bFogged)
+    {
+        // Restore each species' own paws after the shared disguise expires.
+        bFogged = Fogged;
+        const bool LongPaws = !Fogged && PS && uint32(PS->GetPlayerId()) % 4 == 1;
+        for (const auto& Hand : Hands) Hand->SetRelativeScale3D(FVector(.24,.22,LongPaws ? .46 : .33));
+    }
     const bool ShowMud=Visible && !Stun && MarkSeconds>0 && MudSpots>=1;
     CheekMud->SetVisibility(ShowMud);
     // Only the player looking through these eyes needs a pair of near-camera paws.

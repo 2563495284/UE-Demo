@@ -1,0 +1,7 @@
+; Copy to MacEngine.ini. Use the game's public client policy and its public playtest deployment.
+[EOSSDK.Platform.ExpeditionIsland]
+ProductId=
+SandboxId=
+DeploymentId=
+ClientId=
+ClientSecret=

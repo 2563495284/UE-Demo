@@ -11,6 +11,7 @@ class UBoxComponent;
 class UMaterialInterface;
 class UStaticMesh;
 class UStaticMeshComponent;
+struct FCollisionQueryParams;
 
 USTRUCT()
 struct FIslandNeutralState
@@ -20,6 +21,7 @@ struct FIslandNeutralState
     UPROPERTY() EIslandNeutralKind Kind = EIslandNeutralKind::Tree;
     UPROPERTY() bool bInitialized = false;
     UPROPERTY() uint8 Phase = 0;
+    UPROPERTY() bool bDemolished = false;
     UPROPERTY() uint8 PlugMask = 0;
     UPROPERTY() double ChangedAt = 0.;
     UPROPERTY() double RippleAt = -10.;
@@ -37,6 +39,7 @@ public:
     AIslandNeutralProp();
     void Initialize(EIslandNeutralKind Kind);
     EIslandNeutralKind GetKind() const { return State.Kind; }
+    bool IsDemolished() const { return State.bDemolished; }
     uint8 GetPhase() const { return State.Phase; }
     uint8 GetPlugMask() const { return State.PlugMask; }
     FVector GetInteractionPoint() const;
@@ -45,6 +48,7 @@ public:
     bool IsTideBoostReady() const;
     static bool AnySailObscures(UWorld& World, const FVector& Start, const FVector& End);
 
+    static bool TraceShovel(UWorld& World, FHitResult& Hit, const FVector& Start, const FVector& End, const FCollisionQueryParams& Query);
     bool Strike(AIslandPlayerController& Player, const FHitResult& Hit);
     bool CanUseRope(const AIslandPlayerController& Player) const;
     bool UseRope(AIslandPlayerController& Player);
@@ -64,10 +68,12 @@ private:
         FColor Color;
         TObjectPtr<UMaterialInterface> Material;
     };
+    enum class EPieceCollision { Solid, ShovelOnly, VisibilityOnly, Effect };
+    static void SetPieceCollision(UStaticMeshComponent& Mesh, EPieceCollision Collision);
     // Each piece is locally constructed from the same cooked primitives on every peer.
     UStaticMeshComponent* Piece(UStaticMesh* Shape, FVector Center, FVector Dimensions, FColor Color,
-        bool bSolid = true, FRotator Rotation = FRotator::ZeroRotator, USceneComponent* Parent = nullptr);
-    UStaticMeshComponent* Beam(FVector A, FVector B, double Width, FColor Color, bool bSolid = true,
+        EPieceCollision Collision = EPieceCollision::Solid, FRotator Rotation = FRotator::ZeroRotator, USceneComponent* Parent = nullptr);
+    UStaticMeshComponent* Beam(FVector A, FVector B, double Width, FColor Color, EPieceCollision Collision = EPieceCollision::Solid,
         USceneComponent* Parent = nullptr);
     void BuildTree();
     void BuildShip();
@@ -106,6 +112,9 @@ private:
     UPROPERTY(Transient) TObjectPtr<UStaticMeshComponent> Spillway;
     TArray<FPaint> Paints;
     int32 NextPieceIndex = 0;
+    // Repeated strikes on a structure's body demolish it. Weak points still trigger the route mechanic first.
+    uint8 BodyStrikes = 0;
+    UFUNCTION(NetMulticast,Unreliable) void MulticastChip(FVector_NetQuantize Point, FVector_NetQuantizeNormal Normal);
     bool bBuilt = false;
     bool bSandQueued = false;
     bool bTreeSolidsEnabled = true;

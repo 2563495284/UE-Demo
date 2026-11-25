@@ -9,6 +9,9 @@
 class AIslandChest;
 
 UENUM()
+enum class EIslandChestOutcome : uint8 { Unknown, Genuine, Scatter, Disguise };
+
+UENUM()
 enum class EIslandLockRole : uint8
 {
     Observer, Leader, Helper
@@ -52,6 +55,20 @@ public:
     UPROPERTY(Replicated) TArray<int32> LaunchedTeams;
     UPROPERTY(Replicated) double StartAtServerTime = 0.0;
     UPROPERTY(Replicated) FString RoomNotice;
+    UPROPERTY(Replicated) double PartyStartedAt = 0.;
+    UPROPERTY(Replicated) FString PartyWinnerName;
+    UPROPERTY(Replicated) int32 PartyWinnerTeam = INDEX_NONE;
+    UPROPERTY(Replicated) int32 PartyWinnerMask = 0;
+    bool IsPartyWinner(int32 Team) const { return Team >= 0 && Team < 8 && (PartyWinnerMask & (1 << Team)); }
+    UPROPERTY(Replicated) double PartyWinnerUntil = 0.;
+    // Only publish the site and reward after the arena has finished.
+    UPROPERTY(Replicated) EIslandChestOutcome PartyOutcome = EIslandChestOutcome::Unknown;
+    UPROPERTY(Replicated) int32 PartyOpeningTeam = INDEX_NONE;
+    UPROPERTY(Replicated) int32 PartySite = INDEX_NONE;
+    UPROPERTY(Replicated) int32 PartyRewardMask = 0;
+    UPROPERTY(Replicated) TArray<FVector2D> SpentFalsePoints;
+    UPROPERTY(Replicated) double DisguiseUntil = 0.;
+    bool IsIdentityDisguised() const { return GetServerWorldTimeSeconds() < DisguiseUntil; }
 
     bool CanLaunch() const;
 };

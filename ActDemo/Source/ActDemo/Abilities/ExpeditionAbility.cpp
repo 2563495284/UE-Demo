@@ -124,7 +124,7 @@ bool UExpeditionAbility::CanActivateAbility(const FGameplayAbilitySpecHandle Han
     if (Hero->HasAuthority())
     {
         const auto* Mode = Hero->GetWorld()->GetAuthGameMode<AIslandGameMode>();
-        return Mode && Mode->CanPlayerAct(*PC);
+        return Mode && (Mode->CanPlayerAct(*PC) || (Action == EExpeditionAction::Jump && Mode->CanJumpBeforePartyBlack(*PC)));
     }
     return Action == EExpeditionAction::Jump && PC->IsPlaying() && PC->IsVoxelInputEnabled();
 }

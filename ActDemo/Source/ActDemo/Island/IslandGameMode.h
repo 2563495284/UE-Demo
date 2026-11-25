@@ -28,10 +28,13 @@ public:
     void StartExpedition(AIslandPlayerController& Player);
     void ConfigureRoom(AIslandPlayerController& Player, const FIslandRoomSettings& Settings);
     void PartyAssetsReady(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess);
+    void PartyScreenBlack(AIslandPlayerController& Player, uint32 RoundId, bool bReturning);
+    void PartyScreenClear(AIslandPlayerController& Player, uint32 RoundId, bool bReturning);
     void PartyPawnReady(AIslandPlayerController& Player, uint32 RoundId);
     void PartyUnloaded(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess);
     void RecoverPlayer(AVoxelPlayerController& Player) override;
     bool CanPlayerAct(const AVoxelPlayerController& Player) const override;
+    bool CanJumpBeforePartyBlack(const AIslandPlayerController& Player) const;
     void QueueHopperSand(AIslandNeutralProp& Hopper, const TArray<FVector>& Centers);
     void OnPlayerJumped(AVoxelCharacter& Hero) override;
     void ThrowExpeditionMud(AIslandPlayerController& Player, const FVector& Aim);
@@ -82,14 +85,22 @@ private:
         int32 Seat = INDEX_NONE;
         bool bReturnToDock = false;
         bool bAssetsReady = false;
+        bool bEntryBlack = false;
+        bool bReturnBlack = false;
+        bool bArrivalVisible = false;
         bool bPawnReady = false;
         bool bUnloaded = false;
     };
 
-    void BeginParty(int32 ChestIndex);
+    void BeginParty(int32 ChestIndex, int32 OpeningTeam = INDEX_NONE);
     void UpdateParty();
     void ReturnFromParty();
+    void RestorePartyPlayers();
     void RemovePartyPlayer(AIslandPlayerController& Player);
+    void PrepareExpeditionParties(int32 Seed);
+    FName PartyFeatureForChest(int32 Index) const;
+    void AwardPartyTreasure();
+    void ScatterPartyPlayers();
     void SetPhase(EIslandPhase Phase);
     FPartyPlayer* FindPartyPlayer(AIslandPlayerController& Player, uint32 RoundId);
 
@@ -103,10 +114,12 @@ private:
     TMap<FGuid, int32> ReturningTeams;
     double ReturnDeadline = 0.0;
     void ReturnToSafeGround(AVoxelPlayerController& Player);
-    FTransform FindSafeReturn(const AVoxelPlayerController& Player);
+    FTransform FindSafeReturn(const AVoxelPlayerController& Player, TOptional<FVector> InlandTarget = {});
     int32 FindReachableChest(const AIslandPlayerController& Player) const;
     void RevealChestIfClear(int32 Index);
-    void GiveClue(int32 Team, int32 Index);
+    bool GiveClue(int32 Team, int32 Index);
+    void ScoutTreasureForWinner(int32 Team, int32 PreferredSite);
+    void SendClueSnapshot(int32 Team);
     void PublishWinner(int32 Team);
 
     struct FChestLock
@@ -139,10 +152,20 @@ private:
     UPROPERTY(Config) FName DecoyMinigameFeature = TEXT("PartyButtonChallenge");
     UPROPERTY() TObjectPtr<APartySession> PartySession;
     TMap<TWeakObjectPtr<AIslandPlayerController>, FPartyPlayer> PartyPlayers;
+    TArray<FName> ExpeditionPartyDeck;
+    TSet<FName> UnavailablePartyFeatures;
+    FName CurrentPartyFeature;
+    int32 PartyLayoutSeed = 0;
     uint32 PartyRoundId = 0;
     int32 PartyChestIndex = INDEX_NONE;
+    int32 PartyOpenerTeam = INDEX_NONE;
+    FRandomStream ChestEventRandom;
     double PartyDeadline = 0.0;
     bool bPartyPrepareFailed = false;
+    bool bPartyAwaitingBlack = false;
+    bool bPartyRestored = false;
+    bool bPartyRevealSent = false;
+    bool bPartyCompleted = false;
     bool bPartyUnavailable = false;
     bool bRestarting = false;
 };

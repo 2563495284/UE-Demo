@@ -3,6 +3,7 @@
 /ActDemo/DerivedDataCache/
 /ActDemo/Intermediate/
 /ActDemo/Saved/
+/ActDemo/Config/Mac/MacEngine.ini
 /Builds/
 /ActDemo/Build/*/FileOpenOrder/
 /ActDemo/Build/*/*.PackageVersionCounter
@@ -26,7 +27,7 @@
 # Plugin intermediate files (keep precompiled plugin binaries)
 /ActDemo/Plugins/**/Intermediate/
 /ActDemo/Plugins/PartyFramework/Binaries/
-/ActDemo/Plugins/GameFeatures/PartyButtonChallenge/Binaries/
+/ActDemo/Plugins/GameFeatures/Party*/Binaries/
 
 # OS metadata
 .DS_Store

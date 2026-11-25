@@ -3,6 +3,9 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
+#include "EngineUtils.h"
+#include "Island/ExpeditionDock.h"
 #include "GameFramework/GameStateBase.h"
 #include "Misc/App.h"
 #include "Net/UnrealNetwork.h"
@@ -181,4 +184,97 @@ AIslandRescueRaft::AIslandRescueRaft()
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube"));
     GetMesh().SetStaticMesh(Cube.Object);
     GetMesh().SetRelativeScale3D(FVector(2, 2, .35));
+}
+
+AIslandSceneryDamage::AIslandSceneryDamage()
+{
+    bReplicates = true;
+    bAlwaysRelevant = true;
+}
+
+void AIslandSceneryDamage::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(AIslandSceneryDamage, Removed);
+}
+
+bool AIslandSceneryDamage::RemoveAuthoredPiece(const FHitResult& Hit)
+{
+    auto* Mesh = Cast<UStaticMeshComponent>(Hit.GetComponent());
+    AActor* Actor = Hit.GetActor();
+    if (!Mesh || !Actor || !Actor->HasAuthority() || !Mesh->IsVisible()
+        || (!Actor->IsA<AStaticMeshActor>() && !Actor->IsA<AExpeditionLandmark>())) return false;
+    UWorld& World = *Actor->GetWorld();
+    TActorIterator<AIslandSceneryDamage> It(&World);
+    auto* Damage = It ? *It : World.SpawnActor<AIslandSceneryDamage>();
+    if (!Damage) return false;
+    FIslandRemovedPiece& Loss = Damage->Removed.AddDefaulted_GetRef();
+    Loss.Owner = Actor;
+    Loss.Component = Mesh->GetFName();
+    Damage->OnRep_Removed();
+    Damage->ForceNetUpdate();
+    Damage->MulticastDebris(Hit.ImpactPoint, Hit.ImpactNormal);
+    return true;
+}
+
+void AIslandSceneryDamage::OnRep_Removed()
+{
+    // Reapplying is intentional: actor references can resolve after the initial net bunch.
+    for (const auto& Loss : Removed)
+    {
+        if (!Loss.Owner) continue;
+        TInlineComponentArray<UStaticMeshComponent*> Parts(Loss.Owner.Get());
+        bool bRemaining = false;
+        for (auto* Part : Parts)
+        {
+            if (Part->GetFName() == Loss.Component)
+            {
+                Part->SetVisibility(false);
+                Part->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+            }
+            bRemaining |= Part->GetStaticMesh() && Part->IsVisible();
+        }
+        if (!bRemaining)
+        {
+            TInlineComponentArray<UTextRenderComponent*> Signs(Loss.Owner.Get());
+            for (auto* Sign : Signs) Sign->SetVisibility(false);
+        }
+    }
+}
+
+void AIslandSceneryDamage::PlayDebris(UWorld& World, FVector Point, FVector Normal, UMaterialInterface* Material)
+{
+    if (World.GetNetMode() == NM_DedicatedServer || !FApp::CanEverRender()) return;
+    // Short-lived local chips have no pawn or terrain collision.
+    UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+    if (!Cube) return;
+    FActorSpawnParameters Params;
+    Params.ObjectFlags |= RF_Transient;
+    AActor* FX = World.SpawnActor<AActor>(AActor::StaticClass(), Point, FRotator::ZeroRotator, Params);
+    if (!FX) return;
+    for (int32 I=0; I<6; ++I)
+    {
+        auto* Chip = NewObject<UStaticMeshComponent>(FX);
+        FX->AddInstanceComponent(Chip);
+        const double Angle = I * UE_TWO_PI / 6.;
+        const FVector Out(FMath::Cos(Angle), FMath::Sin(Angle), 0.);
+        Chip->SetMobility(EComponentMobility::Movable);
+        Chip->SetStaticMesh(Cube);
+        if (Material) Chip->SetMaterial(0, Material);
+        Chip->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+        Chip->SetCollisionResponseToAllChannels(ECR_Ignore);
+        Chip->SetCanEverAffectNavigation(false);
+        Chip->SetWorldLocationAndRotation(Point + Normal * 8. + Out * 9., FRotator(I*12.,I*39.,0.));
+        Chip->SetWorldScale3D(FVector(.06 + .025 * (I % 3), .075, .13));
+        Chip->RegisterComponent();
+        Chip->SetSimulatePhysics(true);
+        Chip->SetPhysicsLinearVelocity(Normal * 160. + Out * 90. + FVector(0,0,235.));
+        Chip->SetPhysicsAngularVelocityInDegrees(Out * 270.);
+    }
+    FX->SetLifeSpan(.65f);
+}
+
+void AIslandSceneryDamage::MulticastDebris_Implementation(FVector_NetQuantize Point, FVector_NetQuantizeNormal Normal)
+{
+    PlayDebris(*GetWorld(),Point,Normal,nullptr);
 }

@@ -7,7 +7,6 @@
 #include "VoxelCharacter.generated.h"
 
 class AVoxelTerrain;
-class UAnimSequence;
 class UCameraComponent;
 class USpringArmComponent;
 class UExpeditionAnimalComponent;
@@ -51,7 +50,8 @@ private:
     UPROPERTY(VisibleAnywhere) TObjectPtr<UExpeditionAnimalComponent> ExpeditionAnimal;
     UPROPERTY() TObjectPtr<USpringArmComponent> Boom;
     UPROPERTY(VisibleAnywhere) TObjectPtr<UCameraComponent> EyeCamera;
-    UPROPERTY() TObjectPtr<UAnimSequence> SwingAnimation;
+    float ToolStrokeRemaining = 0.f;
+    float ToolStrokeDegrees = 0.f;
     bool bGrantedExpeditionAbilities = false;
     bool bClearingMud = false;
     TWeakObjectPtr<AVoxelTerrain> Terrain;

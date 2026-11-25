@@ -16,6 +16,17 @@ void AIslandGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
     DOREPLIFETIME(AIslandGameState, LaunchedTeams);
     DOREPLIFETIME(AIslandGameState, StartAtServerTime);
     DOREPLIFETIME(AIslandGameState, RoomNotice);
+    DOREPLIFETIME(AIslandGameState, PartyStartedAt);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerName);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerTeam);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerMask);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerUntil);
+    DOREPLIFETIME(AIslandGameState, PartyOutcome);
+    DOREPLIFETIME(AIslandGameState, PartyOpeningTeam);
+    DOREPLIFETIME(AIslandGameState, PartySite);
+    DOREPLIFETIME(AIslandGameState, PartyRewardMask);
+    DOREPLIFETIME(AIslandGameState, SpentFalsePoints);
+    DOREPLIFETIME(AIslandGameState, DisguiseUntil);
 }
 
 void AIslandPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

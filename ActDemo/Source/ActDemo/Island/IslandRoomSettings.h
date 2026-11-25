@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Island/IslandRules.h"
 #include "IslandRoomSettings.generated.h"
 
 USTRUCT()
@@ -12,11 +13,13 @@ struct ACTDEMO_API FIslandRoomSettings
     UPROPERTY() int32 MaxPlayers = 8;
     UPROPERTY() int32 MaxTeams = 8;
     UPROPERTY() int32 TeamCapacity = 8;
+    UPROPERTY() int32 DecoyCount = 4;
 
     bool IsValid() const
     {
         return !RoomName.TrimStartAndEnd().IsEmpty() && RoomName.Len() <= 32
             && MaxPlayers >= 1 && MaxPlayers <= 8 && MaxTeams >= 1 && MaxTeams <= 8
-            && TeamCapacity >= 1 && TeamCapacity <= 8 && MaxPlayers <= MaxTeams * TeamCapacity;
+            && TeamCapacity >= 1 && TeamCapacity <= 8 && MaxPlayers <= MaxTeams * TeamCapacity
+            && DecoyCount >= 0 && DecoyCount <= IslandRules::MaxDecoys;
     }
 };

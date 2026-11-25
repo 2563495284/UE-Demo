@@ -18,9 +18,18 @@
 	"Plugins": [
 		{ "Name": "GameplayAbilities", "Enabled": true },
 		{ "Name": "OnlineSubsystemNull", "Enabled": true },
+		{ "Name": "EOSShared", "Enabled": true },
+		{ "Name": "SocketSubsystemEOS", "Enabled": true },
 		{ "Name": "GameFeatures", "Enabled": true },
 		{ "Name": "PartyFramework", "Enabled": true },
 		{ "Name": "PartyButtonChallenge", "Enabled": true },
+		{ "Name": "PartyReefRun", "Enabled": true },
+		{ "Name": "PartyBeaconClimb", "Enabled": true },
+		{ "Name": "PartyCrystalHunt", "Enabled": true },
+		{ "Name": "PartyBridgeDash", "Enabled": true },
+		{ "Name": "PartyFloodGates", "Enabled": true },
+		{ "Name": "PartyCrownHold", "Enabled": true },
+		{ "Name": "PartyMazeChase", "Enabled": true },
 		{
 			"Name": "ProceduralMeshComponent",
 			"Enabled": true

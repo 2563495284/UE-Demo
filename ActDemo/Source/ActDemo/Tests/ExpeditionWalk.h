@@ -23,6 +23,7 @@ private:
     EHuntStep HuntStep = EHuntStep::AwaitPlay;
     void SetHuntStep(EHuntStep Next);
     int32 TreasureIndex = 0;
+    bool bAwaitingChestReveal = false;
     FVector ChestTarget = FVector::ZeroVector;
     bool bSlopePitRun = false, bRoofRequested = false, bRoofReady = false, bSawThrow = false;
     FVector RoofFeet = FVector::ZeroVector;

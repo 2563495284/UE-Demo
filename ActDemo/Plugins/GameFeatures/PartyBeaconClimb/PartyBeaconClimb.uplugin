@@ -1,0 +1,25 @@
+{
+    "FileVersion": 3,
+    "FriendlyName": "灯塔登顶",
+    "Category": "Game Features",
+    "CanContainContent": true,
+    "ExplicitlyLoaded": true,
+    "BuiltInInitialFeatureState": "Installed",
+    "Modules": [
+        {
+            "Name": "PartyBeaconClimb",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        }
+    ],
+    "Plugins": [
+        {
+            "Name": "GameFeatures",
+            "Enabled": true
+        },
+        {
+            "Name": "PartyFramework",
+            "Enabled": true
+        }
+    ]
+}

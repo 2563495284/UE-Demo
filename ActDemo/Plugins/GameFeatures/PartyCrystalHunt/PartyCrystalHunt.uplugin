@@ -1,0 +1,25 @@
+{
+    "FileVersion": 3,
+    "FriendlyName": "晶洞寻珠",
+    "Category": "Game Features",
+    "CanContainContent": true,
+    "ExplicitlyLoaded": true,
+    "BuiltInInitialFeatureState": "Installed",
+    "Modules": [
+        {
+            "Name": "PartyCrystalHunt",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        }
+    ],
+    "Plugins": [
+        {
+            "Name": "GameFeatures",
+            "Enabled": true
+        },
+        {
+            "Name": "PartyFramework",
+            "Enabled": true
+        }
+    ]
+}

@@ -1,6 +1,7 @@
 #include "Island/IslandWorld.h"
 
 #include "Components/StaticMeshComponent.h"
+#include "Components/PointLightComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "Voxel/VoxelTerrain.h"
 #include "Voxel/VoxelCharacter.h"
@@ -20,6 +21,10 @@ AIslandChest::AIslandChest()
     USceneComponent* Frame = CreateDefaultSubobject<USceneComponent>(TEXT("Frame"));
     SetRootComponent(Frame);
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Coin(TEXT("/Engine/BasicShapes/Cylinder"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Needle(TEXT("/Engine/BasicShapes/Cone"));
+    CoinShape = Coin.Object;
+    NeedleShape = Needle.Object;
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Prize(TEXT("/Game/ActDemo/Materials/M_Amber"));
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Clue(TEXT("/Game/ActDemo/Materials/M_LightStone"));
     // Keep exactly one stationary visibility target while the lid moves.
@@ -59,6 +64,19 @@ void AIslandChest::SetPrize(bool bValue)
     OnRep_Prize();
 }
 
+void AIslandChest::MarkChallengeResolved()
+{
+    if (!HasAuthority() || bPrize || bChallengeResolved) return;
+    bChallengeResolved = true;
+    OnRep_ChallengeResolved();
+    ForceNetUpdate();
+}
+
+void AIslandChest::OnRep_ChallengeResolved()
+{
+    LidHinge->SetRelativeRotation(FRotator(0, 0, -90.));
+}
+
 bool AIslandChest::IsReachableFrom(const AVoxelCharacter& Hero) const
 {
     const FVector Origin = Hero.GetAimOrigin();
@@ -86,18 +104,79 @@ void AIslandChest::AnimateLock(double FinishAt, bool bAssisted)
     SetActorTickEnabled(true);
 }
 
+void AIslandChest::RevealPrize(double ServerTime)
+{
+    if (!HasAuthority() || !bPrize || IsPrizeRevealed()) return;
+    PrizeOpenedAt = ServerTime;
+    OnRep_PrizeOpened();
+    ForceNetUpdate();
+}
+
+void AIslandChest::OnRep_PrizeOpened()
+{
+    if (!IsPrizeRevealed() || Compass || GetNetMode() == NM_DedicatedServer) return;
+    Compass = NewObject<USceneComponent>(this);
+    Compass->SetupAttachment(GetRootComponent());
+    Compass->SetRelativeLocation(FVector(0,0,8));
+    Compass->SetRelativeScale3D(FVector(.05));
+    Compass->RegisterComponent();
+    const auto Piece = [&](UStaticMesh* Shape, UMaterialInterface* Surface, FVector At, FRotator Facing, FVector Size)
+    {
+        auto* Part = NewObject<UStaticMeshComponent>(this);
+        Part->SetupAttachment(Compass);
+        Part->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Part->SetCanEverAffectNavigation(false);
+        Part->SetStaticMesh(Shape);
+        Part->SetMaterial(0, Surface);
+        Part->SetRelativeTransform(FTransform(Facing, At, Size/100.));
+        Part->RegisterComponent();
+    };
+    Piece(CoinShape, PrizeMaterial, FVector::ZeroVector, FRotator(90,0,0), FVector(52,52,6));
+    for (double Side : {-1.,1.})
+    {
+        Piece(CoinShape, ClueMaterial, FVector(Side*3.4,0,0), FRotator(90,0,0), FVector(45,45,1));
+        for (int32 I=0; I<4; ++I)
+        {
+            const FRotator NeedleRotation(0,0,I*90.);
+            const FVector Along=NeedleRotation.RotateVector(FVector::UpVector);
+            Piece(NeedleShape, PrizeMaterial, FVector(Side*5.,0,0)+Along*9., NeedleRotation, FVector(5,11,23));
+        }
+    }
+    auto* Glow = NewObject<UPointLightComponent>(this);
+    Glow->SetupAttachment(Compass);
+    Glow->SetLightColor(FLinearColor(1.f,.65f,.2f));
+    Glow->SetIntensity(55.f);
+    Glow->SetAttenuationRadius(170.f);
+    Glow->SetCastShadows(false);
+    Glow->RegisterComponent();
+    SetActorTickEnabled(true);
+}
+
 void AIslandChest::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
     const AGameStateBase* State = GetWorld()->GetGameState();
     double Target = 0.0;
-    if (State && LocalFinishAt > 0)
+    if (State && IsPrizeRevealed())
+    {
+        const double Age = FMath::Max(0.,State->GetServerWorldTimeSeconds()-PrizeOpenedAt);
+        const double Rise = FMath::SmoothStep(0.,1.05,Age);
+        Target = 105.;
+        if (Compass)
+        {
+            Compass->SetRelativeLocation(FVector(0,0,FMath::Lerp(8.,98.,Rise)));
+            Compass->SetRelativeRotation(FRotator(0, FMath::Lerp(-110.,28.,Rise), 0));
+            Compass->SetRelativeScale3D(FVector(.05+.95*Rise));
+        }
+        if (Age>=1.2 && FMath::Abs(LidAngle-Target)<.1) SetActorTickEnabled(false);
+    }
+    else if (State && LocalFinishAt > 0)
     {
         const double Remaining = LocalFinishAt - State->GetServerWorldTimeSeconds();
         Target = 65.0 * FMath::Clamp(1.0 - Remaining / LocalLockDuration, 0.0, 1.0);
     }
     LidAngle = FMath::FInterpTo(LidAngle, Target, DeltaSeconds, 14.0);
-    if (LocalFinishAt == 0.0 && LidAngle < .1)
+    if (!IsPrizeRevealed() && LocalFinishAt == 0.0 && LidAngle < .1)
     {
         LidAngle = 0.0;
         SetActorTickEnabled(false);
@@ -109,6 +188,8 @@ void AIslandChest::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AIslandChest, bPrize);
+    DOREPLIFETIME(AIslandChest, bChallengeResolved);
+    DOREPLIFETIME(AIslandChest, PrizeOpenedAt);
 }
 
 AIslandWater::AIslandWater()

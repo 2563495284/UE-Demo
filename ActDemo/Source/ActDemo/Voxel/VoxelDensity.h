@@ -41,7 +41,7 @@ struct FVoxelEdit
     UPROPERTY() TArray<FVoxelProtectedBox> ProtectedBoxes;
     // All lobes of an environmental sand spill share one sequence and collision commit.
     UPROPERTY() TArray<FIntVector> ExtraFillCenters;
-    static constexpr int32 MaxFillCenters = 64;
+    static constexpr int32 MaxFillCenters = 128;
 };
 
 USTRUCT()
@@ -91,6 +91,7 @@ struct FVoxelGrid
     FIntVector ChunkCoordinates(int32 Index) const;
     bool Contains(const FIntVector& Point) const;
     int32 SampleIndex(const FIntVector& Point) const;
+    FIntVector SampleCoordinates(int32 Index) const;
     bool IsValidEdit(const FVoxelEdit& Edit) const;
 };
 
@@ -121,9 +122,12 @@ struct FVoxelDensity
     const EVoxelLayout Layout;
 
 private:
-    FVoxelDensityPatch PrepareStamp(const FVoxelBrushStamp& Stamp, const FVoxelEdit* PartyEdit) const;
+    FVoxelDensityPatch PrepareStamp(const FVoxelBrushStamp& Stamp, const FVoxelEdit* PartyEdit, bool& bTouchesSolid) const;
+    void ResolveSupport(FVoxelDensityPatch& Patch, bool bAdd, bool bTouchesSolid) const;
     bool VolumeMatches(const FBox& Box, bool bSolid) const;
     TArray<int16> Samples;
+    // Columns in which the original terrain touches the world's foundation layer.
+    TBitArray<> Foundation;
     // The expedition base is a cooked height surface. Retain only column boundaries and changed samples.
     TArray<FIntPoint> BaseColumns;
     // Only edited blocks allocate the full field. Meshing can then read a contiguous row at a time.

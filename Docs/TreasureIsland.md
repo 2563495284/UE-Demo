@@ -11,11 +11,11 @@ bash Scripts/actdemo.sh island-host
 bash Scripts/actdemo.sh island-join 192.168.1.42
 ```
 
-将示例 IP 换成房主的局域网 IP。其他 Mac 只需同一份完整 `ActDemo.app`，可在它所在的目录运行以下命令。
+将示例 IP 换成房主的局域网 IP。其他 Mac 只需同一份完整 `远征岛.app`，可在它所在的目录运行以下命令。
 
 ```sh
-open -n -a "$PWD/ActDemo.app" --args '/Game/TreasureIsland/L_TreasureIsland?listen' -windowed -ResX=1280 -ResY=720
-open -n -a "$PWD/ActDemo.app" --args '192.168.1.42:7777' -windowed -ResX=1280 -ResY=720
+open -n "$PWD/远征岛.app" --args '/Game/TreasureIsland/L_TreasureIsland?listen' -windowed -ResX=1280 -ResY=720
+open -n "$PWD/远征岛.app" --args '192.168.1.42:7777' -windowed -ResX=1280 -ResY=720
 ```
 
 WASD 移动，鼠标控制镜头，空格跳，左键凿岩，右键挖脚下，Q 回填，按住 Shift 攀爬。按住 Tab 看藏宝图，靠近已露出的箱子按 E，长按 R 两秒回本队码头。角色在岛外水面下连续三秒会溺亡，一秒后回码头，已获得的队内线索和全场地形保留。结算后由房主按 Enter 重开，重新生成宝箱并恢复原始地形。
@@ -61,7 +61,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --scenario party-timeout 
 
 派对测试通过玩家控制器注入空格键，覆盖玩法确认及返回海岛后的跳跃。需要重建默认插件的 GameFeatureData 时，先编译再运行 `bash Scripts/actdemo.sh party-feature`。
 
-默认归档在 `Builds/TreasureIsland/Mac/ActDemo.app`，自动化日志在 `ActDemo/Saved/IslandQA`。六进程回归通过真实 NetDriver 测试挖箱、开箱、结算、重开和可靠编辑复制。探针直接布置角色和压力测试的笔刷落点，以便重复跑相同情景。探针使用正常房主编辑队列、角色挖地入口和客户端开箱 RPC。队内隔离根据每个独立进程持有的线索坐标和交点验证。帧时间由一台启用 Metal 的房主进程采样，五个客户端使用 NullRHI。
+默认归档在 `Builds/TreasureIsland/Mac/远征岛.app`，自动化日志在 `ActDemo/Saved/IslandQA`。六进程回归通过真实 NetDriver 测试挖箱、开箱、结算、重开和可靠编辑复制。探针直接布置角色和压力测试的笔刷落点，以便重复跑相同情景。探针使用正常房主编辑队列、角色挖地入口和客户端开箱 RPC。队内隔离根据每个独立进程持有的线索坐标和交点验证。帧时间由一台启用 Metal 的房主进程采样，五个客户端使用 NullRHI。
 
 弱网模式为六个进程分别配置 `-PktLag=40 -PktLoss=2`，模拟约 80 ms 往返、每端 2% 出站丢包。碰撞延迟从进程收到请求或编辑指令计到该进程的碰撞生效。性能门槛为房主帧时间 P95 ≤ 33.3 ms，房主和每个来宾的碰撞延迟 P95 ≤ 150 ms。
 
