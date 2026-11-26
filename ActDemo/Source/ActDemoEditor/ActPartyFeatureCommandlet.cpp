@@ -5,6 +5,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Level.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "FileHelpers.h"
 #include "HAL/FileManager.h"
@@ -22,6 +23,58 @@ namespace PartyMapAuthoring
         const TCHAR* Name;
         FColor Color;
     };
+
+    // Restyle the original scenery in place so authored transforms and demolition groups survive.
+    bool DressVenue(UWorld& World)
+    {
+        struct FPieceStyle { const TCHAR* Label; const TCHAR* Mesh; bool bUseMeshPaint; };
+        static const FPieceStyle Styles[] = {
+            {TEXT("Island shelf"), TEXT("Harbour/SM_ReefShelf"), true},
+            {TEXT("Coral spur"), TEXT("Neutral/SM_CrystalSpire"), false},
+            {TEXT("Coral arch"), TEXT("Harbour/SM_ArchStone"), true},
+            {TEXT("Lighthouse shaft"), TEXT("Neutral/SM_TimberPost"), false},
+            {TEXT("Lighthouse band"), TEXT("Neutral/SM_TimberPost"), false},
+            {TEXT("Lantern room"), TEXT("Neutral/SM_TimberPost"), false},
+            {TEXT("Lantern cap"), TEXT("Neutral/SM_CrystalSpire"), false},
+            {TEXT("Crystal spire"), TEXT("Neutral/SM_CrystalSpire"), false},
+            {TEXT("Viaduct pier"), TEXT("Harbour/SM_ArchStone"), true},
+            {TEXT("Broken viaduct"), TEXT("Harbour/SM_Plank"), true},
+            {TEXT("Sluice tower"), TEXT("Harbour/SM_QuarryStep"), true},
+            {TEXT("Tide gate"), TEXT("Harbour/SM_Plank"), true},
+            {TEXT("Watchtower"), TEXT("Neutral/SM_TimberPost"), false},
+            {TEXT("Lookout"), TEXT("Harbour/SM_Mooring"), true},
+            {TEXT("Flagpole"), TEXT("Harbour/SM_Mooring"), true},
+            {TEXT("Pennant"), TEXT("Neutral/SM_HewnBlock"), false},
+            {TEXT("Gate pier"), TEXT("Harbour/SM_ArchStone"), true},
+            {TEXT("Gate lintel"), TEXT("Harbour/SM_Plank"), true}
+        };
+        auto* Sea = LoadObject<UMaterialInterface>(nullptr,TEXT("/Game/TreasureIsland/Art/M_Lagoon"));
+        if (!Sea) return false;
+        for (AActor* Actor : World.PersistentLevel->Actors)
+        {
+            auto* Scenery = Cast<AStaticMeshActor>(Actor);
+            if (!Scenery) continue;
+            auto* Part = Scenery->GetStaticMeshComponent();
+            if (!Part->GetStaticMesh() || !Part->GetStaticMesh()->GetPathName().StartsWith(TEXT("/Engine/BasicShapes/"))) continue;
+            const FString Label = Actor->GetActorLabel();
+            if (Label == TEXT("Lagoon"))
+            {
+                Part->SetMaterial(0,Sea);
+                continue;
+            }
+            for (const FPieceStyle& Style : Styles)
+            {
+                if (Label != Style.Label) continue;
+                auto* Mesh = LoadObject<UStaticMesh>(nullptr,*(FString(TEXT("/Game/TreasureIsland/Art/")) + Style.Mesh));
+                if (!Mesh) return false;
+                Part->SetStaticMesh(Mesh);
+                if (Style.bUseMeshPaint) Part->SetMaterial(0, Mesh->GetMaterial(0));
+                if (Label == TEXT("Island shelf")) Actor->Tags.AddUnique(PartyVenueScenery::ShelfTag);
+                break;
+            }
+        }
+        return true;
+    }
 
     // Everything inside the playable board, including all goal markers, comes
     // from the feature rules. The map owns the scenery and its demolition groups.
@@ -112,7 +165,7 @@ namespace PartyMapAuthoring
                 break;
             }
         }
-        return UEditorLoadingAndSavingUtils::SaveMap(World, MapPath);
+        return DressVenue(*World) && UEditorLoadingAndSavingUtils::SaveMap(World, MapPath);
     }
 }
 
@@ -146,7 +199,12 @@ int32 UActPartyFeatureCommandlet::Main(const FString& Params)
         const FString MapFile=FPackageName::LongPackageNameToFilename(MapPath,FPackageName::GetMapPackageExtension());
         const FString DataFile=FPackageName::LongPackageNameToFilename(DataPath,FPackageName::GetAssetPackageExtension());
         IFileManager::Get().MakeDirectory(*FPaths::GetPath(DataFile),true);
-        if (bArena && (!FPaths::FileExists(MapFile) || FParse::Param(*Params,TEXT("RebuildVenues"))))
+        if (bArena && FPaths::FileExists(MapFile) && FParse::Param(*Params,TEXT("RestyleVenues")))
+        {
+            UWorld* World = UEditorLoadingAndSavingUtils::LoadMap(MapFile);
+            if (!World || !DressVenue(*World) || !UEditorLoadingAndSavingUtils::SaveMap(World,MapPath)) return 1;
+        }
+        else if (bArena && (!FPaths::FileExists(MapFile) || FParse::Param(*Params,TEXT("RebuildVenues"))))
         {
             IFileManager::Get().MakeDirectory(*FPaths::GetPath(MapFile),true);
             if (!SaveVenue(MapPath,Venues[Index],Index)) return 1;

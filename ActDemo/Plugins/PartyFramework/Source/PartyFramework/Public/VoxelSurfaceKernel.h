@@ -41,7 +41,7 @@ namespace VoxelSurfaceKernel
         return Low;
     }
 
-    inline int32 ToolDistance(FIntVector Local, FIntVector N, bool bFill)
+    inline int32 ToolDistance(FIntVector Local, FIntVector N, bool bFill, int32 FootprintScale = 1)
     {
         const int32 Along = (Local.X * N.X + Local.Y * N.Y + Local.Z * N.Z) / 1000;
         int32 Distance;
@@ -49,7 +49,7 @@ namespace VoxelSurfaceKernel
         {
             const int32 Radius = IntegerSqrt(FMath::Max(0, (Local.X*Local.X + Local.Y*Local.Y + Local.Z*Local.Z) - Along * Along));
             // Flat-bottomed scoop normal to the contacted floor, wall or ceiling.
-            Distance = FMath::Max3(Radius - 62, -40 - Along, Along - 40);
+            Distance = FMath::Max3(Radius - 62 * FootprintScale, -40 - Along, Along - 40);
         }
         else
         {
@@ -59,7 +59,7 @@ namespace VoxelSurfaceKernel
             const int32 Z = Local.Z + (N.Z < -650 ? 40 : 0);
             const int32 Radius = IntegerSqrt(X * X + Y * Y);
             // A flat tread with a sloping skirt, trimmed at the back so a thin wall shields its far side.
-            const int32 Side = Radius - 76 + FMath::Clamp(Z, 0, 40) / 3;
+            const int32 Side = Radius - (76 - FMath::Clamp(Z, 0, 40) / 3) * FootprintScale;
             Distance = FMath::Max(FMath::Max3(Side, Z - 40, -20 - Z), -16 - Along);
         }
         return Distance;

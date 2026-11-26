@@ -53,8 +53,10 @@ AMazeChaseSession::AMazeChaseSession()
     Theme = FColor(74,186,164);
     RoundSeconds = 180.f;
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Shape(TEXT("/Engine/BasicShapes/Cube"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Stone(TEXT("/Game/TreasureIsland/Art/Neutral/SM_HewnBlock"));
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Material(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
     Cube = Shape.Object;
+    HewnWall = Stone.Object;
     BasePaint = Material.Object;
 }
 
@@ -78,7 +80,7 @@ UStaticMeshComponent* AMazeChaseSession::MakeBlock(FName Tag, const FBox& Bounds
     auto* Part = NewObject<UStaticMeshComponent>(this, Name);
     Part->SetNetAddressable();
     Part->SetupAttachment(GetRootComponent());
-    Part->SetStaticMesh(Cube);
+    Part->SetStaticMesh(Tag == TEXT("MazeWall") ? HewnWall.Get() : Cube.Get());
     Part->SetRelativeLocation(Bounds.GetCenter());
     Part->SetRelativeScale3D(Bounds.GetSize()/100.);
     Part->SetMaterial(0,Paint);

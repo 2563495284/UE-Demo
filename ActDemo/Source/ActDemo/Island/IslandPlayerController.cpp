@@ -1,4 +1,5 @@
 #include "Island/IslandPlayerController.h"
+#include "Island/IslandLocalPlayer.h"
 #include "ExpeditionText.h"
 #include "Island/IslandNeutralProp.h"
 #include "Island/IslandNeutralLayout.h"
@@ -158,8 +159,7 @@ AIslandChest* AIslandPlayerController::GetReachableChest() const
     for (TActorIterator<AIslandChest> It(GetWorld()); It; ++It)
     {
         AIslandChest* Chest=*It;
-        const FVector Center=Chest->GetActorLocation();
-        const double Distance=FVector::DistSquared(Origin,Center);
+        const double Distance=Chest->GetInteractionDistanceSquared(Origin);
         if (Distance<=Nearest && Chest->IsReachableFrom(*Hero))
         {
             Target=Chest;
@@ -686,6 +686,18 @@ void AIslandPlayerController::ServerChooseTeam_Implementation(int32 Team)
     {
         Mode->ChooseTeam(*this, Team);
     }
+}
+
+void AIslandPlayerController::ServerChooseCharacter_Implementation(int32 ModelIndex)
+{
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+        Mode->ChooseCharacter(*this, ModelIndex);
+}
+
+void AIslandPlayerController::ClientCharacterChosen_Implementation(int32 ModelIndex)
+{
+    if (auto* Local = Cast<UIslandLocalPlayer>(GetLocalPlayer()))
+        Local->RememberCharacterModel(ModelIndex);
 }
 
 void AIslandPlayerController::ServerSetRoomReady_Implementation(bool bReady)

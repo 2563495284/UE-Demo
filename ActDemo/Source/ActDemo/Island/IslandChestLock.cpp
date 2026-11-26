@@ -186,7 +186,7 @@ void AIslandGameMode::PublishLockViews()
                 EIslandLockRole Role = EIslandLockRole::Observer;
                 if (Lock.Leader.Get() == Player) Role = EIslandLockRole::Leader;
                 else if (Lock.Helper.Get() == Player) Role = EIslandLockRole::Helper;
-                const double Distance = FVector::DistSquared(Hero.GetAimOrigin(), Chest->GetActorLocation());
+                const double Distance = Chest->GetInteractionDistanceSquared(Hero.GetAimOrigin());
                 if (Role == EIslandLockRole::Observer && Distance >= Nearest) continue;
                 Next.Chest = Chest;
                 Next.Team = Lock.Team;

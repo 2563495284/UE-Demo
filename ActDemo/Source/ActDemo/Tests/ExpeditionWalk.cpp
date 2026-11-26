@@ -1,5 +1,8 @@
 #include "Tests/ExpeditionWalk.h"
 #include "Island/ExpeditionDock.h"
+#include "Island/IslandGameMode.h"
+#include "Island/IslandNeutralProp.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
 #include "Voxel/VoxelCharacter.h"
@@ -9,18 +12,68 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/InputSettings.h"
 #include "HAL/FileManager.h"
 #include "Misc/App.h"
 #include "Misc/Paths.h"
+#include "TimerManager.h"
 #include "UnrealClient.h"
+
+namespace
+{
+    FRotator ViewOfWreckPlank(AVoxelCharacter& Hero, FVector Stand, FVector Eye, FVector Plank)
+    {
+        const auto* Arm = Hero.FindComponentByClass<USpringArmComponent>();
+        if (Hero.IsInFirstPersonView() || !Arm) return (Plank - Eye).Rotation();
+        // The third-person reticle follows a ray from the shoulder camera. Moving
+        // the camera along its boom cannot change that ray, but rotating its
+        // lateral socket offset does. Aim the offset ray at the actual plank.
+        const FVector Pivot = Stand + (Arm->GetComponentLocation() - Hero.GetActorLocation()) + Arm->TargetOffset;
+        const FVector ToPlank = Plank - Pivot;
+        FRotator View = ToPlank.Rotation();
+        for (int32 I = 0; I < 6; ++I)
+            View = (ToPlank - View.RotateVector(Arm->SocketOffset)).Rotation();
+        return View;
+    }
+
+    void VerifyWreckPreviewInput(AIslandPlayerController& Player, AIslandNeutralProp& Ship)
+    {
+        auto* Hero = Player.GetHero();
+        FHitResult Hit;
+        const FVector Eye = Hero->GetAimOrigin();
+        const FVector Aim = Player.GetExcavationAim(*Hero);
+        const FCollisionQueryParams Query(SCENE_QUERY_STAT(WreckPreviewFirstDig),false,Hero);
+        if (!AIslandNeutralProp::TraceShovel(*Player.GetWorld(),Hit,Eye,Eye+Aim*AVoxelGameMode::AimReach,Query)
+            || Hit.GetActor() != &Ship || !Hit.GetComponent()->IsA<UIslandMeshVoxels>())
+        {
+            UE_LOG(LogTemp,Error,TEXT("WRECK_FIRST_DIG_FAILED crosshair=%s standing=%s aim=%s"),
+                *GetNameSafe(Hit.GetActor()),*Hero->GetActorLocation().ToCompactString(),*Aim.ToCompactString());
+            FPlatformMisc::RequestExitWithStatus(false,1);
+            return;
+        }
+        auto* Field = CastChecked<UIslandMeshVoxels>(Hit.GetComponent());
+        const int32 Before = Field->RemainingCount();
+        Player.SetExpeditionDigHeld(true);
+        Player.SetExpeditionDigHeld(false);
+        FTimerHandle Timer;
+        Player.GetWorldTimerManager().SetTimer(Timer,FTimerDelegate::CreateWeakLambda(Field,[Field,Before]()
+        {
+            const int32 After = Field->RemainingCount();
+            UE_LOG(LogTemp,Display,TEXT("WRECK_FIRST_DIG_RESULT part=%s before=%d after=%d"),*Field->SourcePart()->GetName(),Before,After);
+            FPlatformMisc::RequestExitWithStatus(false,After < Before ? 0 : 1);
+        }),.4f,false);
+    }
+}
 
 AExpeditionWalk::AExpeditionWalk()
 {
     PrimaryActorTick.bCanEverTick = true;
     bSlopePitRun = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionSlopePitQA"));
     bTreasureRun = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionTreasureWalkQA"));
+    bArtTour = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionArtTour"));
+    bWreckPreview = FParse::Param(FCommandLine::Get(),TEXT("WreckPreview"));
 }
 
 void AExpeditionWalk::ChangeStage(EStage Next)
@@ -124,9 +177,92 @@ TOptional<FVector> AExpeditionWalk::HighestSupportingRock(AIslandPlayerControlle
     return Best;
 }
 
+void AExpeditionWalk::TickWreckPreview()
+{
+    auto& World = *GetWorld();
+    auto* Player = Cast<AIslandPlayerController>(World.GetFirstPlayerController());
+    auto* State = World.GetGameState<AIslandGameState>();
+    auto* Mode = World.GetAuthGameMode<AIslandGameMode>();
+    auto* Terrain = AVoxelTerrain::Find(&World);
+    if (!Player || !Player->GetHero() || !State || !Mode || !Terrain || !Terrain->IsReady()) return;
+    if (!bStarted && State->Phase == EIslandPhase::Waiting && State->CanLaunch())
+    {
+        Player->ServerStartExpedition();
+        bStarted = true;
+    }
+    if (State->Phase != EIslandPhase::Hunting || !Player->IsPlaying() || !Mode->CanPlayerAct(*Player)
+        || !Player->IsVoxelInputEnabled() || Player->GetViewTarget() != Player->GetHero()) return;
+    AVoxelCharacter* Hero = Player->GetHero();
+    AIslandNeutralProp* Ship = nullptr;
+    for (TActorIterator<AIslandNeutralProp> It(&World); It; ++It)
+        if (It->GetKind() == EIslandNeutralKind::Ship && (!Ship || It->GetActorLocation().X < Ship->GetActorLocation().X)) Ship = *It;
+    if (!Ship)
+    {
+        UE_LOG(LogTemp,Warning,TEXT("WRECK_PREVIEW_NO_SHIP continuing at the normal landing"));
+        Destroy();
+        return;
+    }
+
+    const FTransform& Frame = Ship->GetActorTransform();
+    const FVector Across = Ship->GetActorForwardVector();
+    const double InlandSide = FVector::DotProduct(Across, -Ship->GetActorLocation()) < 0. ? -1. : 1.;
+    const FVector EyeOffset = Hero->GetAimOrigin() - Hero->GetActorLocation();
+    const FCollisionQueryParams Query(SCENE_QUERY_STAT(WreckPreviewPlank),false,Hero);
+    TOptional<FVector> Stand;
+    FRotator View = FRotator::ZeroRotator;
+    bool bWithinReach = false;
+    // Start on a walkable bank by the carved prow. Prefer a spot where the first
+    // ordinary shovel input can already hit the painted hull.
+    for (double Side : {InlandSide, -InlandSide})
+    {
+        for (double Along : {-315., -285., -345.})
+        {
+            const FVector Station = Frame.TransformPosition({0.,Along,0.});
+            for (double Distance : {430.,365.,500.,610.,765.})
+            {
+                const auto Floor = Mode->FindStandingFloor(Hero, Station + Across * (Side * Distance) + FVector(0,0,1200.), 1800.);
+                if (!Floor) continue;
+                const FVector Eye = *Floor + EyeOffset;
+                const FVector Look = (Frame.TransformPosition({0.,Along-22.,165.}) - Eye).GetSafeNormal();
+                FHitResult Hit;
+                bWithinReach = AIslandNeutralProp::TraceShovel(World,Hit,Eye,Eye + Look * AVoxelGameMode::AimReach,Query)
+                    && Hit.GetActor() == Ship;
+                if (!Stand || bWithinReach)
+                {
+                    Stand = Floor;
+                    View = bWithinReach ? ViewOfWreckPlank(*Hero,*Floor,Eye,Hit.ImpactPoint) : Look.Rotation();
+                }
+                if (bWithinReach) break;
+            }
+            if (bWithinReach) break;
+        }
+        if (bWithinReach) break;
+    }
+    if (Stand)
+    {
+        Hero->ReturnToStart(FTransform(FRotator(0.,View.Yaw,0.),*Stand));
+        Player->ClientResetView(View);
+        Player->SetViewTarget(Hero);
+        UE_LOG(LogTemp,Display,TEXT("WRECK_PREVIEW_READY pawn=%s ground=%s yaw=%.1f pitch=%.1f shovel_in_reach=%d"),
+            *Hero->GetName(),*Stand->ToCompactString(),View.Yaw,View.Pitch,bWithinReach);
+        if (FParse::Param(FCommandLine::Get(),TEXT("WreckPreviewFirstDigQA")))
+        {
+            FTimerHandle Timer;
+            Player->GetWorldTimerManager().SetTimer(Timer, FTimerDelegate::CreateWeakLambda(Player,[Player,Ship]()
+            {
+                VerifyWreckPreviewInput(*Player,*Ship);
+            }),1.f,false);
+        }
+    }
+    else UE_LOG(LogTemp,Warning,TEXT("WRECK_PREVIEW_NO_FLOOR continuing at the normal landing"));
+    Destroy();
+}
+
 void AExpeditionWalk::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+    if (bWreckPreview && GetNetMode() == NM_Standalone) { TickWreckPreview(); return; }
+    if (bArtTour) { TickArtTour(); return; }
     const double Now = GetWorld()->GetTimeSeconds();
     if (Stage == EStage::Complete)
     {

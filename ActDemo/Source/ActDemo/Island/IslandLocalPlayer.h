@@ -11,8 +11,10 @@ class UIslandLocalPlayer : public ULocalPlayer
     GENERATED_BODY()
 public:
     FString GetGameLoginOptions() const override;
+    void RememberCharacterModel(int32 Index) { PreferredCharacter = Index; }
 private:
     mutable FGuid MemberId;
+    int32 PreferredCharacter = INDEX_NONE;
 };
 
 UCLASS()

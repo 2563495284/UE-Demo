@@ -3,6 +3,7 @@
 #include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
 #include "Island/IslandBreakable.h"
+#include "Island/IslandState.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Tests/VoxelPlaygroundProbe.h"
@@ -209,14 +210,12 @@ void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Ac
     StartNextEdit();
 }
 
-void AVoxelGameMode::EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFunction<void(bool)> Completion)
+bool AVoxelGameMode::MakeEnvironmentFill(const TArray<FVector>& Centers, FVoxelEdit& Fill) const
 {
     if (!bPlaying || !Terrain || Centers.IsEmpty() || Centers.Num() > FVoxelEdit::MaxFillCenters)
     {
-        Completion(false);
-        return;
+        return false;
     }
-    FVoxelEdit Fill;
     Fill.Action = EVoxelAction::Fill;
     Fill.BrushId = VoxelPlayground::BrushFor(Fill.Action);
     Fill.Center = VoxelPlayground::QuantizeCenter(Centers[0]);
@@ -225,7 +224,20 @@ void AVoxelGameMode::EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFun
         const auto P = VoxelPlayground::QuantizeCenter(Centers[Index]);
         if (P != Fill.Center) Fill.ExtraFillCenters.AddUnique(P);
     }
-    if (!Terrain->IsValidEdit(Fill))
+    return Terrain->IsValidEdit(Fill);
+}
+
+bool AVoxelGameMode::CanStartEnvironmentFill(const TArray<FVector>& Centers) const
+{
+    FVoxelEdit Fill;
+    return MakeEnvironmentFill(Centers, Fill) && Terrain->IsReady() && !Terrain->IsBusy() && Requests.IsEmpty()
+        && IsFillAreaFree(Fill) && !Terrain->GetDensity()->PrepareEdit(Fill).Samples.IsEmpty();
+}
+
+void AVoxelGameMode::EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFunction<void(bool)> Completion)
+{
+    FVoxelEdit Fill;
+    if (!MakeEnvironmentFill(Centers, Fill))
     {
         Completion(false);
         return;
@@ -238,11 +250,12 @@ void AVoxelGameMode::EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFun
     StartNextEdit();
 }
 
-void AVoxelGameMode::QueueMudLanding(const FVector& Impact, const FVector& Normal, TFunction<void(bool)> Completion)
+void AVoxelGameMode::QueueMudLanding(const FVector& Impact, const FVector& Normal, bool bWideFootprint, TFunction<void(bool)> Completion)
 {
     FVoxelEdit Edit;
     Edit.Action = EVoxelAction::Fill;
     Edit.BrushId = VoxelPlayground::MudPad;
+    Edit.bWideFootprint = bWideFootprint;
     if (Impact.ContainsNaN() || Normal.ContainsNaN() || Normal.IsNearlyZero())
     {
         if (Completion) Completion(false);
@@ -319,7 +332,7 @@ bool AVoxelGameMode::CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharac
         if (!bOverlap) continue;
         // Only a pad directly beneath a standing capsule can raise it. Wall impacts cannot shove a bystander.
         const double FootZ = Position.Z - HalfHeight;
-        if (!bPad || Edit.SurfaceNormal.Z < 650 || FVector::DistSquared2D(Position, Center) > FMath::Square(57.)
+        if (!bPad || Edit.SurfaceNormal.Z < 650 || FVector::DistSquared2D(Position, Center) > FMath::Square(57. * Edit.FootprintScale())
             || FootZ < Center.Z - 10. || FootZ > Center.Z + 40.) return false;
         const FVector Destination(Position.X, Position.Y, Center.Z + 42. + HalfHeight);
         FCollisionQueryParams Query(SCENE_QUERY_STAT(MudLift), false, Hero);
@@ -510,6 +523,9 @@ bool AVoxelGameMode::ResolveEdit(const FRequest& Request, AVoxelCharacter& Hero,
     if (Terrain->Layout == EVoxelLayout::Expedition && Request.Action == EVoxelAction::Punch)
     {
         Edit.BrushId = VoxelPlayground::ShallowCut;
+        const auto* Round = GetGameState<AIslandGameState>();
+        const auto* Member = Hero.GetPlayerState<AIslandPlayerState>();
+        Edit.bWideFootprint = Round && Member && Round->HasDecoyToolBoost(Member->Team);
         Edit.SurfaceNormal = VoxelPlayground::QuantizeNormal(Rock.ImpactNormal);
         Edit.Center = VoxelPlayground::QuantizeCenter(Rock.ImpactPoint);
         return true;

@@ -1,5 +1,10 @@
 #include "Voxel/VoxelTerrain.h"
+#if !UE_BUILD_SHIPPING
+#include "Tests/ExpeditionDecoyToolProof.h"
+#endif
 #include "Voxel/ExpeditionSurface.h"
+#include "Voxel/IslandRouteVoxel.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Voxel/ExpeditionImpact.h"
 #if !UE_BUILD_SHIPPING
 #include "Tests/ExpeditionWalk.h"
@@ -13,7 +18,9 @@
 #include "Components/StaticMeshComponent.h"
 #include "VoxelSurfaceKernel.h"
 #include "EngineUtils.h"
+#include "Engine/StaticMesh.h"
 #include "Misc/App.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ProceduralMeshComponent.h"
 #include "Serialization/CustomVersion.h"
@@ -88,7 +95,18 @@ namespace
             }
         }
 
-        return VoxelSurfaceKernel::BuildChunk(Samples, Start);
+        FProcMeshSection Section = VoxelSurfaceKernel::BuildChunk(Samples, Start);
+        if (Density.Layout == EVoxelLayout::Expedition)
+        {
+            for (FProcMeshVertex& Vertex : Section.ProcVertexBuffer)
+            {
+                const FVector& P = Vertex.Position;
+                const int32 Surface = BaseHeight(Density.Layout, FMath::RoundToInt(P.X), FMath::RoundToInt(P.Y));
+                // Zero on original ground, positive into a cut, negative on a newly built mound.
+                Vertex.UV1.X = Surface - P.Z;
+            }
+        }
+        return Section;
     }
 }
 
@@ -100,8 +118,12 @@ AVoxelTerrain::AVoxelTerrain()
     SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Origin")));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube"));
     FragmentMesh = Cube.Object;
-    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Rock(TEXT("/Game/LevelPrototyping/Materials/MI_PrototypeGrid_Gray"));
-    ExpeditionRockMaterial = Rock.Object;
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Ground(TEXT("/Game/TreasureIsland/FX/M_IslandGround"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Clod(TEXT("/Game/TreasureIsland/Art/Neutral/SM_ReefStone"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClodPigment(TEXT("/Game/TreasureIsland/Art/Neutral/M_ClodPigment"));
+    IslandGround = Ground.Object;
+    ExpeditionClodMesh = Clod.Object;
+    ExpeditionClodPigment = ClodPigment.Object;
 
     for (int32 Index = 0; Index < VoxelPlayground::ChunkCount; ++Index)
     {
@@ -115,12 +137,21 @@ void AVoxelTerrain::ConfigureChunk(UProceduralMeshComponent& Chunk)
 {
     Chunk.SetupAttachment(RootComponent);
     Chunk.SetCollisionProfileName(TEXT("BlockAll"));
-    if (Layout == EVoxelLayout::Expedition) Chunk.SetMaterial(0,ExpeditionRockMaterial);
+    if (Layout == EVoxelLayout::Expedition) Chunk.SetMaterial(0,IslandGround);
     Chunk.SetGenerateOverlapEvents(false);
     Chunk.SetCanEverAffectNavigation(false);
     Chunk.bUseComplexAsSimpleCollision = true;
     // Keep the visible surface and walking collision on the same committed version.
     Chunk.bUseAsyncCooking = false;
+}
+
+void AVoxelTerrain::ApplyBakedGroundMaterial(UProceduralMeshComponent& Tile) const
+{
+    // Old maps saved the whitebox grid as a per-component override. Keep other authored surfaces.
+    const UMaterialInterface* Current = Tile.GetMaterial(0);
+    if (!Tile.GetNumOverrideMaterials() || !Current || Current->GetPathName() ==
+        TEXT("/Game/LevelPrototyping/Materials/MI_PrototypeGrid_Gray.MI_PrototypeGrid_Gray"))
+        Tile.SetMaterial(0,IslandGround);
 }
 
 UProceduralMeshComponent* AVoxelTerrain::CreateChunk(int32 Index)
@@ -145,7 +176,7 @@ AVoxelTerrain* AVoxelTerrain::Find(UWorld* World)
 uint32 AVoxelTerrain::GetInitialChecksum() const
 {
     // All layouts replay the same grounded edit protocol on every peer.
-    constexpr uint32 TerrainEditProtocol = 5;
+    constexpr uint32 TerrainEditProtocol = 6;
     uint32 Hash = HashCombineFast(GetChecksum(), TerrainEditProtocol);
     if (Layout != EVoxelLayout::Playground)
     {
@@ -183,7 +214,7 @@ void AVoxelTerrain::BakeExpeditionSurface()
             continue;
         }
         if (!BakedTiles[Index]) BakedTiles[Index]=MakeSurfaceComponent(true);
-        if (!BakedTiles[Index]->GetNumOverrideMaterials()) BakedTiles[Index]->SetMaterial(0,ExpeditionRockMaterial);
+        ApplyBakedGroundMaterial(*BakedTiles[Index]);
         BakedTiles[Index]->SetProcMeshSection(0,Section);
     }
 }
@@ -369,7 +400,7 @@ void AVoxelTerrain::PostLoad()
     for (UProceduralMeshComponent* Tile : BakedTiles)
     {
         if (!Tile) continue;
-        if (!Tile->GetNumOverrideMaterials()) Tile->SetMaterial(0,ExpeditionRockMaterial);
+        ApplyBakedGroundMaterial(*Tile);
         Tile->SetVisibility(true);
         Tile->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
     }
@@ -379,13 +410,14 @@ void AVoxelTerrain::BeginPlay()
 {
     Super::BeginPlay();
 #if !UE_BUILD_SHIPPING
-    if (Layout == EVoxelLayout::Expedition && HasAuthority() && FParse::Param(FCommandLine::Get(),TEXT("ExpeditionWalkQA")))
+    if (Layout == EVoxelLayout::Expedition && HasAuthority() && (FParse::Param(FCommandLine::Get(),TEXT("ExpeditionWalkQA"))
+        || (GetNetMode() == NM_Standalone && FParse::Param(FCommandLine::Get(),TEXT("WreckPreview")))))
         GetWorld()->SpawnActor<AExpeditionWalk>();
 #endif
     if (Layout == EVoxelLayout::Expedition)
     {
-        for (UProceduralMeshComponent* Chunk : MeshChunks) if (Chunk) Chunk->SetMaterial(0,ExpeditionRockMaterial);
-        for (UProceduralMeshComponent* Tile : BakedTiles) if (Tile && !Tile->GetNumOverrideMaterials()) Tile->SetMaterial(0,ExpeditionRockMaterial);
+        for (UProceduralMeshComponent* Chunk : MeshChunks) if (Chunk) Chunk->SetMaterial(0,IslandGround);
+        for (UProceduralMeshComponent* Tile : BakedTiles) if (Tile) ApplyBakedGroundMaterial(*Tile);
     }
     MeshChunks.SetNum(FVoxelGrid::ForLayout(Layout).NumChunks());
     StartBuild({}, {}, {}, {});
@@ -507,6 +539,10 @@ void AVoxelTerrain::StartBuild(FVoxelDensityPatch Patch, TOptional<FVoxelEdit> E
                 if (Edit.IsSet())
                 {
                     Terrain->AppliedSequence = Edit->Sequence;
+#if !UE_BUILD_SHIPPING
+                    static const bool bCheckDecoyTools = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA"));
+                    if (bCheckDecoyTools) FExpeditionDecoyToolProof::ObserveCommitted(*Terrain, *Edit);
+#endif
                     if (Terrain->CanSeeExcavation(Edit.GetValue()))
                     {
                         Terrain->SpawnFragments(Edit.GetValue());
@@ -564,7 +600,27 @@ void AVoxelTerrain::Commit(FVoxelMeshBuild& Build)
         }
     }
     Density = MoveTemp(Build.Density);
+    FBox LostSupport(ForceInit);
+    if (Layout == EVoxelLayout::Expedition && HasAuthority())
+    {
+        // Include remote material removed by grounding as well as the brush itself.
+        // A fill that only adds material cannot sever any existing attachment.
+        for (const auto& Change : Build.Patch.Samples)
+        {
+            const FIntVector Cell = Density->Grid.SampleCoordinates(Change.Key);
+            if (Change.Value > Density->Sample(Cell))
+                LostSupport += FVector(Density->Grid.Origin + Cell * VoxelPlayground::Spacing);
+        }
+    }
     Density->Apply(Build.Patch);
+    if (LostSupport.IsValid)
+    {
+        const FBox Changed = LostSupport.ExpandBy(VoxelPlayground::Spacing);
+        for (TActorIterator<AIslandRouteVoxel> It(GetWorld()); It; ++It)
+            if (It->Field()->Bounds.GetBox().ExpandBy(VoxelPlayground::Spacing).Intersect(Changed))
+                It->RefreshGrounding(*this);
+        IslandSceneryVoxels::CheckFoundations(*GetWorld(), Changed);
+    }
 }
 
 bool AVoxelTerrain::CanSeeExcavation(const FVoxelEdit& Edit) const
@@ -587,22 +643,32 @@ void AVoxelTerrain::SpawnFragments(const FVoxelEdit& Edit)
     if (!Local || !Local->IsLocalController() || !Local->PlayerCameraManager) return;
     // The fist-sized stones are local feedback around a strike.
     if (FVector::DistSquared(Local->PlayerCameraManager->GetCameraLocation(), FVector(Edit.Center)) > FMath::Square(2600.)) return;
+    const bool bIsland = Layout == EVoxelLayout::Expedition && ExpeditionClodMesh && ExpeditionClodPigment;
     if (!Debris)
     {
         Debris = NewObject<UInstancedStaticMeshComponent>(this);
         Debris->SetupAttachment(RootComponent);
-        Debris->SetStaticMesh(FragmentMesh);
+        Debris->SetStaticMesh(bIsland ? ExpeditionClodMesh.Get() : FragmentMesh.Get());
+        if (bIsland)
+        {
+            Debris->SetNumCustomDataFloats(5);
+            Debris->SetMaterial(0, ExpeditionClodPigment);
+        }
         Debris->SetMobility(EComponentMobility::Movable);
         Debris->SetCollisionEnabled(ECollisionEnabled::NoCollision);
         Debris->SetCanEverAffectNavigation(false);
         Debris->SetCastShadow(false);
         Debris->RegisterComponent();
     }
+    const float Depth = bIsland ? VoxelPlayground::BaseHeight(Layout, Edit.Center.X, Edit.Center.Y) - Edit.Center.Z : 0.f;
     for (int32 Index = 0; Index < 7; ++Index)
     {
         FTransform Transform(FMath::VRand().Rotation(), FVector(Edit.Center) + FMath::VRand() * 40., FVector(FMath::FRandRange(.055f, .13f)));
-        Fragments.Add({Transform, FMath::VRand() * 210. + FVector(0, 0, 180), 0.f});
+        // The original strike supplies the material sample while the clod tumbles through the air.
+        const int32 Slot = Fragments.Add({Transform, FMath::VRand() * 210. + FVector(0, 0, 180), 0.f,
+            {float(Edit.Center.X), float(Edit.Center.Y), float(Edit.Center.Z), Depth, Edit.SurfaceNormal.Z / 1000.f}});
         if (Fragments.Num() > Debris->GetInstanceCount()) Debris->AddInstance(Transform, true);
+        if (bIsland) Debris->SetCustomData(Slot, MakeArrayView(Fragments[Slot].SoilSample));
     }
     SetActorTickEnabled(true);
 }
@@ -618,6 +684,8 @@ void AVoxelTerrain::Tick(float DeltaSeconds)
         if (Fragment.Age >= .45f)
         {
             Fragments.RemoveAtSwap(Index, 1, EAllowShrinking::No);
+            if (Debris->NumCustomDataFloats && Fragments.IsValidIndex(Index))
+                Debris->SetCustomData(Index, MakeArrayView(Fragments[Index].SoilSample));
             continue;
         }
         Fragment.Velocity.Z -= 630.f * DeltaSeconds;

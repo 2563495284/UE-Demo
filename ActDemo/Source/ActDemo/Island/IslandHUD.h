@@ -11,6 +11,7 @@ class ACameraActor;
 class SIslandRoomPanel;
 class SWidget;
 enum class EIslandPanel : uint8;
+enum class EIslandDecoyEvent : uint8;
 
 UCLASS()
 class AIslandHUD : public AVoxelHUD
@@ -33,13 +34,14 @@ protected:
     void EndPlay(const EEndPlayReason::Type Reason) override;
     FString ControlsText() const override;
 private:
+    static const TCHAR* DecoyEventName(EIslandDecoyEvent Event);
     void DrawChart(const AIslandPlayerController& Player, float Alpha, bool bInset = false);
     void UpdateTreasureFeedback(const AIslandPlayerController& Player, const AIslandGameState& Round, float DeltaSeconds);
     void DrawTreasureLedger(const FIslandClues& Clues, int32 Team, float Scale);
     void DrawTreasureFeedback(const AIslandPlayerController& Player, float Scale, bool bFullChart);
     void DrawVaultBearing(const AIslandPlayerController& Player, float Scale);
-    void DrawIntelDiamond(FVector2D Center, float Radius, FLinearColor Color, float Thickness);
     void UpdateDockCamera(AIslandPlayerController& Player, bool bRoom);
+    bool UpdateCrewPreview(AIslandPlayerController& Player, bool bShow);
     void UpdateInput(AIslandPlayerController& Player, bool bMenu);
     void UpdateResultCamera(AIslandPlayerController& Player);
     void DrawHunt(AIslandPlayerController& Player);
@@ -54,14 +56,13 @@ private:
     int32 SeenDecoys = 0;
     int32 RevealedDecoy = INDEX_NONE;
     float DecoyAge = 0.f;
-    uint8 SeenIntel = 0;
-    int32 IntelSite = INDEX_NONE;
-    float IntelAge = 0.f;
     bool bCanPresentRewards = false;
     TSharedPtr<SIslandRoomPanel> Panel;
     TSharedPtr<SWidget> ViewportLayer;
     TWeakObjectPtr<ACameraActor> DockCamera, ResultCamera;
     TArray<TWeakObjectPtr<AActor>> ResultOccluders;
+    TArray<TWeakObjectPtr<AActor>> PreviewOccluders;
+    bool bCrewPreview = false;
     int32 CameraDock = INDEX_NONE;
     bool bFront = false;
     bool bRoomCamera = false;

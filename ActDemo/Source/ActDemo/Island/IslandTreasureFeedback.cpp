@@ -64,12 +64,6 @@ bool AIslandHUD::GetTreasureFeedbackFrame(FName& OutStage,float& OutAge) const
         }
         return true;
     }
-    if (IntelSite!=INDEX_NONE)
-    {
-        OutStage=TEXT("Intel");
-        OutAge=IntelAge;
-        return true;
-    }
     if (RevealedDecoy!=INDEX_NONE)
     {
         OutStage=TEXT("Decoy");
@@ -89,9 +83,8 @@ void AIslandHUD::UpdateTreasureFeedback(const AIslandPlayerController& Player,co
         TreasureTeam=Player.GetTeam();
         SeenSites=PresentedSites=0;
         PendingSites.Reset();
-        RewardSite=RevealedDecoy=IntelSite=INDEX_NONE;
-        RewardAge=DecoyAge=IntelAge=0.f;
-        SeenIntel=0;
+        RewardSite=RevealedDecoy=INDEX_NONE;
+        RewardAge=DecoyAge=0.f;
         SeenDecoys=0;
     }
     bCanPresentRewards=Round.Phase==EIslandPhase::Hunting && !IsMenuOpen() && TreasureTeam>=0 &&
@@ -103,17 +96,6 @@ void AIslandHUD::UpdateTreasureFeedback(const AIslandPlayerController& Player,co
     for (int32 Site=0; Site<IslandRules::ClueCount; ++Site)
         if ((Clues.Mask & (1u<<Site))!=0 && (SeenSites & (1u<<Site))==0) PendingSites.Add(Site);
     SeenSites=Clues.Mask;
-    const uint8 NewIntel=Clues.ScoutedMask & ~SeenIntel;
-    SeenIntel=Clues.ScoutedMask;
-    if (NewIntel)
-    {
-        for (int32 Site=0;Site<IslandRules::ClueCount;++Site)
-            if (NewIntel & (1u<<Site)) { IntelSite=Site; break; }
-        IntelAge=0.f;
-    }
-    else if (IntelSite!=INDEX_NONE && (!(SeenIntel & (1u<<IntelSite)) || (IntelAge+=DeltaSeconds)>=DecoySeconds))
-        IntelSite=INDEX_NONE;
-
     if (RewardSite!=INDEX_NONE)
     {
         RewardAge+=DeltaSeconds;
@@ -146,7 +128,6 @@ void AIslandHUD::DrawTreasureLedger(const FIslandClues& Clues,int32 Team,float S
         FString::Format(EXPEDITION_TEXT("钥匙碎片  {0}/3","Key fragments  {0}/3"),{Clues.FragmentCount()});
     const FString Sites=FString::Format(EXPEDITION_TEXT("真箱点位 {0}/4","True sites {0}/4"),{Clues.Count()});
     const FString Action=Clues.Complete() ? FString(EXPEDITION_TEXT("按住 Tab 看藏宝交点","Hold Tab for the vault")) :
-        Clues.ScoutedMask ? FString(EXPEDITION_TEXT("按住 Tab 到金色菱形处开箱","Hold Tab to find your marked chest")) :
         Clues.HasKey() ? FString(EXPEDITION_TEXT("再找一处真箱定位宝藏","One more site locates the vault")) :
         FString(EXPEDITION_TEXT("按住 Tab 查看搜索区","Hold Tab for search areas"));
     const FString Top=Crew+Inventory+(Clues.HasKey() && Clues.FragmentCount()>0 ?
@@ -182,22 +163,14 @@ void AIslandHUD::DrawTreasureFeedback(const AIslandPlayerController& Player,floa
     DrawRect(Accent,Left,Top,3*S,Height);
     const FVector2D Icon(Left+33*S,Top+Height*.5f);
     FString Message;
-    if (Stage==TEXT("Intel"))
-    {
-        DrawIntelDiamond(Icon,S*FMath::Lerp(16.f,9.f,FMath::SmoothStep(0.f,.55f,Age)),Gold,2.8f*S);
-        Message=FString::Format(EXPEDITION_TEXT("优胜情报 · {0} 区真箱已标记","Winner’s intel · Site {0} marked"),
-            {FString::Chr('A'+IntelSite)});
-    }
-    else if (bDecoy)
+    if (bDecoy)
     {
         const float R=S*FMath::Lerp(11.f,6.f,FMath::SmoothStep(0.f,.45f,Age));
         DrawLine(Icon.X-R,Icon.Y-R,Icon.X+R,Icon.Y+R,Ink,2.5f*S);
         DrawLine(Icon.X-R,Icon.Y+R,Icon.X+R,Icon.Y-R,Ink,2.5f*S);
-        const auto* Round=GetWorld()->GetGameState<AIslandGameState>();
-        const FIslandClues& Own=Player.GetLocalClues();
-        const bool bAlreadyMapped=(Own.Mask|Own.ScoutedMask)==15 && Round && Round->IsPartyWinner(Player.GetTeam());
-        Message=bAlreadyMapped ? EXPEDITION_TEXT("本队已标全真箱位置","All true chests already charted")
-            : EXPEDITION_TEXT("已划去这只假箱","Decoy crossed off");
+        Message=EXPEDITION_TEXT("假箱已标记","Decoy crossed off");
+        if (const auto* Round = GetWorld()->GetGameState<AIslandGameState>(); bFullChart && Round && Round->PartyDecoyEvent != EIslandDecoyEvent::None)
+            Message=FString::Format(EXPEDITION_TEXT("假箱 · {0}", "Decoy · {0}"), {DecoyEventName(Round->PartyDecoyEvent)});
     }
     else
     {
@@ -238,14 +211,6 @@ void AIslandHUD::DrawTreasureFeedback(const AIslandPlayerController& Player,floa
     GetTextSize(Message,W,H,Font,S);
     const float Fit=FMath::Min(1.f,(Width-68*S)/FMath::Max(1.f,W));
     DrawText(Message,Ink,Left+61*S,Top+(Height-H*Fit)*.5f,Font,S*Fit);
-}
-
-void AIslandHUD::DrawIntelDiamond(FVector2D Center,float Radius,FLinearColor Color,float Thickness)
-{
-    DrawLine(Center.X,Center.Y-Radius,Center.X+Radius,Center.Y,Color,Thickness);
-    DrawLine(Center.X+Radius,Center.Y,Center.X,Center.Y+Radius,Color,Thickness);
-    DrawLine(Center.X,Center.Y+Radius,Center.X-Radius,Center.Y,Color,Thickness);
-    DrawLine(Center.X-Radius,Center.Y,Center.X,Center.Y-Radius,Color,Thickness);
 }
 
 void AIslandHUD::DrawVaultBearing(const AIslandPlayerController& Player,float S)

@@ -35,7 +35,7 @@ APartyVoxelSession::APartyVoxelSession()
     SetReplicateMovement(true);
     SetNetUpdateFrequency(30.f);
     Terrain = CreateDefaultSubobject<UPartyDensityTerrain>(TEXT("DensityTerrain"));
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> Disk(TEXT("/Engine/BasicShapes/Cylinder"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Disk(TEXT("/Game/TreasureIsland/Art/Neutral/SM_TimberPost"));
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Paint(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
     Material=Paint.Object;
     BeaconMesh=Disk.Object;

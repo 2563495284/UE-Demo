@@ -51,6 +51,9 @@ namespace IslandNeutral
     using FSurface = TSharedPtr<const NeutralLayoutDetail::FIslandSurface>;
     FSurface Survey(UWorld& World, const AVoxelTerrain& Terrain);
     bool CanReachDigSite(const FSurface& Surface, FVector2D Point);
+    FBox2D Footprint(const FIslandNeutralPlacement& Placement);
+    bool KeepsDigRoutes(const FSurface& Surface, const FIslandTreasureLayout& Treasure,
+        TConstArrayView<FBox2D> Footprints);
     void Generate(const FSurface& Surface, int32 RoundSeed,
         const FIslandTreasureLayout& Treasure, TArray<FIslandNeutralPlacement>& Out);
 #if !UE_BUILD_SHIPPING

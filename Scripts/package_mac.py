@@ -18,6 +18,7 @@ OUTPUT = ROOT / "Builds/TreasureIsland/Mac"
 APP_NAME = "远征岛.app"
 ZIP_NAME = "远征岛-Mac.zip"
 GUIDE = ROOT / "Docs/试玩说明.txt"
+PREVIEWS = (ROOT / "Scripts/试看沉船.command", ROOT / "Scripts/全岛巡游.command")
 EOS_CONFIG = ROOT / "ActDemo/Config/Mac/MacEngine.ini"
 EOS_SECTION = "eossdk.platform.expeditionisland"
 EOS_FIELDS = ("ProductId", "SandboxId", "DeploymentId", "ClientId", "ClientSecret")
@@ -58,7 +59,26 @@ def check_eos_package(app, unreal_pak, scratch, expected):
 
 def check_island_content(app, unreal_pak, scratch):
     required = {"treasureisland/l_islandfront.umap", "treasureisland/l_expeditionisland.umap",
-                "treasureisland/fx/m_islandpassage.uasset", "treasureisland/fx/m_partyground.uasset"}
+                "treasureisland/fx/m_islandpassage.uasset", "treasureisland/fx/m_islandground.uasset",
+                "treasureisland/fx/m_arenaground.uasset", "treasureisland/art/m_lagoon.uasset",
+                "treasureisland/art/harbour/sm_reefshelf.uasset", "treasureisland/art/neutral/sm_windcanvas.uasset",
+                "treasureisland/art/neutral/m_wreckfinish.uasset"}
+    required.update(f"treasureisland/art/crew/sm_{animal}.uasset" for animal in ("pig", "monkey", "fox", "calf"))
+    required.update({
+        "treasureisland/fx/m_routepigment.uasset",
+        "treasureisland/art/harbour/sm_rescueraft.uasset",
+        "treasureisland/art/harbour/sm_archlintel.uasset",
+        "treasureisland/art/harbour/sm_signalmast.uasset",
+        "treasureisland/art/harbour/sm_quarryderrick.uasset",
+        "treasureisland/art/harbour/sm_fossilheel.uasset",
+        "treasureisland/art/neutral/sm_sheavewheel.uasset",
+        "treasureisland/art/neutral/sm_tidepool.uasset",
+        "treasureisland/art/neutral/sm_rolledcanvas.uasset",
+        "treasureisland/art/neutral/m_clodpigment.uasset",
+        "treasureisland/art/crew/sm_cofferhasp.uasset",
+        "treasureisland/art/crew/sm_cofferkeyway.uasset",
+        "treasureisland/art/crew/sm_cofferdial.uasset",
+    })
     for arena in ("reefrun", "beaconclimb", "crystalhunt", "bridgedash", "floodgates", "crownhold", "mazechase"):
         plugin = f"plugins/gamefeatures/party{arena}/content/"
         required.update((plugin + f"maps/l_{arena}.umap", plugin + f"party{arena}.uasset"))
@@ -80,6 +100,20 @@ def check_island_content(app, unreal_pak, scratch):
         raise RuntimeError(f"Missing island content in the cooked game: {', '.join(sorted(required))}")
 
 
+def check_voxel_archive(app, unreal_pak, scratch):
+    # This file is raw gameplay geometry in the UFS pak, outside the cooked asset registry.
+    relative = Path("TreasureIsland/VoxelSources/SceneryTriangles.bin")
+    source = ROOT / "ActDemo/Content" / relative
+    extracted = scratch / "voxel-source-check"
+    extracted.mkdir()
+    for pak in (app / "Contents/UE/ActDemo/Content/Paks").glob("*.pak"):
+        subprocess.run([unreal_pak, pak, "-Extract", extracted, f"-Filter=*{relative.as_posix()}"],
+                       check=True, stdout=subprocess.DEVNULL)
+    copies = list(extracted.rglob(relative.name))
+    if len(copies) != 1 or not source.is_file() or copies[0].read_bytes() != source.read_bytes():
+        raise RuntimeError("Cooked expedition voxel triangles differ from the authored island meshes")
+
+
 def prepare_download(directory):
     app = directory / APP_NAME
     (directory / "ActDemo.app").rename(app)
@@ -94,14 +128,19 @@ def prepare_download(directory):
 
     guide = directory / GUIDE.name
     shutil.copyfile(GUIDE, guide)
+    for preview in PREVIEWS:
+        shutil.copy2(preview, directory / preview.name)
     archive = directory / ZIP_NAME
     # Apple's bsdtar marks Chinese member paths as UTF-8 and keeps executable modes and symlinks.
     subprocess.run(["/usr/bin/tar", "--format", "zip", "--mac-metadata", "--options", "zip:hdrcharset=UTF-8",
-                    "-cf", archive, "-C", directory, APP_NAME, guide.name], check=True)
+                    "-cf", archive, "-C", directory, APP_NAME, guide.name, *(p.name for p in PREVIEWS)], check=True)
     with zipfile.ZipFile(archive) as bundle:
         if bundle.testzip() or bundle.read(guide.name) != guide.read_bytes():
             raise RuntimeError(f"Archive verification failed for {archive}")
         bundle.getinfo(f"{APP_NAME}/{executable}")
+        for preview in PREVIEWS:
+            if bundle.read(preview.name) != preview.read_bytes() or not (bundle.getinfo(preview.name).external_attr >> 16) & 0o111:
+                raise RuntimeError(f"{preview.name} is missing or not executable in {archive}")
 
     # These two names were distributed in earlier releases and are also used by QA.
     (directory / "ActDemo.app").symlink_to(APP_NAME, target_is_directory=True)
@@ -165,6 +204,11 @@ def main():
         with tempfile.TemporaryDirectory(prefix=".package-", dir=OUTPUT.parent) as scratch:
             directory = Path(scratch) / "Mac"
             subprocess.run([
+                engine / "Binaries/Mac/UnrealEditor-Cmd", ROOT / "ActDemo/ActDemo.uproject",
+                "-run=ActIslandVoxelSources", "-unattended", "-nullrhi", "-nosound", "-NoSplash",
+                f"-abslog={ROOT / 'ActDemo/Saved/Logs/IslandVoxelArchive.log'}",
+            ], check=True)
+            subprocess.run([
                 uat, "BuildCookRun", f"-project={ROOT / 'ActDemo/ActDemo.uproject'}",
                 "-noP4", "-platform=Mac", "-clientconfig=Development",
                 "-build", "-cook", "-stage", "-pak", "-package", "-archive",
@@ -174,11 +218,12 @@ def main():
             unreal_pak = engine / "Binaries/Mac/UnrealPak"
             check_eos_package(app, unreal_pak, Path(scratch), expected)
             check_island_content(app, unreal_pak, Path(scratch))
+            check_voxel_archive(app, unreal_pak, Path(scratch))
             prepare_download(directory)
             aliases = [ROOT / "Builds/Mac", ROOT / "Builds/VoxelPlayground/Mac"]
             pending = [(path, legacy_link_target(path)) for path in aliases]
             if OUTPUT.is_dir():
-                extras = {item.name for item in OUTPUT.iterdir()} - {APP_NAME, ZIP_NAME, "ActDemo.app", "ActDemo.zip", GUIDE.name, ".DS_Store"}
+                extras = {item.name for item in OUTPUT.iterdir()} - {APP_NAME, ZIP_NAME, "ActDemo.app", "ActDemo.zip", GUIDE.name, *(p.name for p in PREVIEWS), ".DS_Store"}
                 if extras:
                     raise RuntimeError(f"Move unrelated files out of {OUTPUT} before packaging: {sorted(extras)}")
             replace_entry(directory, OUTPUT)

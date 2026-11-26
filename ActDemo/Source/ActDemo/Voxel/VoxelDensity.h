@@ -36,6 +36,9 @@ struct FVoxelEdit
     UPROPERTY() EVoxelAction Action = EVoxelAction::Punch;
     UPROPERTY() FIntVector Center = FIntVector::ZeroValue;
     UPROPERTY() uint8 BrushId = 0;
+    // The server records the footprint with the edit, so replay does not need the current crew buff.
+    UPROPERTY() bool bWideFootprint = false;
+    int32 FootprintScale() const { return bWideFootprint ? 2 : 1; }
     // Surface direction as fixed-point thousandths; all peers evaluate the same cut.
     UPROPERTY() FIntVector SurfaceNormal = FIntVector(0, 0, 1000);
     UPROPERTY() TArray<FVoxelProtectedBox> ProtectedBoxes;
@@ -113,6 +116,7 @@ struct FVoxelDensity
     bool IsVolumeClear(const FBox& Box) const;
     bool IsVolumeSolid(const FBox& Box) const;
     ACTDEMO_API TOptional<double> SurfaceAt(FVector2D Position) const;
+    ACTDEMO_API double SignedDistanceAt(FVector World) const;
     int32 ShoreDistance(int32 X, int32 Y) const { return VoxelPlayground::ShoreDistance(Layout, X, Y); }
     const TSet<int32>& EditedColumns() const { return PromotedColumns; }
     ACTDEMO_API uint32 Checksum() const;

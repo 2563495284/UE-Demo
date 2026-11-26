@@ -26,7 +26,7 @@ namespace
     const FName OccupiedKey(TEXT("ISLAND_PLAYERS"));
     const FName ProtocolKey(TEXT("ISLAND_PROTOCOL"));
     const FName LanService(TEXT("NULL"));
-    constexpr int32 RoomProtocol = 4;
+    constexpr int32 RoomProtocol = 9;
     const FName IslandMap(TEXT("/Game/TreasureIsland/L_ExpeditionIsland"));
     const FName FrontMap(TEXT("/Game/TreasureIsland/L_IslandFront"));
 

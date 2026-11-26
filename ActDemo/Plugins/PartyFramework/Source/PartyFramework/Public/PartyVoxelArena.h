@@ -95,6 +95,7 @@ protected:
 private:
     friend class APartyVoxelSession;
     void UpdatePaws();
+    void UpdateCrewModel();
     void FollowSurvivingTeammate(APlayerController& Player);
     UFUNCTION(Server,Reliable) void ServerSetChaseView(bool bFirstPerson);
     UFUNCTION(Server,Reliable) void ServerTool(bool bPlace,FVector_NetQuantizeNormal Direction);
@@ -108,6 +109,8 @@ private:
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Boots;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> EyePaws;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> Body;
+    UPROPERTY() TObjectPtr<UStaticMeshComponent> CrewSculpture;
+    UPROPERTY() TObjectPtr<UStaticMeshComponent> CrewBadge;
     UPROPERTY() TObjectPtr<UMaterialInterface> BaseMaterial;
     UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> SuitPaint;
     FLinearColor SuitColor = FLinearColor::Transparent;

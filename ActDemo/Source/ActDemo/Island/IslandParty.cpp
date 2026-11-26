@@ -5,6 +5,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameSession.h"
 #include "Island/IslandPlayerController.h"
+#include "Island/IslandNeutralProp.h"
 #include "Abilities/ExpeditionMudEffect.h"
 #include "Island/IslandState.h"
 #include "Island/IslandWorld.h"
@@ -23,6 +24,7 @@ const FName MazeChaseFeature(TEXT("PartyMazeChase"));
 
 void AIslandGameMode::PrepareExpeditionParties(int32 Seed)
 {
+    DecoyEventSeed = Seed;
     // The public arenas share one short derived seed. Replicating their variants
     // never transmits the private island seed used for the buried chest positions.
     const uint32 SeedDomain[] = {0x4152454Eu, uint32(Seed)};
@@ -34,7 +36,7 @@ void AIslandGameMode::PrepareExpeditionParties(int32 Seed)
     for (int32 I = ExpeditionPartyDeck.Num() - 1; I > 0; --I)
         ExpeditionPartyDeck.Swap(I, Random.RandRange(0, I));
     ExpeditionPartyDeck.Insert(MazeChaseFeature, Random.RandRange(0, ExpeditionPartyDeck.Num()));
-    ChestEventRandom.Initialize(static_cast<int32>(uint32(Seed) ^ 0xB1C98713u));
+    ScatterRandom.Initialize(static_cast<int32>(uint32(Seed) ^ 0xB1C98713u));
 #if !UE_BUILD_SHIPPING
     FString OnlyGame;
     if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionGamesQA"))
@@ -70,40 +72,65 @@ FName AIslandGameMode::PartyFeatureForChest(int32 Index) const
     return Eligible.IsEmpty() ? NAME_None : Eligible[PartyRoundId % Eligible.Num()];
 }
 
-void AIslandGameMode::AwardPartyTreasure()
+void AIslandGameMode::AwardPartyTreasure(bool bAllowSand)
 {
     if (!bExpeditionRoom || !PartySession) return;
     auto* Round = GetGameState<AIslandGameState>();
     if (Round->PartyOutcome != EIslandChestOutcome::Unknown) return;
     const bool bDecoy = HiddenLayout.IsDecoy(PartyChestIndex);
-    Round->PartySite = bDecoy ? HiddenLayout.Decoys[PartyChestIndex - HiddenLayout.Centers.Num()].ClueIndex : PartyChestIndex;
-    Round->PartyOpeningTeam = PartyOpenerTeam;
-    Round->PartyWinnerMask = PartySession->GetWinningTeamMask();
+    FPartyFinish Finish;
     const int32 Seat = PartySession->GetWinningSeat();
     for (const auto& Pair : PartyPlayers)
     {
-        if (!Pair.Key.IsValid() || Pair.Value.Seat != Seat) continue;
-        if (const auto* Winner = Pair.Key->GetPlayerState<AIslandPlayerState>())
+        const auto* Member = Pair.Key.IsValid() ? Pair.Key->GetPlayerState<AIslandPlayerState>() : nullptr;
+        if (!Member || !TeamClues.IsValidIndex(Member->Team)) continue;
+        ++Finish.Participants;
+        Finish.CrewMask |= 1 << Member->Team;
+        if (Pair.Value.Seat == Seat)
         {
-            Round->PartyWinnerName = Winner->GetPlayerName();
-            Round->PartyWinnerTeam = Winner->Team;
-            if (TeamClues.IsValidIndex(Winner->Team)) Round->PartyWinnerMask |= 1 << Winner->Team;
+            Finish.WinnerName = Member->GetPlayerName();
+            Finish.WinnerTeam = Member->Team;
         }
-        break;
     }
+    Finish.WinnerMask = PartySession->GetWinningTeamMask();
+    if (Finish.WinnerTeam != INDEX_NONE) Finish.WinnerMask |= 1 << Finish.WinnerTeam;
 
     if (bDecoy)
     {
-        for (int32 Team = 0; Team < TeamClues.Num(); ++Team)
-            if (Round->IsPartyWinner(Team)) ScoutTreasureForWinner(Team, Round->PartySite);
-        Round->PartyOutcome = ChestEventRandom.RandRange(0, 1) == 0 ? EIslandChestOutcome::Scatter : EIslandChestOutcome::Disguise;
-        Round->SpentFalsePoints.Add(FVector2D(HiddenLayout.GetCenter(PartyChestIndex)));
-        ConsumedDecoys.Add(PartyChestIndex);
-        if (IsValid(Exposed[PartyChestIndex])) Exposed[PartyChestIndex]->Destroy();
-        Exposed[PartyChestIndex] = nullptr;
+        // A whole maze crew can disconnect during the results screen. Only crews still here return to the island.
+        Finish.WinnerMask &= Finish.CrewMask;
+        auto Plan = PlanDecoyWorldEvents();
+        if (!bAllowSand) Plan.SandCenters.Reset();
+        const auto Event = IslandRules::DrawDecoyEvent(DecoyEventSeed, PartyChestIndex,
+            Finish.Participants, Finish.CrewMask, Finish.WinnerMask, Plan.Mask());
+        if (Event == EIslandDecoyEvent::SandRamp)
+        {
+            // Keep the island pawns parked until the single replicated fill has committed.
+            // A rejected edit must never be announced as a completed sand ramp.
+            bDecoySandPending = true;
+            const auto Centers = Plan.SandCenters;
+            EnqueueEnvironmentFill(Centers, [WeakMode = TWeakObjectPtr<AIslandGameMode>(this), Id = PartyRoundId,
+                Plan = MoveTemp(Plan), Finish = MoveTemp(Finish)](bool bCommitted) mutable
+            {
+                auto* Mode = WeakMode.Get();
+                if (!Mode || Mode->PartyRoundId != Id || !Mode->bDecoySandPending) return;
+                Mode->bDecoySandPending = false;
+                if (Mode->GetGameState<AIslandGameState>()->Phase != EIslandPhase::PartyPlaying) return;
+                if (!bCommitted)
+                {
+                    Mode->AwardPartyTreasure(false);
+                    return;
+                }
+                Mode->SettleDecoy(EIslandDecoyEvent::SandRamp, Plan, Finish);
+                Mode->CompletePartyReturn(true);
+            });
+            return;
+        }
+        SettleDecoy(Event, Plan, Finish);
     }
     else
     {
+        PublishPartyFinish(Finish);
         Round->PartyOutcome = EIslandChestOutcome::Genuine;
         Exposed[PartyChestIndex]->MarkChallengeResolved();
         // Opening still pays if nobody scored or the winner was the opener.
@@ -113,33 +140,67 @@ void AIslandGameMode::AwardPartyTreasure()
             if (GiveClue(Team, PartyChestIndex)) Round->PartyRewardMask |= 1 << Team;
         }
     }
-    Round->ForceNetUpdate();
-    UE_LOG(LogTemp, Display, TEXT("PARTY_CHEST_SETTLED round=%u site=%d outcome=%d opener=%d winner=%d rewarded=%d winner_mask=%d"),
-        PartyRoundId, PartyChestIndex, int32(Round->PartyOutcome), PartyOpenerTeam, Round->PartyWinnerTeam, Round->PartyRewardMask, Round->PartyWinnerMask);
+    CompletePartyReturn(true);
 }
 
-void AIslandGameMode::ScatterPartyPlayers()
+void AIslandGameMode::PublishPartyFinish(const FPartyFinish& Finish)
 {
-    const auto& Players = GetPlayers();
-    if (Players.IsEmpty()) return;
-    // Offset a ring of dry-land targets independently of crew or original position.
-    // The collision check includes already redistributed players and the current excavated terrain.
-    TArray<int32> Sectors;
-    // Drawing a landing spot must not change the event on the next false chest.
-    FRandomStream Locations(ChestEventRandom.GetCurrentSeed());
-    for (int32 Seat = 0; Seat < Players.Num(); ++Seat) Sectors.Add(Seat);
-    for (int32 I = Sectors.Num() - 1; I > 0; --I) Sectors.Swap(I, Locations.RandRange(0, I));
-    const double Rotation = Locations.FRand() * UE_TWO_PI;
-    for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
+    auto* Round = GetGameState<AIslandGameState>();
+    Round->PartySite = HiddenLayout.IsDecoy(PartyChestIndex)
+        ? HiddenLayout.Decoys[PartyChestIndex - HiddenLayout.Centers.Num()].ClueIndex : PartyChestIndex;
+    Round->PartyOpeningTeam = PartyOpenerTeam;
+    Round->PartyWinnerTeam = Finish.WinnerTeam;
+    Round->PartyWinnerName = Finish.WinnerName;
+    Round->PartyWinnerMask = Finish.WinnerMask;
+}
+
+void AIslandGameMode::SettleDecoy(EIslandDecoyEvent Event, const FDecoyWorldPlan& Plan, const FPartyFinish& Finish)
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    if (Round->PartyOutcome != EIslandChestOutcome::Unknown) return;
+    PublishPartyFinish(Finish);
+    Round->PartyDecoyEvent = Event;
+    if (Event == EIslandDecoyEvent::SailGust)
     {
-        auto& Player = *Players[Seat];
+        for (auto Sail : Plan.Sails)
+            if (Sail.IsValid()) Sail->ToggleSail();
+    }
+    Round->PartyOutcome = EIslandChestOutcome::Decoy;
+    Round->SpentFalsePoints.Add(FVector2D(HiddenLayout.GetCenter(PartyChestIndex)));
+    ConsumedDecoys.Add(PartyChestIndex);
+    if (IsValid(Exposed[PartyChestIndex])) Exposed[PartyChestIndex]->Destroy();
+    Exposed[PartyChestIndex] = nullptr;
+    UE_LOG(LogTemp, Display, TEXT("ISLAND_DECOY_DRAW round=%u chest=%d event=%d players=%d crews=%d winners=%d world_mask=%d"),
+        PartyRoundId, PartyChestIndex, int32(Round->PartyDecoyEvent), Finish.Participants, Finish.CrewMask, Finish.WinnerMask, Plan.Mask());
+}
+
+void AIslandGameMode::ScatterLosingCrews()
+{
+    const auto* Round = GetGameState<AIslandGameState>();
+    TArray<AIslandPlayerController*> Losers;
+    TArray<FVector> KeepAwayFrom;
+    for (AVoxelPlayerController* Member : GetPlayers())
+    {
+        auto* Player = CastChecked<AIslandPlayerController>(Member);
+        if (!Player->GetHero() || !PartyPlayers.Contains(Player)) continue;
+        KeepAwayFrom.Add(Player->GetHero()->GetActorLocation());
+        if (!Round->IsPartyWinner(Player->GetTeam())) Losers.Add(Player);
+    }
+    if (Losers.IsEmpty()) return;
+
+    // Different angular sectors avoid clustering even when all participants belong to one losing crew.
+    for (int32 I = Losers.Num() - 1; I > 0; --I) Losers.Swap(I, ScatterRandom.RandRange(0, I));
+    const double Rotation = ScatterRandom.FRand() * UE_TWO_PI;
+    for (int32 Index = 0; Index < Losers.Num(); ++Index)
+    {
+        auto& Player = *Losers[Index];
         auto* Hero = Player.GetHero();
-        if (!Hero) continue;
-        const double Angle = Rotation + UE_TWO_PI * Sectors[Seat] / Players.Num();
-        const double Radius = GetTerrain()->GetShoreExtent() * Locations.FRandRange(.38f, .68f);
+        const double Angle = Rotation + UE_TWO_PI * Index / Losers.Num();
+        const double Radius = GetTerrain()->GetShoreExtent() * ScatterRandom.FRandRange(.38f, .68f);
         const FVector Hint(Radius * FMath::Cos(Angle), Radius * FMath::Sin(Angle), 0.);
-        const FTransform Target = FindSafeReturn(Player, Hint);
-        BurialSites.Remove(Cast<AIslandPlayerController>(&Player));
+        const FTransform Target = FindSafeReturn(Player, Hint, KeepAwayFrom);
+        KeepAwayFrom.Add(Target.GetLocation());
+        BurialSites.Remove(&Player);
         UExpeditionMudMarkEffect::Clear(*Hero);
         Hero->ReturnToStart(Target);
         Player.ClientResetView(Target.Rotator());
@@ -155,6 +216,7 @@ void AIslandGameMode::BeginParty(int32 ChestIndex, int32 OpeningTeam)
     Round->PartyWinnerMask = 0;
     Round->PartyWinnerUntil = 0.;
     Round->PartyOutcome = EIslandChestOutcome::Unknown;
+    Round->PartyDecoyEvent = EIslandDecoyEvent::None;
     Round->PartyOpeningTeam = INDEX_NONE;
     Round->PartySite = INDEX_NONE;
     Round->PartyRewardMask = 0;
@@ -320,12 +382,6 @@ void AIslandGameMode::UpdateParty()
             {
                 bPartyRevealSent = true;
                 PartyDeadline = FPlatformTime::Seconds() + PartyDisplayTimeout;
-                auto* Round = GetGameState<AIslandGameState>();
-                if (Round->PartyOutcome == EIslandChestOutcome::Disguise)
-                {
-                    Round->DisguiseUntil = Round->GetServerWorldTimeSeconds() + 120.;
-                    Round->ForceNetUpdate();
-                }
                 for (const auto& Pair : PartyPlayers)
                     if (auto* Player = Pair.Key.Get())
                     {
@@ -343,6 +399,7 @@ void AIslandGameMode::UpdateParty()
             if (Round->PartyOutcome != EIslandChestOutcome::Unknown)
             {
                 Round->PartyWinnerUntil = ResumeTime + 8.;
+                if (Round->PartyOutcome == EIslandChestOutcome::Decoy) Round->BeginDecoyEffect();
             }
             for (auto& Pair : ChestLocks) Pair.Value.FinishAt += ResumeTime - Round->PartyStartedAt;
             PartyPlayers.Reset();
@@ -455,6 +512,7 @@ void AIslandGameMode::UpdateParty()
             Exposed[PartyChestIndex] = nullptr;
             ConsumedDecoys.Add(PartyChestIndex);
         }
+        GetGameState<AIslandGameState>()->ClearDecoyEffect();
         SetPhase(EIslandPhase::PartyPlaying);
         PartySession->StartParty();
         UE_LOG(LogTemp, Display, TEXT("PARTY_START round=%u chest=%d players=%d"), PartyRoundId, PartyChestIndex, PartyPlayers.Num());
@@ -467,7 +525,25 @@ void AIslandGameMode::ReturnFromParty()
     auto* Round = GetGameState<AIslandGameState>();
     if (Round->Phase != EIslandPhase::PartyPlaying && Round->Phase != EIslandPhase::PartyLoading) return;
     const bool bFinishedGame = Round->Phase == EIslandPhase::PartyPlaying;
-    if (bFinishedGame) AwardPartyTreasure();
+    if (bDecoySandPending) return;
+    if (bFinishedGame && bExpeditionRoom && PartySession)
+    {
+        AwardPartyTreasure();
+        return;
+    }
+    CompletePartyReturn(bFinishedGame);
+}
+
+void AIslandGameMode::CompletePartyReturn(bool bFinishedGame)
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    if (bFinishedGame && bExpeditionRoom)
+    {
+        Round->ForceNetUpdate();
+        UE_LOG(LogTemp, Display, TEXT("PARTY_CHEST_SETTLED round=%u site=%d outcome=%d opener=%d winner=%d rewarded=%d winner_mask=%d"),
+            PartyRoundId, PartyChestIndex, int32(Round->PartyOutcome), PartyOpenerTeam, Round->PartyWinnerTeam,
+            Round->PartyRewardMask, Round->PartyWinnerMask);
+    }
     SetPhase(EIslandPhase::PartyReturning);
     PartyDeadline = FPlatformTime::Seconds() + (bExpeditionRoom ? PartyDisplayTimeout : PartyAssetTimeout);
     bPartyCompleted = bFinishedGame;
@@ -488,6 +564,8 @@ void AIslandGameMode::RestorePartyPlayers()
     PartyDeadline = FPlatformTime::Seconds() + PartyAssetTimeout;
     auto* Round = GetGameState<AIslandGameState>();
     UE_LOG(LogTemp, Display, TEXT("PARTY_SWAP round=%u direction=out players=%d"), PartyRoundId, PartyPlayers.Num());
+    FDecoyWorldPlan ReturnPlan;
+    if (Round->PartyDecoyEvent == EIslandDecoyEvent::CrewRally) PlanRallyLandings(ReturnPlan);
     for (auto& Pair : PartyPlayers)
     {
         AIslandPlayerController* Controller = Pair.Key.Get();
@@ -503,16 +581,24 @@ void AIslandGameMode::RestorePartyPlayers()
             {
                 Player.Possess(Hero);
             }
-            const UCapsuleComponent* Capsule = Hero->GetCapsuleComponent();
-            const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight());
-            const bool bBlocked = GetWorld()->OverlapBlockingTestByChannel(Hero->GetActorLocation(),
-                Hero->GetActorQuat(), Capsule->GetCollisionObjectType(), Shape, FCollisionQueryParams(SCENE_QUERY_STAT(IslandPartyReturn), false, Hero),
-                FCollisionResponseParams(Capsule->GetCollisionResponseToChannels()));
-            if (Entry.bReturnToDock || bBlocked)
+            const bool bBlocked = IsPartyReturnBlocked(*Hero);
+            const bool bWillScatter = Round->PartyDecoyEvent == EIslandDecoyEvent::Scatter && !Round->IsPartyWinner(Player.GetTeam());
+            const FTransform* RallyTarget = ReturnPlan.RallyLandings.Find(Pair.Key);
+            const auto Landing = RallyTarget
+                ? FindStandingFloor(Hero, RallyTarget->GetLocation() + FVector(0,0,20.), 200.) : TOptional<FVector>{};
+            if (Landing && FMath::Abs(Landing->Z - RallyTarget->GetLocation().Z) < 40.)
+            {
+                BurialSites.Remove(&Player);
+                UExpeditionMudMarkEffect::Clear(*Hero);
+                Hero->ReturnToStart(FTransform(RallyTarget->GetRotation(), Landing.GetValue()));
+                Player.SetControlRotation(Entry.View);
+                Player.ClientResetView(Entry.View);
+            }
+            else if (!bWillScatter && (Entry.bReturnToDock || bBlocked))
             {
                 ReturnToSafeGround(Player);
             }
-            else
+            else if (!bWillScatter)
             {
                 Hero->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
                 Player.SetControlRotation(Entry.View);
@@ -534,7 +620,7 @@ void AIslandGameMode::RestorePartyPlayers()
         Player.ClientWaterState(0);
         if (!bExpeditionRoom) Player.SetVoxelInputEnabled(true);
     }
-    if (Round->PartyOutcome == EIslandChestOutcome::Scatter) ScatterPartyPlayers();
+    if (Round->PartyDecoyEvent == EIslandDecoyEvent::Scatter) ScatterLosingCrews();
     if (PartySession)
     {
         PartySession->Destroy();

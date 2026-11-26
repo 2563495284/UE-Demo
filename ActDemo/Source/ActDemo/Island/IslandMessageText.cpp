@@ -74,6 +74,7 @@ namespace
         {TEXT("有成员离开，请重新确认出航。"), TEXT("A player left. Start the expedition again when ready.")},
         {TEXT("该队已满或已关闭。"), TEXT("This team is full or closed.")},
         {TEXT("有成员取消准备。"), TEXT("A player is no longer ready.")},
+        {TEXT("只能在候船时更换角色。"), TEXT("Characters can only be changed while waiting to depart.")},
         {TEXT("房间设置必须能容纳当前所有玩家。"), TEXT("The room must have space for everyone already here.")},
         {TEXT("请先调整队伍，当前席位超出新设置。"), TEXT("Move players between teams to fit the new limits first.")},
         {TEXT("房间设置已更新，请重新准备。"), TEXT("Room settings changed. Ready up again.")},

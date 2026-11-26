@@ -20,7 +20,8 @@ case "${1:-help}" in
     grep -F 'PARTY_FEATURE_ASSET_READY' "$LOGS/PartyFeature.log"
     ;;
   island-front)
-    "$EDITOR" "$PROJECT" -run=ActIslandFront -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/IslandFrontMap.log"
+    shift
+    "$EDITOR" "$PROJECT" -run=ActIslandFront -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/IslandFrontMap.log" "$@"
     test -f "$ROOT/ActDemo/Content/TreasureIsland/L_IslandFront.umap"
     ;;
   play)

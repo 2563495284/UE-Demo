@@ -31,6 +31,8 @@ public:
     AIslandPlayerController();
     int32 GetTeam() const;
     UFUNCTION(Server, Reliable) void ServerChooseTeam(int32 Team);
+    UFUNCTION(Server, Reliable) void ServerChooseCharacter(int32 ModelIndex);
+    UFUNCTION(Client, Reliable) void ClientCharacterChosen(int32 ModelIndex);
     UFUNCTION(Server, Reliable) void ServerSetRoomReady(bool bReady);
     UFUNCTION(Server, Reliable) void ServerStartExpedition();
     UFUNCTION(Server, Reliable) void ServerConfigureRoom(const FIslandRoomSettings& Settings);

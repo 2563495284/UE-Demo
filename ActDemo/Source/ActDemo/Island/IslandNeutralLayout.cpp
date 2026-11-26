@@ -5,6 +5,7 @@
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Pawn.h"
 #include "Island/ExpeditionDock.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandRules.h"
 #include "Voxel/VoxelTerrain.h"
 
@@ -102,10 +103,11 @@ namespace NeutralLayoutDetail
                 if (*It == &Terrain || It->IsA<APawn>()) continue;
                 if (auto* Dock = Cast<AExpeditionDock>(*It)) Landings.Add(Dock);
                 TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
-                for (const UStaticMeshComponent* Mesh : Meshes)
+                for (UStaticMeshComponent* Mesh : Meshes)
                 {
-                    if (!Mesh->GetStaticMesh() || !Mesh->IsQueryCollisionEnabled() ||
-                        Mesh->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block) continue;
+                    const UPrimitiveComponent* Physical = IslandSceneryVoxels::SurfaceFor(Mesh);
+                    if (!Mesh->GetStaticMesh() || !Physical->IsQueryCollisionEnabled() ||
+                        Physical->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block) continue;
                     const FBox Box = Mesh->Bounds.GetBox();
                     Scenery.Add(Box);
                     Reserved.Emplace(FVector2D(Box.Min),FVector2D(Box.Max));
@@ -449,6 +451,17 @@ IslandNeutral::FSurface IslandNeutral::Survey(UWorld& World,const AVoxelTerrain&
 bool IslandNeutral::CanReachDigSite(const FSurface& Surface,FVector2D Point)
 {
     return Surface && Surface->NearestCell(Point,210.,true)!=INDEX_NONE;
+}
+
+FBox2D IslandNeutral::Footprint(const FIslandNeutralPlacement& Placement)
+{
+    return NeutralLayoutDetail::WorldEnvelope(Placement);
+}
+
+bool IslandNeutral::KeepsDigRoutes(const FSurface& Surface,const FIslandTreasureLayout& Treasure,
+    TConstArrayView<FBox2D> Footprints)
+{
+    return Surface && Surface->RoutesOpen(Footprints,Surface->Endpoints(Treasure));
 }
 
 void IslandNeutral::Generate(const FSurface& Surface,int32 RoundSeed,const FIslandTreasureLayout& Treasure,TArray<FIslandNeutralPlacement>& Out)

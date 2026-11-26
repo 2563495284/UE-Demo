@@ -71,7 +71,7 @@ namespace
 int32 AIslandProbe::ExpeditionTeamForSeat(int32 Seat) const
 {
     if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMazeQA"))) return Seat / 2;
-    if (bFieldScenario || bNeutralScenario || bMudScenario || FParse::Param(FCommandLine::Get(), TEXT("ExpeditionIdentityShots"))) return Seat < 2 ? 0 : 1;
+    if (bFieldScenario || bNeutralScenario || bMudScenario || FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA"))) return Seat < 2 ? 0 : 1;
     return bOneCrew ? 0 : Seat;
 }
 

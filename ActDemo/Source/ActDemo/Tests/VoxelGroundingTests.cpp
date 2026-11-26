@@ -79,6 +79,66 @@ bool FExpeditionBridgeSupportTest::RunTest(const FString& Parameters)
     return !HasAnyErrors();
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FExpeditionDecoyToolFootprintTest, "ActDemo.Voxel.DecoyToolFootprint",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FExpeditionDecoyToolFootprintTest::RunTest(const FString& Parameters)
+{
+    using namespace VoxelPlayground;
+    FVoxelDensity Field(EVoxelLayout::Expedition);
+    FVoxelEdit Edit;
+    // This shore shelf is constant along Y. Its 338 cm surface cuts between grid samples.
+    Edit.Center = {6600, 0, 340};
+    const int32 Lateral = 100;
+    const FIntVector SideBelow(6600, Lateral, 325), SideAbove(6600, Lateral, 350);
+    Edit.BrushId = ShallowCut;
+    TestTrue(TEXT("The edge sample starts underground"), Solid(Field, SideBelow));
+    auto Patch = Field.PrepareEdit(Edit);
+    TestTrue(TEXT("A normal cut leaves the edge alone"), Solid(Field, SideBelow, &Patch));
+    Edit.bWideFootprint = true;
+    Patch = Field.PrepareEdit(Edit);
+    TestFalse(TEXT("The winning crew cuts through the same edge"), Solid(Field, SideBelow, &Patch));
+    TestTrue(TEXT("Wider excavation preserves material below its normal depth"), Solid(Field, {6600, 0, 275}, &Patch));
+    for (const auto& Normal : {FIntVector(0,0,1000), FIntVector(1000,0,0)})
+    {
+        Edit.SurfaceNormal = Normal;
+        for (bool bWide : {false,true})
+        {
+            Edit.bWideFootprint = bWide;
+            const FIntVector Rim = Edit.Center + FIntVector(0,62 * Edit.FootprintScale(),0);
+            TestEqual(TEXT("Cut radius is exact on the floor and the wall"), PartyBrushDistance(Edit,Rim), 0);
+            TestEqual(TEXT("Cut depth stays 40 cm along the surface normal"), PartyBrushDistance(Edit,Edit.Center - Normal*40/1000), 0);
+        }
+    }
+
+    Edit.Action = EVoxelAction::Fill;
+    Edit.BrushId = MudPad;
+    Edit.SurfaceNormal = {0,0,1000};
+    Edit.bWideFootprint = false;
+    Patch = Field.PrepareEdit(Edit);
+    TestFalse(TEXT("The ordinary mud pad leaves the side open"), Solid(Field, SideAbove, &Patch));
+    Edit.bWideFootprint = true;
+    TestTrue(TEXT("A wide mud pad can travel through the normal edit stream"), Field.Grid.IsValidEdit(Edit));
+    Patch = Field.PrepareEdit(Edit);
+    TestTrue(TEXT("The wide pad adds solid ground at the side"), Solid(Field, SideAbove, &Patch));
+    TestFalse(TEXT("The wider pad stays one layer high"), Solid(Field, {6600,0,400}, &Patch));
+    TestEqual(TEXT("The sloping pad at half height has double the original radius"),
+        PartyBrushDistance(Edit,Edit.Center + FIntVector(0,140,20)), 0);
+    FVoxelProtectedBox& Lid = Edit.ProtectedBoxes.AddDefaulted_GetRef();
+    Lid.Low = SideAbove - FIntVector(10);
+    Lid.High = SideAbove + FIntVector(10);
+    Patch = Field.PrepareEdit(Edit);
+    TestFalse(TEXT("The wide rim still respects an exposed chest"), Solid(Field, SideAbove, &Patch));
+    TestTrue(TEXT("The other side of the same wide pad remains solid"), Solid(Field, {6600,-Lateral,350}, &Patch));
+    FVoxelDensity Replay(EVoxelLayout::Expedition);
+    Field.Apply(Patch);
+    Replay.Apply(Replay.PrepareEdit(Edit));
+    TestEqual(TEXT("Replaying the authoritative wide edit reproduces the protected terrain"), Replay.Checksum(), Field.Checksum());
+    Edit.BrushId = FirstBurialLayer;
+    TestFalse(TEXT("A mud burial can never use the tool reward"), Field.Grid.IsValidEdit(Edit));
+    return !HasAnyErrors();
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelAuthoredSupportTest, "ActDemo.Voxel.GroundedTerrain.Authored",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

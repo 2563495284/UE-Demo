@@ -115,7 +115,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--editor", action="store_true")
     parser.add_argument("--app", type=Path, default=ROOT / "Builds/TreasureIsland/Mac/远征岛.app")
-    parser.add_argument("--scenario", choices=("solo", "pair", "recovery", "walkthrough", "chart", "settings", "internet"), default="pair")
+    parser.add_argument("--scenario", choices=("solo", "pair", "recovery", "walkthrough", "chart", "settings", "character", "internet"), default="pair")
     parser.add_argument("--role", choices=("host", "guest", "solo", "directory"),
                         help="select a cross-network player, solo host or same-Mac public-directory check")
     parser.add_argument("--room-name", help="unique shared internet test room name (letters, numbers, hyphens or underscores)")
@@ -129,6 +129,8 @@ def main():
     parser.add_argument("--record", action="store_true", help="record the game viewport and encode a replay using ffmpeg")
     parser.add_argument("--ffmpeg", help="path to a working ffmpeg executable for --record")
     parser.add_argument("--output", type=Path, default=ROOT / "ActDemo/Saved/ExpeditionUI")
+    parser.add_argument("--viewport", metavar=("WIDTH", "HEIGHT"), type=int, nargs=2, default=(1280, 720),
+                        help="game window dimensions for UI layout checks")
     parser.add_argument("--port", type=int, default=7817)
     parser.add_argument("--seed", type=int, help="Replay a known layout in the chart or full walking scenario")
     args = parser.parse_args()
@@ -166,14 +168,16 @@ def main():
                  "directory": ["DirectoryHost", "DirectoryObserver"]}[args.role]
     else:
         roles = {"solo": ["Solo"], "pair": ["Host", "Guest"], "recovery": ["Recovery"],
-                 "walkthrough": ["Walkthrough"], "chart": ["Chart"], "settings": ["Settings", "SettingsReload"]}[args.scenario]
+                 "walkthrough": ["Walkthrough"], "chart": ["Chart"], "settings": ["Settings", "SettingsReload"],
+                 "character": ["Character"]}[args.scenario]
     game_output = directory
     if not args.editor:
         with (args.app / "Contents/Info.plist").open("rb") as stream:
             bundle = plistlib.load(stream)["CFBundleIdentifier"]
         # A sandboxed Mac application exports its own viewport to its container.
         game_output = Path.home() / "Library/Containers" / bundle / "Data/tmp/ExpeditionUI" / directory.name
-    shared = ["-windowed", "-ResX=1280", "-ResY=720", "-NoSplash", "-nosound", "-NoTrace",
+    resolution = [f"-ResX={args.viewport[0]}", f"-ResY={args.viewport[1]}"]
+    shared = ["-windowed", *resolution, "-NoSplash", "-nosound", "-NoTrace",
               "-unattended", "-NoScreenMessages", "-ExecCmds=t.MaxFPS 60", "-AlwaysFocus",
               "-stdout", "-FullStdOutLogOutput", f"-IslandUISeats={2 if args.role in ('host', 'guest') else len(roles)}", f"-IslandUIOutput={game_output}"]
     if internet:
@@ -193,7 +197,7 @@ def main():
     if args.scenario == "settings":
         # Exercise the same display startup path as Finder in a disposable legacy profile.
         # Both launches must see the same files, without changing the player's preferences.
-        for flag in ("-windowed", "-ResX=1280", "-ResY=720", "-nosound"):
+        for flag in ("-windowed", *resolution, "-nosound"):
             shared.remove(flag)
         profile = game_output / "profile"
         legacy = profile / "Saved" / "Config" / ("MacEditor" if args.editor else "Mac") / "GameUserSettings.ini"
@@ -274,6 +278,9 @@ def main():
                     if args.chart_move:
                         play_signal = "ISLAND_UI_MOUSE_BASELINE_READY"
                     phases = [("home", "Game Engine Initialized"), ("play", play_signal)]
+                    if role == "Character":
+                        phases.append(("picker", "ISLAND_UI_PRESS tag=Island.Character.1 "))
+                        phases.append(("pointer", "ISLAND_UI_INPUT tag=Island.Character.2 reason=outside_hit_grid"))
                 for phase, signal_text in phases:
                     if phase not in activated and signal_text in logs[role] and activate_game_window(processes[role][0].pid):
                         activated.add(phase)
@@ -319,7 +326,7 @@ def main():
                 for role, log in logs.items():
                     if args.weak and ("PktLag set to 40" not in log or "PktLoss set to 2" not in log):
                         raise RuntimeError("Packet simulation was not active on " + role)
-                    needs_chart = not (role.startswith(("Internet","Directory")) or role in ("Recovery", "Walkthrough", "Settings", "SettingsReload"))
+                    needs_chart = not (role.startswith(("Internet","Directory")) or role in ("Recovery", "Walkthrough", "Settings", "SettingsReload", "Character"))
                     if "ISLAND_UI_PRESS" not in log or (needs_chart and "ISLAND_UI_CHART" not in log):
                         raise RuntimeError("Actual UI and chart input evidence missing on " + role)
                     if args.perspective:
@@ -370,6 +377,14 @@ def main():
                     for view in ("ChartUnsearched", "ChartOneClue"):
                         if not (directory / f"Chart_{view}.png").is_file():
                             raise RuntimeError(f"Missing {view} chart proof")
+                if args.scenario == "character":
+                    for index, name in enumerate(("Pig", "Monkey", "Fox", "Calf")):
+                        if f"ISLAND_UI_CHARACTER mesh=SM_{name} selected={index}" not in logs["Character"]:
+                            raise RuntimeError(f"Character picker failed to show or mark {name}")
+                        if args.shots and not (directory / f"Character_{name}.png").is_file():
+                            raise RuntimeError(f"Missing {name} character portrait")
+                    if "ISLAND_UI_PRESS tag=Island.Character.2 input=pointer" not in logs["Character"]:
+                        raise RuntimeError("The fox was not selected through the actual pointer button")
                 if args.shots and args.perspective:
                     for role in roles:
                         for view in ("FirstPerson", "ThirdPerson"):

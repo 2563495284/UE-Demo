@@ -30,7 +30,7 @@ namespace
 
 UPartyDensityTerrain::UPartyDensityTerrain()
 {
-    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Paint(TEXT("/Game/TreasureIsland/FX/M_PartyGround.M_PartyGround"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Paint(TEXT("/Game/TreasureIsland/FX/M_ArenaGround.M_ArenaGround"));
     BaseMaterial = Paint.Object;
 }
 
@@ -58,8 +58,8 @@ void UPartyDensityTerrain::Initialize(const TMap<FIntVector,EPartyBlock>& Initia
     FoundationZ.Init(INDEX_NONE,LayerSize);
     BerthFoundation.Init(false,LayerSize);
     MeshChunks.SetNum(Chunks.X*Chunks.Y*Chunks.Z);
-    Palette = {FLinearColor::Transparent, FLinearColor(Theme)*.65f, FLinearColor(FColor(174,102,66)),
-        FLinearColor(FColor(243,202,123)), FLinearColor(FColor(255,186,24))};
+    Palette = {FLinearColor::Transparent, FMath::Lerp(FLinearColor(Theme), FLinearColor(FColor(100,126,119)), .34f),
+        FLinearColor(FColor(171,116,78)), FLinearColor(FColor(231,194,140)), FLinearColor(FColor(255,185,46))};
 
     // Authors describe volumes by metre-wide cells. Interpolate their centre samples once to
     // produce continuous ledges, walls and beds. Edits never touch this authoring lattice.

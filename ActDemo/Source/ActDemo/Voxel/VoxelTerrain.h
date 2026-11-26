@@ -63,6 +63,7 @@ private:
     void Commit(FVoxelMeshBuild& Build);
     UProceduralMeshComponent* CreateChunk(int32 Index);
     void ConfigureChunk(UProceduralMeshComponent& Chunk);
+    void ApplyBakedGroundMaterial(UProceduralMeshComponent& Tile) const;
     bool CanSeeExcavation(const FVoxelEdit& Edit) const;
     void SpawnFragments(const FVoxelEdit& Edit);
 
@@ -83,13 +84,16 @@ private:
     UPROPERTY() TArray<TObjectPtr<UProceduralMeshComponent>> BakedTiles;
     UProceduralMeshComponent* MakeSurfaceComponent(bool bPersistent);
     UPROPERTY() TObjectPtr<UStaticMesh> FragmentMesh;
-    UPROPERTY() TObjectPtr<UMaterialInterface> ExpeditionRockMaterial;
+    UPROPERTY() TObjectPtr<UMaterialInterface> IslandGround;
+    UPROPERTY() TObjectPtr<UStaticMesh> ExpeditionClodMesh;
+    UPROPERTY() TObjectPtr<UMaterialInterface> ExpeditionClodPigment;
 
     struct FFragment
     {
         FTransform Transform;
         FVector Velocity;
         float Age = 0.f;
+        float SoilSample[5] = {};
     };
     UPROPERTY(Transient) TObjectPtr<UInstancedStaticMeshComponent> Debris;
     TArray<FFragment> Fragments;

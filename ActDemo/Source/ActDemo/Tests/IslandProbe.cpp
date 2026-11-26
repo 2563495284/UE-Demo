@@ -254,7 +254,7 @@ void AIslandProbePeer::ClientShowChart_Implementation()
             const int32 ChartPoints = Player->GetLocalClues().Count();
             const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
             const bool bFalse = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionInteractionQA")) && Round &&
-                (Round->PartyOutcome == EIslandChestOutcome::Scatter || Round->PartyOutcome == EIslandChestOutcome::Disguise);
+                Round->PartyOutcome == EIslandChestOutcome::Decoy;
             GetWorldTimerManager().SetTimer(Shot, FTimerDelegate::CreateWeakLambda(Player, [ChartPoints, bFalse]()
             {
                 FString Dir;
@@ -688,7 +688,12 @@ void AIslandProbe::TickExpedition(double Now)
         }
         if (bNeutralScenario)
         {
-            StartNeutralCheck(Now);
+            if (FParse::Param(FCommandLine::Get(),TEXT("NeutralDemolitionQA")))
+            {
+                RoomCheck=ERoomCheck::Dig;
+                PrepareDig(0);
+            }
+            else StartNeutralCheck(Now);
             return;
         }
         if (bFieldScenario)
@@ -878,6 +883,11 @@ void AIslandProbe::TickExpedition(double Now)
             LastAction = Now;
             return;
         }
+        if (bNeutralScenario)
+        {
+            StartNeutralCheck(Now);
+            return;
+        }
         if (bFieldScenario)
         {
             BeginLockCheck(Now);
@@ -967,6 +977,10 @@ void AIslandProbe::TickExpedition(double Now)
             OriginalPawns.Reset();
             GamePreviousClues.Reset();
             GameBeforePositions.Reset();
+            UnsafeReturnSeats.Reset();
+            BoostMaskBeforeGame = Round->DecoyToolBoostMask;
+            ActiveBeforeGame = Round->ActiveDecoyEvent;
+            CeasefireGroundSequence = INDEX_NONE;
             bGameStarted = bGameOverviewShot = bStoneDug = false;
             StoneProofCell.Reset();
             TerrainStage = 0;
@@ -1084,7 +1098,8 @@ void AIslandProbe::Tick(float DeltaSeconds)
     const double Now = FPlatformTime::Seconds();
     if (ExpeditionPlayers > 0)
     {
-        TickExpedition(Now);
+        if (FParse::Param(FCommandLine::Get(), TEXT("CharacterSelectionQA"))) TickCharacterSelection(Now);
+        else TickExpedition(Now);
         return;
     }
     if (Step == EStep::Waiting)

@@ -41,6 +41,7 @@ private:
     UFUNCTION() void OnRep_OpenWalls();
 
     UPROPERTY() TObjectPtr<UStaticMesh> Cube;
+    UPROPERTY() TObjectPtr<UStaticMesh> HewnWall;
     UPROPERTY() TObjectPtr<UMaterialInterface> BasePaint;
     UPROPERTY() TArray<TObjectPtr<UMaterialInstanceDynamic>> Paints;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Walls;

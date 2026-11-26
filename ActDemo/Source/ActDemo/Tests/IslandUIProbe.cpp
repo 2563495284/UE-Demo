@@ -12,6 +12,7 @@
 #include "Camera/CameraComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/GameInstance.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/GameViewportClient.h"
 #include "EngineUtils.h"
 #include "HAL/FileManager.h"
@@ -450,6 +451,64 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     {
         UE_LOG(LogTemp,Error,TEXT("ISLAND_UI_FAIL role=%s step=%d page=%d"),*Role,Step,int32(Page));
         Done=true;
+        return;
+    }
+    if (Role == TEXT("Character"))
+    {
+        static const TCHAR* MeshNames[] = {TEXT("SM_Pig"), TEXT("SM_Monkey"), TEXT("SM_Fox"), TEXT("SM_Calf")};
+        static const TCHAR* Views[] = {TEXT("Pig"), TEXT("Monkey"), TEXT("Fox"), TEXT("Calf")};
+        if (Step == 0 && Page == EIslandPanel::Home && Press(Panel, "Island.Create", false)) Advance();
+        else if (Step == 1 && Page == EIslandPanel::Create && Press(Panel, "Island.SubmitRoom", false)) Advance();
+        else if (Step == 2 && Page == EIslandPanel::Lobby && Press(Panel, "Island.Character", false)) Advance();
+        else if (Step >= 3 && Step <= 10 && Page == EIslandPanel::Character)
+        {
+            const int32 Model = (Step - 3) / 2;
+            const FName Choice(*FString::Printf(TEXT("Island.Character.%d"), Model));
+            if ((Step - 3) % 2 == 0)
+            {
+                if (Press(Panel, Choice, Model == 2)) Advance();
+            }
+            else
+            {
+                const auto* Self = PC.GetPlayerState<AIslandPlayerState>();
+                const auto* Hero = PC.GetHero();
+                if (!Self || Self->GetCharacterModel() != Model || !Hero || PC.GetViewTarget() == Hero) return;
+                TInlineComponentArray<UStaticMeshComponent*> Meshes(Hero);
+                if (!Meshes.ContainsByPredicate([Model](const UStaticMeshComponent* Part)
+                    { return Part->IsVisible() && Part->GetStaticMesh() && Part->GetStaticMesh()->GetFName() == MeshNames[Model]; })) return;
+                for (int32 I = 0; I < UE_ARRAY_COUNT(Views); ++I)
+                    if (FindButton(Panel, FName(*FString::Printf(TEXT("Island.Character.Current.%d"), I))).IsValid() != (I == Model)) return;
+                if (Shot(Views[Model])) return;
+                UE_LOG(LogTemp, Display, TEXT("ISLAND_UI_CHARACTER mesh=%s selected=%d"), MeshNames[Model], Model);
+                Advance();
+            }
+        }
+        else if (Step == 11 && Page == EIslandPanel::Character)
+        {
+            auto& Slate = FSlateApplication::Get();
+            const FKeyEvent Escape(EKeys::Escape,FModifierKeysState(),0,false,27,27);
+            Slate.ProcessKeyDownEvent(Escape);
+            Slate.ProcessKeyUpEvent(Escape);
+            if (Panel->Current() == EIslandPanel::Lobby) Advance();
+        }
+        else if (Step == 12 && Page == EIslandPanel::Lobby)
+        {
+            const auto Entry = FindButton(Panel, "Island.Character");
+            if (!Entry || !Entry->HasKeyboardFocus() || !PC.GetPlayerState<AIslandPlayerState>() ||
+                PC.GetPlayerState<AIslandPlayerState>()->GetCharacterModel() != 3) return;
+            if (Shot(TEXT("Room"))) return;
+            if (Press(Panel, "Island.Character", false)) Advance();
+        }
+        else if (Step == 13 && Page == EIslandPanel::Character)
+        {
+            const auto Selected = FindButton(Panel, "Island.Character.3");
+            if (Selected && Selected->HasKeyboardFocus() && Press(Panel, "Island.Character.Back", false)) Advance();
+        }
+        else if (Step == 14 && Page == EIslandPanel::Lobby)
+        {
+            UE_LOG(LogTemp,Display,TEXT("ISLAND_UI_DONE role=Character mesh_count=4 restore_focus=1"));
+            Done = true;
+        }
         return;
     }
     if (Role==TEXT("DirectoryHost") || Role==TEXT("DirectoryObserver"))

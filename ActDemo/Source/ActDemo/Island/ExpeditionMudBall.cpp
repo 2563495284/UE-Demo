@@ -28,8 +28,9 @@ AExpeditionMudBall::AExpeditionMudBall()
     Clod->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     Clod->SetGenerateOverlapEvents(false);
     Clod->SetCastShadow(true);
+    Clod->SetReceivesDecals(false);
     Clod->SetCanEverAffectNavigation(false);
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(TEXT("/Game/TreasureIsland/Art/Neutral/SM_ReefStone"));
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Clay(TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
     Clod->SetStaticMesh(Sphere.Object);
     ClayBase = Clay.Object;
@@ -43,7 +44,7 @@ void AExpeditionMudBall::BeginPlay()
     {
         if (UMaterialInstanceDynamic* Clay = UMaterialInstanceDynamic::Create(ClayBase, this))
         {
-            Clay->SetVectorParameterValue(TEXT("Color"), FLinearColor(FColor(192,131,75)));
+            Clay->SetVectorParameterValue(TEXT("Color"), FLinearColor(FColor(181,109,64)));
             Clod->SetMaterial(0, Clay);
         }
     }

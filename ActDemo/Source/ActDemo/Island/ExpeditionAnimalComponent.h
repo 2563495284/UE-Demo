@@ -10,7 +10,7 @@ class USceneComponent;
 class UStaticMesh;
 class UStaticMeshComponent;
 
-// Local blockout driven by replicated character state and committed actions.
+// The carved animal, crew badge and near-camera paws follow replicated actions on each client.
 UCLASS()
 class UExpeditionAnimalComponent : public UActorComponent
 {
@@ -18,6 +18,8 @@ class UExpeditionAnimalComponent : public UActorComponent
 public:
     UExpeditionAnimalComponent();
     void TickComponent(float Delta, ELevelTick TickType, FActorComponentTickFunction* Tick) override;
+    // Pig, monkey, fox and calf share the same origin at their feet.
+    UStaticMesh* GetCharacterMesh(int32 ModelIndex) const;
     void PlayDig();
     void PlayThrow();
     void SetMarks(int32 Count);
@@ -31,9 +33,13 @@ private:
     UMaterialInstanceDynamic* Paint(FColor Color);
     UPROPERTY() TObjectPtr<UStaticMesh> Ball;
     UPROPERTY() TObjectPtr<UStaticMesh> Cone;
+    UPROPERTY() TObjectPtr<UStaticMesh> Mitten;
+    UPROPERTY() TArray<TObjectPtr<UStaticMesh>> Animals;
     UPROPERTY() TObjectPtr<UMaterialInterface> Base;
     UPROPERTY() TObjectPtr<USceneComponent> Body;
     UPROPERTY() TObjectPtr<USceneComponent> AnimalFeatures;
+    UPROPERTY() TObjectPtr<UStaticMeshComponent> Sculpture;
+    int32 DisplayedModel = INDEX_NONE;
     UPROPERTY() TObjectPtr<USceneComponent> FogSuit;
     bool bFogged = false;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> CheekMud;

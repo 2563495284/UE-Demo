@@ -12,7 +12,7 @@ class SVerticalBox;
 class SIslandClientSettingsPanel;
 enum class EIslandRoomNetwork : uint8;
 
-enum class EIslandPanel : uint8 { Home, Arriving, Create, Search, Lobby, Settings, Result, Pause, Hidden, ClientSettings };
+enum class EIslandPanel : uint8 { Home, Arriving, Create, Search, Lobby, Settings, Result, Pause, Hidden, ClientSettings, Character };
 
 class SIslandRoomPanel : public SCompoundWidget
 {
@@ -38,6 +38,8 @@ private:
     void BuildForm();
     void BuildBrowser();
     void BuildLobby();
+    void BuildCharacterPicker();
+    bool CanChooseCharacter() const;
     void UpdateListings();
     void SubmitForm();
     void Focus(const TSharedPtr<SWidget>& Widget) const;
@@ -55,7 +57,7 @@ private:
     TSharedPtr<SEditableTextBox> NameField, AddressField;
     TSharedPtr<SWidget> Primary, RefreshButton;
     TSharedPtr<SIslandClientSettingsPanel> ClientSettings;
-    TSharedPtr<SWidget> ClientSettingsButton;
+    TSharedPtr<SWidget> ClientSettingsButton, CharacterButton;
     EIslandPanel SettingsOrigin = EIslandPanel::Home;
     TMap<FString, TSharedPtr<SWidget>> Entries;
     FIslandRoomSettings Draft;

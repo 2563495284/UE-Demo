@@ -36,6 +36,35 @@ namespace IslandHudColors
 
 namespace
 {
+    const TCHAR* DecoyResult(EIslandDecoyEvent Event, bool bWon, bool bHasMate)
+    {
+        switch (Event)
+        {
+        case EIslandDecoyEvent::WideTools:
+            return bWon ? EXPEDITION_TEXT("本队的宽铲已就绪", "Your crew has wide tools")
+                : EXPEDITION_TEXT("胜队的挖掘与堆土半径翻倍", "Winning crews can dig and build twice as wide");
+        case EIslandDecoyEvent::Scatter:
+            return bWon ? EXPEDITION_TEXT("败队队员已被冲散", "The tide scattered the losing crews")
+                : EXPEDITION_TEXT("你被冲到了新的落点 · 按住 Tab 辨认方向", "You washed up elsewhere · Hold Tab to get your bearings");
+        case EIslandDecoyEvent::Disguise:
+            return EXPEDITION_TEXT("全员穿上雾衣，姓名与队伍标记暂时隐藏", "Fog suits hide everyone's identity and crew markers");
+        case EIslandDecoyEvent::SpringTide:
+            return EXPEDITION_TEXT("按空格跳得更高，可以试着越过石坎", "Press Space to jump higher and clear ledges");
+        case EIslandDecoyEvent::Ceasefire:
+            return EXPEDITION_TEXT("泥团仍可堆土，命中对手暂时不留泥印", "Mud still builds paths. Hits leave no marks on rivals.");
+        case EIslandDecoyEvent::CrewRally:
+            return bHasMate
+                ? EXPEDITION_TEXT("队友在原先的勘探点附近集合，看看谁在身边", "Look around for crewmates at your crew’s search site.")
+                : EXPEDITION_TEXT("其他队伍在集合，你独自出航，按原位返岛", "Other crews regrouped. You sailed solo and returned as usual.");
+        case EIslandDecoyEvent::SandRamp:
+            return EXPEDITION_TEXT("假箱旁拱起了砂坡，可以踩上去，也可以挖开", "A sand ramp rose by the decoy. Walk up it or dig it away.");
+        case EIslandDecoyEvent::SailGust:
+            return EXPEDITION_TEXT("岛上的帆布收放对调了 · 在绳尾按 E 可再调", "The wind flipped the sails. Press E at a rope to change one.");
+        default:
+            return TEXT("");
+        }
+    }
+
     TArray<int32> OccupiedTeams(const AIslandGameState& GS)
     {
         TArray<int32> Teams;
@@ -43,6 +72,22 @@ namespace
             if (const auto* P=Cast<AIslandPlayerState>(Entry.Get()); P && P->Team>=0) Teams.AddUnique(P->Team);
         Teams.Sort();
         return Teams;
+    }
+}
+
+const TCHAR* AIslandHUD::DecoyEventName(EIslandDecoyEvent Event)
+{
+    switch (Event)
+    {
+    case EIslandDecoyEvent::WideTools: return EXPEDITION_TEXT("开路好手","Wide tools");
+    case EIslandDecoyEvent::Scatter: return EXPEDITION_TEXT("乱流冲散","Riptide");
+    case EIslandDecoyEvent::Disguise: return EXPEDITION_TEXT("迷雾换装","Fog suits");
+    case EIslandDecoyEvent::SpringTide: return EXPEDITION_TEXT("弹跳潮","High jump");
+    case EIslandDecoyEvent::Ceasefire: return EXPEDITION_TEXT("停火潮","Mud truce");
+    case EIslandDecoyEvent::CrewRally: return EXPEDITION_TEXT("船员集合","Crew rendezvous");
+    case EIslandDecoyEvent::SandRamp: return EXPEDITION_TEXT("翻砂成坡","Sand ramp");
+    case EIslandDecoyEvent::SailGust: return EXPEDITION_TEXT("风卷帆布","Sail gust");
+    default: return TEXT("");
     }
 }
 
@@ -80,6 +125,8 @@ void AIslandHUD::EndPlay(const EEndPlayReason::Type Reason)
         if (auto* Viewport=GetWorld()->GetGameViewport()) Viewport->RemoveViewportWidgetContent(ViewportLayer.ToSharedRef());
     ViewportLayer.Reset();
     Panel.Reset();
+    if (auto* Player = Cast<AIslandPlayerController>(GetOwningPlayerController()))
+        UpdateCrewPreview(*Player, false);
     if (DockCamera.IsValid()) DockCamera->Destroy();
     if (ResultCamera.IsValid()) ResultCamera->Destroy();
     if (auto* Player=GetOwningPlayerController())
@@ -135,6 +182,7 @@ void AIslandHUD::UpdateDockCamera(AIslandPlayerController& Player,bool bRoom)
     if (bFront || bLegacyProbe) return;
     auto* GS=GetWorld()->GetGameState<AIslandGameState>();
     if (!GS || !GS->bRoomLobby) return;
+    if (UpdateCrewPreview(Player, bRoom && GS->Phase == EIslandPhase::Waiting && Panel->Current() == EIslandPanel::Character)) return;
     if (bRoom)
     {
         if (!Player.GetHero() || Player.GetTeam()<0) return;
@@ -314,7 +362,8 @@ void AIslandHUD::Tick(float DeltaSeconds)
             if (bHaveSeat && LastPhase!=static_cast<uint8>(GS->Phase))
             {
                 LastPhase=static_cast<uint8>(GS->Phase);
-                if (bRoom && Panel->Current()!=EIslandPanel::Lobby && Panel->Current()!=EIslandPanel::Settings
+                if (bRoom && !(GS->Phase==EIslandPhase::Waiting && Panel->Current()==EIslandPanel::Character)
+                    && Panel->Current()!=EIslandPanel::Lobby && Panel->Current()!=EIslandPanel::Settings
                     && Panel->Current()!=EIslandPanel::ClientSettings)
                     Panel->Show(EIslandPanel::Lobby);
                 else if (GS->Phase==EIslandPhase::Finished)
@@ -446,11 +495,16 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
         Box(Clues.Complete() ? EXPEDITION_TEXT("挖开海图交点，打开宝藏", "Dig at the chart intersection to uncover the treasure") :
             EXPEDITION_TEXT("前往海图搜索圈，挖出线索箱", "Dig in the circles on your chart to find clue chests"),22*S,52*S);
     }
-    if (bAnonymous)
+    if (bExpedition && Round->ActiveDecoyEvent != EIslandDecoyEvent::None)
     {
-        const int32 Seconds=FMath::Max(0,FMath::CeilToInt(Round->DisguiseUntil-Round->GetServerWorldTimeSeconds()));
-        Box(FString::Format(EXPEDITION_TEXT("身份迷雾  {0}  ·  无法辨认敌友","Identity fog  {0}  ·  Crews are hidden"),
-            {FString::Printf(TEXT("%d:%02d"),Seconds/60,Seconds%60)}),22*S,84*S,IslandHudColors::Sea);
+        const bool bWideTools = Round->ActiveDecoyEvent == EIslandDecoyEvent::WideTools;
+        if (!bWideTools || Round->HasDecoyToolBoost(Team))
+        {
+            const TCHAR* Effect = bWideTools ? EXPEDITION_TEXT("挖掘与堆土范围 ×2", "Dig & fill radius ×2")
+                : DecoyEventName(Round->ActiveDecoyEvent);
+            const FString Status = FString::Format(EXPEDITION_TEXT("{0} · 至下一场小游戏开赛","{0} · Until the next minigame starts"), {Effect});
+            Box(Status,22*S,84*S,IslandHudColors::Amber);
+        }
     }
     if (ChartVisibility>.01f || (bLegacyProbe && PC.IsMapOpen()))
     {
@@ -471,6 +525,8 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
         const bool bTrue=Round->PartyOutcome==EIslandChestOutcome::Genuine;
         FString Reveal=FString::Format(bTrue ? EXPEDITION_TEXT("{0} 区发现真箱","True chest found in {0}")
             : EXPEDITION_TEXT("{0} 区发现假箱","Decoy found in {0}"),{Site});
+        if (!bTrue && Round->PartyDecoyEvent != EIslandDecoyEvent::None)
+            Reveal += FString::Printf(TEXT(" · %s"), DecoyEventName(Round->PartyDecoyEvent));
         if (!bAnonymous)
         {
             Reveal+=FString::Format(EXPEDITION_TEXT("  ·  开箱  第 {0} 队","  ·  Opened by team {0}"),{Round->PartyOpeningTeam+1});
@@ -493,10 +549,8 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
             Result=EXPEDITION_TEXT("本队已记录这个真箱点位并领取过碎片","Your crew already charted this chest and claimed its fragment.");
         else if (bTrue)
             Result=EXPEDITION_TEXT("到这只真箱旁按 E 领取钥匙碎片","Press E at this chest to claim your crew’s key fragment.");
-        else if (Round->PartyOutcome==EIslandChestOutcome::Scatter)
-            Result=EXPEDITION_TEXT("乱流将所有人冲到了新的落脚点","A surge scattered everyone across the island.");
         else
-            Result=EXPEDITION_TEXT("所有人披上雾衣，姓名与队标暂时隐藏","Everyone wears a fog cloak. Names and crew marks are hidden.");
+            Result=DecoyResult(Round->PartyDecoyEvent, Round->IsPartyWinner(Team), bHasMate);
         Box(Result,X,H*.20f+31*S,IslandHudColors::Ink,true);
     }
     if (bExpedition)
@@ -800,15 +854,7 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha,bool bI
                     const FVector2D Middle = P + Normal*Offset;
                     Line(Middle-Diagonal*HalfLength,Middle+Diagonal*HalfLength,Hatch);
                 }
-                if ((Clues.ScoutedMask & (1<<I)) && Clues.Points.IsValidIndex(I))
-                {
-                    const FVector2D Intel=Project(Clues.Points[I]);
-                    const float Reveal=I==IntelSite && !bFinished ? FMath::Lerp(1.8f,1.f,FMath::SmoothStep(0.f,.6f,IntelAge)) : 1.f;
-                    const float R=(bInset ? 4.5f : 7.f)*S*Reveal;
-                    DrawIntelDiamond(Intel,R,Tint(IslandHudColors::Amber),2*S);
-                    Mark(Intel+FVector2D(R,0),Letter,IslandHudColors::Amber);
-                }
-                else Mark(P+FVector2D(-.80,-.80)*Radius-FVector2D(8,5),Letter,IslandHudColors::Ink);
+                Mark(P+FVector2D(-.80,-.80)*Radius-FVector2D(8,5),Letter,IslandHudColors::Ink);
             }
         }
     }
@@ -835,17 +881,7 @@ void AIslandHUD::DrawChart(const AIslandPlayerController& PC,float Alpha,bool bI
                 GetTextSize(Key,W,H,Font,LabelScale);
                 DrawRect(Tint(IslandHudColors::Panel),At.X,At.Y,W+12*S,H+4*S);
                 DrawText(Key,Tint(IslandHudColors::Ink),At.X+6*S,At.Y+2*S,Font,LabelScale);
-                At.X+=W+16*S;
-            }
-            if (Clues.ScoutedMask)
-            {
-                const FString Key=EXPEDITION_TEXT("优胜情报 · 本队未领","Winner’s intel · Unclaimed");
-                GetTextSize(Key,W,H,Font,LabelScale);
-                if (At.X+W+29*S>Center.X+Size*.5f)
-                    At=FVector2D(Center.X-Size*.5f,At.Y+H+6*S);
-                DrawRect(Tint(IslandHudColors::Panel),At.X,At.Y,W+29*S,H+4*S);
-                DrawIntelDiamond(At+FVector2D(12*S,(H+4*S)*.5f),4*S,Tint(IslandHudColors::Amber),1.8f*S);
-                DrawText(Key,Tint(IslandHudColors::Amber),At.X+22*S,At.Y+2*S,Font,LabelScale);
+
             }
         }
     }

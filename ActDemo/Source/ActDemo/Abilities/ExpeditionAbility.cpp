@@ -6,6 +6,7 @@
 #include "TimerManager.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
+#include "Island/IslandState.h"
 #include "Voxel/VoxelCharacter.h"
 
 namespace ExpeditionTags
@@ -261,6 +262,21 @@ void UExpeditionCharacterMovement::UpdateCharacterStateBeforeMovement(float Delt
         else if (Hero->IsMudCompact()) bWantsToCrouch = false;
     }
     Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
+}
+
+float UExpeditionCharacterMovement::GetIslandJumpZVelocity() const
+{
+    const auto* State = GetWorld() ? GetWorld()->GetGameState<AIslandGameState>() : nullptr;
+    return State && State->IsDecoyEventActive(EIslandDecoyEvent::SpringTide)
+        ? JumpZVelocity * IslandRules::SpringTideJumpScale : JumpZVelocity;
+}
+
+bool UExpeditionCharacterMovement::DoJump(bool bReplayingMoves, float DeltaTime)
+{
+    // Character movement uses this path for the owner's prediction, replay and server simulation.
+    // Leave the normal tuning intact for external launches such as a geyser.
+    TGuardValue<float> JumpSpeed(JumpZVelocity, GetIslandJumpZVelocity());
+    return Super::DoJump(bReplayingMoves, DeltaTime);
 }
 
 float UExpeditionCharacterMovement::GetMaxSpeed() const

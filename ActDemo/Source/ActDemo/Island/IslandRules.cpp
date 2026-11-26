@@ -2,9 +2,11 @@
 
 #include "Voxel/VoxelDensity.h"
 #include "Island/ExpeditionDock.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
 #include "EngineUtils.h"
+#include "Misc/SecureHash.h"
 
 namespace
 {
@@ -50,6 +52,34 @@ int32 FIslandClues::Count() const
     return FPlatformMath::CountBits(static_cast<uint32>(Mask));
 }
 
+EIslandDecoyEvent IslandRules::DrawDecoyEvent(int32 IslandSeed, int32 ChestIndex, int32 PlayerCount,
+    int32 ParticipatingTeamMask, int32 WinnerMask, int32 WorldEventMask)
+{
+    if (PlayerCount <= 0 || !ParticipatingTeamMask) return EIslandDecoyEvent::None;
+    TArray<EIslandDecoyEvent, TInlineAllocator<8>> Pool;
+    if (ParticipatingTeamMask & WinnerMask) Pool.Add(EIslandDecoyEvent::WideTools);
+    if (ParticipatingTeamMask & ~WinnerMask) Pool.Add(EIslandDecoyEvent::Scatter);
+    if (PlayerCount >= 2) Pool.Add(EIslandDecoyEvent::Disguise);
+    Pool.Add(EIslandDecoyEvent::SpringTide);
+    if (FPlatformMath::CountBits(uint32(ParticipatingTeamMask)) >= 2) Pool.Add(EIslandDecoyEvent::Ceasefire);
+    if (PlayerCount > int32(FPlatformMath::CountBits(uint32(ParticipatingTeamMask)))
+        && (WorldEventMask & DecoyEventBit(EIslandDecoyEvent::CrewRally))) Pool.Add(EIslandDecoyEvent::CrewRally);
+    for (const auto Event : {EIslandDecoyEvent::SandRamp, EIslandDecoyEvent::SailGust})
+        if (WorldEventMask & DecoyEventBit(Event)) Pool.Add(Event);
+
+    // Domain-separate this draw from terrain generation and the public arena sequence.
+    const uint32 SeedDomain[] = {0x44454359u, uint32(IslandSeed), uint32(ChestIndex)};
+    const FSHAHash Digest = FSHA1::HashBuffer(SeedDomain, sizeof(SeedDomain));
+    const uint32 Seed = uint32(Digest.Hash[0]) << 24 | uint32(Digest.Hash[1]) << 16
+        | uint32(Digest.Hash[2]) << 8 | uint32(Digest.Hash[3]);
+    FRandomStream Random{int32(Seed)};
+    const uint32 Count = uint32(Pool.Num());
+    const uint32 Threshold = (0u - Count) % Count;
+    uint32 Roll;
+    do { Roll = Random.GetUnsignedInt(); } while (Roll < Threshold);
+    return Pool[Roll % Count];
+}
+
 TArray<FIslandSearchCircle> IslandRules::DefaultSearchCircles()
 {
     return {{{0, -1150}, 300}, {{1150, 0}, 300}, {{0, 1150}, 300}, {{-1150, 0}, 300}};
@@ -81,10 +111,11 @@ TArray<FBox2D> IslandRules::CollectSearchObstacles(UWorld& World)
     {
         if (!It->IsA<AExpeditionLandmark>() && !It->IsA<AStaticMeshActor>() && !It->IsA<AExpeditionDock>()) continue;
         TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
-        for (const UStaticMeshComponent* Mesh : Meshes)
+        for (UStaticMeshComponent* Mesh : Meshes)
         {
-            if (!Mesh->GetStaticMesh() || !Mesh->IsQueryCollisionEnabled()
-                || Mesh->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block) continue;
+            const UPrimitiveComponent* Physical = IslandSceneryVoxels::SurfaceFor(Mesh);
+            if (!Mesh->GetStaticMesh() || !Physical->IsQueryCollisionEnabled()
+                || Physical->GetCollisionResponseToChannel(ECC_Pawn) != ECR_Block) continue;
             const FBox Bounds = Mesh->Bounds.GetBox();
             // Reserve an approach for a standing player as well as the buried chest itself.
             Obstacles.Add(FBox2D(FVector2D(Bounds.Min), FVector2D(Bounds.Max)).ExpandBy(100.));

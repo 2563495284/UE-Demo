@@ -5,6 +5,8 @@
 
 class UStaticMeshComponent;
 class UTextRenderComponent;
+class UStaticMesh;
+class UMaterialInterface;
 
 UENUM()
 enum class EIslandBreakEffect : uint8
@@ -88,7 +90,8 @@ class AIslandSceneryDamage : public AActor
 public:
     AIslandSceneryDamage();
     static bool RemoveAuthoredPiece(const FHitResult& Hit);
-    static void PlayDebris(UWorld& World, FVector Point, FVector Normal, UMaterialInterface* Material);
+    static void PlayDebris(UWorld& World, FVector Point, FVector Normal, UMaterialInterface* Material,
+        UStaticMesh* FragmentShape=nullptr, FVector FragmentScale=FVector::OneVector, UMaterialInterface* AlternateFinish=nullptr);
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:

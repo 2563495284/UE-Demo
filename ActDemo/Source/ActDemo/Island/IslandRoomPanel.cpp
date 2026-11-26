@@ -25,10 +25,23 @@
 namespace
 {
     using namespace IslandMenuStyle;
-    FText Txt(const FString& Value) { return FText::FromString(Value); }
-    TSharedRef<SWidget> Label(TAttribute<FText> Value, int32 Size, FLinearColor Tint, bool bBold = false)
+
+    const TCHAR* CharacterName(int32 Model)
     {
-        return SNew(STextBlock).Text(Value).AutoWrapText(true)
+        switch (Model)
+        {
+        case 0: return EXPEDITION_TEXT("小猪", "Pig");
+        case 1: return EXPEDITION_TEXT("猴子", "Monkey");
+        case 2: return EXPEDITION_TEXT("狐狸", "Fox");
+        case 3: return EXPEDITION_TEXT("小牛", "Calf");
+        default: return TEXT("");
+        }
+    }
+
+    FText Txt(const FString& Value) { return FText::FromString(Value); }
+    TSharedRef<SWidget> Label(TAttribute<FText> Value, int32 Size, FLinearColor Tint, bool bBold = false, bool bWrap = true)
+    {
+        return SNew(STextBlock).Text(Value).AutoWrapText(bWrap)
             .Font(FCoreStyle::GetDefaultFontStyle(bBold ? TEXT("Bold") : TEXT("Regular"), Size)).ColorAndOpacity(Tint);
     }
 
@@ -104,7 +117,8 @@ void SIslandRoomPanel::AddMessage(TAttribute<FText> Value, bool bWarning)
 
 void SIslandRoomPanel::Show(EIslandPanel Target)
 {
-    if (Target == Page) return;
+    if (Target == Page || (Target == EIslandPanel::Character && !CanChooseCharacter())) return;
+    const bool bFromCharacter = Page == EIslandPanel::Character && Target == EIslandPanel::Lobby;
     const bool bReturning = Page == EIslandPanel::ClientSettings && Target == SettingsOrigin;
     if (Target == EIslandPanel::ClientSettings) SettingsOrigin = Page;
     if (ClientSettings)
@@ -132,6 +146,7 @@ void SIslandRoomPanel::Show(EIslandPanel Target)
     Build();
     if (ClientSettings) Focus(ClientSettings->FocusTarget());
     else if (bReturning) Focus(ClientSettingsButton);
+    else if (bFromCharacter && CharacterButton && CharacterButton->IsEnabled()) Focus(CharacterButton);
     else if (Page==EIslandPanel::Search && Session() && Entries.Contains(Session()->LastJoinedRoomId))
         Focus(Entries[Session()->LastJoinedRoomId]);
     else Focus(Primary);
@@ -148,6 +163,7 @@ void SIslandRoomPanel::Build()
     Entries.Reset();
     LastListings.Reset();
     ClientSettingsButton.Reset();
+    CharacterButton.Reset();
     if (Page == EIslandPanel::ClientSettings)
     {
         Body.Reset();
@@ -213,6 +229,7 @@ void SIslandRoomPanel::Build()
     else if (Page == EIslandPanel::Create || Page == EIslandPanel::Settings) BuildForm();
     else if (Page == EIslandPanel::Search) BuildBrowser();
     else if (Page == EIslandPanel::Lobby) BuildLobby();
+    else if (Page == EIslandPanel::Character) BuildCharacterPicker();
     else if (Page == EIslandPanel::Result)
     {
         const auto* GS = Round();
@@ -394,7 +411,7 @@ FString SIslandRoomPanel::TeamMembers(int32 Team) const
         if (!Player || Player->Team!=Team) continue;
         const FString Name=Player==Me()?EXPEDITION_TEXT("你", "You"):Player->GetPlayerName();
         const FString Status=Player->bHost ? EXPEDITION_TEXT("房主", "Host") : Player->bRoomReady ? EXPEDITION_TEXT("已准备", "Ready") : EXPEDITION_TEXT("未准备", "Not ready");
-        Members.Add(Name+TEXT(" · ")+Status+(Player->bMapReady?TEXT(""):EXPEDITION_TEXT(" · 同步中", " · Syncing")));
+        Members.Add(Name+TEXT(" · ")+CharacterName(Player->GetCharacterModel())+TEXT(" · ")+Status+(Player->bMapReady?TEXT(""):EXPEDITION_TEXT(" · 同步中", " · Syncing")));
     }
     return FString::Join(Members,TEXT("\n"));
 }
@@ -410,6 +427,78 @@ FString SIslandRoomPanel::RoomStatus() const
     for (const auto& Entry : GS->PlayerArray)
         if (const auto* P=Cast<AIslandPlayerState>(Entry.Get()); P && !P->bMapReady) return EXPEDITION_TEXT("正在同步海岛地形", "Syncing island terrain");
     return EXPEDITION_TEXT("等待队员准备", "Waiting for players to ready up");
+}
+
+bool SIslandRoomPanel::CanChooseCharacter() const
+{
+    const auto* GS = Round();
+    const auto* Self = Me();
+    return GS && Self && Self->Team >= 0 && GS->Phase == EIslandPhase::Waiting;
+}
+
+void SIslandRoomPanel::BuildCharacterPicker()
+{
+    AddTitle(EXPEDITION_TEXT("选择角色", "Choose character"));
+    static const FButtonStyle ChoiceStyle = []
+    {
+        FButtonStyle Style = MakeButtonStyle(false);
+        Style.SetNormalPadding(FMargin(3, 6));
+        Style.SetPressedPadding(FMargin(3, 7, 3, 5));
+        return Style;
+    }();
+    static const FSlateColorBrush Clear(FLinearColor::Transparent);
+    const auto Enabled = TAttribute<bool>::CreateSP(this, &SIslandRoomPanel::CanChooseCharacter);
+    TSharedPtr<SHorizontalBox> Row;
+    for (int32 Model = 0; Model < IslandRules::CharacterModelCount; ++Model)
+    {
+        const bool FirstColumn = Model % 2 == 0;
+        if (FirstColumn)
+        {
+            Row = SNew(SHorizontalBox);
+            Add(Row.ToSharedRef(), 8);
+        }
+        const auto Selected = [this, Model]{ return Me() && Me()->GetCharacterModel() == Model; };
+        const auto Caption = TAttribute<FText>::CreateLambda([Model, Selected]
+        {
+            return Selected() ? Txt(FString::Format(EXPEDITION_TEXT("{0}，已选", "{0}, selected"), {CharacterName(Model)}))
+                              : Txt(CharacterName(Model));
+        });
+        TSharedRef<SWidget> Option = SNew(SButton)
+            .Tag(FName(*FString::Printf(TEXT("Island.Character.%d"), Model)))
+            .ButtonStyle(&ChoiceStyle).IsEnabled(Enabled).AccessibleText(Caption)
+            .ContentPadding(FMargin(0)).HAlign(HAlign_Fill).VAlign(VAlign_Fill)
+            .OnClicked_Lambda([this, Model]
+            {
+                ++Actions;
+                if (CanChooseCharacter()) PC->ServerChooseCharacter(Model);
+                return FReply::Handled();
+            })
+            [
+                SNew(SBox).MinDesiredHeight(54)
+                [
+                    SNew(SBorder).Padding(0).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+                    .BorderBackgroundColor_Lambda([Selected]{
+                        return Selected() ? FLinearColor(.47f,.62f,.57f,.24f) : FLinearColor::Transparent;
+                    })
+                    [
+                        SNew(SHorizontalBox)
+                        + SHorizontalBox::Slot().AutoWidth()
+                        [SNew(SBox).WidthOverride(4)[SNew(SBorder).BorderImage_Lambda([Selected]{ return Selected() ? &Accent : &Clear; })]]
+                        + SHorizontalBox::Slot().FillWidth(1).Padding(9,0,6,0).VAlign(VAlign_Center)
+                        [Label(Txt(CharacterName(Model)), 19, Ink, true, false)]
+                        + SHorizontalBox::Slot().AutoWidth().Padding(2,0,8,0).VAlign(VAlign_Center)
+                        [SNew(SBox).Tag(FName(*FString::Printf(TEXT("Island.Character.Current.%d"), Model)))
+                            .Visibility_Lambda([Selected]{ return Selected() ? EVisibility::HitTestInvisible : EVisibility::Collapsed; })
+                            [Label(Txt(EXPEDITION_TEXT("已选", "Selected")), 14, Ink, false, false)]]
+                    ]
+                ]
+            ];
+        Row->AddSlot().FillWidth(1).Padding(FirstColumn ? 0.f : 4.f, 0, FirstColumn ? 4.f : 0.f, 0)[Option];
+        if (Selected()) Primary = Option;
+    }
+    auto Return = Button(Txt(EXPEDITION_TEXT("返回房间", "Back to room")), [this]{ Back(); }, true, false, "Island.Character.Back");
+    Add(Return, 0);
+    if (!Primary) Primary = Return;
 }
 
 void SIslandRoomPanel::BuildLobby()
@@ -428,6 +517,9 @@ void SIslandRoomPanel::BuildLobby()
     ChestRules->SetTag("Island.LobbyChestRules");
     Add(ChestRules,4);
     AddMessage(TAttribute<FText>::CreateLambda([this]{ return Txt(RoomStatus()); }));
+    CharacterButton = Button(Txt(EXPEDITION_TEXT("选择角色", "Choose character")), [this]{ Show(EIslandPanel::Character); },
+        TAttribute<bool>::CreateSP(this, &SIslandRoomPanel::CanChooseCharacter), false, "Island.Character");
+    Add(CharacterButton.ToSharedRef(), 10);
     TeamRows = Round() ? Round()->RoomSettings.MaxTeams : 0;
     for (int32 Team=0; Team<TeamRows; ++Team)
     {
@@ -514,7 +606,7 @@ void SIslandRoomPanel::Back()
         Show(EIslandPanel::Home);
     }
     else if (Page==EIslandPanel::Lobby) Show(EIslandPanel::Pause);
-    else if (Page==EIslandPanel::Settings) Show(EIslandPanel::Lobby);
+    else if (Page==EIslandPanel::Settings || Page==EIslandPanel::Character) Show(EIslandPanel::Lobby);
     else if (Page==EIslandPanel::Pause)
     {
         const AIslandGameState* GS=Round();
@@ -526,6 +618,6 @@ void SIslandRoomPanel::Back()
 FReply SIslandRoomPanel::OnPreviewKeyDown(const FGeometry& Geometry, const FKeyEvent& E)
 {
     if (ClientSettings) return FReply::Unhandled();
-    if (E.GetKey()==EKeys::Escape) { if (!E.IsRepeat()) Back(); return FReply::Handled(); }
+    if (E.GetKey()==EKeys::Escape || (Page==EIslandPanel::Character && E.GetKey()==EKeys::Gamepad_FaceButton_Right)) { if (!E.IsRepeat()) Back(); return FReply::Handled(); }
     return SCompoundWidget::OnPreviewKeyDown(Geometry,E);
 }

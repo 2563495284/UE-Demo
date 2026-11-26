@@ -6,7 +6,7 @@
 
 1. 打开游戏后会自动取得 EOS 游客身份。房主点击「创建房间」，给房间起名。朋友使用同版试玩包点击「搜索房间」，从公开大厅按房名加入，可使用各自的家庭网络或热点。
 2. 默认有八个玩家席位、八支可选队伍，各队可容纳八人。想一起找宝藏就选同一队。想分组比赛就选不同队，空队留在岸上。房主可以限制队数、每队人数和总人数；调整后的席位必须容得下已入座成员。房主也可选择额外假箱数，默认 4 只，可设为 0–24 只。
-3. 队员可以在码头看见同队角色。来宾准备，房主确认开始。只有当前成员参与就绪检查。队伍选择可在开局前调整。影响阵容的设置变更后，来宾重新确认。
+3. 在码头点击「选择角色」，从小猪、猴子、狐狸和小牛里点选一个。近景显示实际角色，回房间后队友也能看见。允许同款，纯外观选择不影响准备状态、队伍和操作能力。倒计时开始后锁定，返回房间可再次更换。来宾准备，房主确认开始。只有当前成员参与就绪检查。队伍选择可在开局前调整。影响阵容的设置变更后，来宾重新确认。
 4. WASD 移动，鼠标观察。默认第三人称，按 V 切换第一人称，再按 V 切回。左键挖、右键丢土，都支持长按。面向脚边丢土可一层层垫高，空格跳跃。按住 Tab 看海图时，可以用鼠标转动视角，同时用 WASD 移动。靠近露出的搜索区箱子按 E。首次开箱会让全房进入小游戏，已揭晓的真箱可直接领取本队的碎片。在最终大奖旁按 E 撬锁，留在箱边。长按 R 回本队码头。Esc 打开菜单，按住 F1 可查看操作。
 5. 打开大奖后所有端看到结算。房主选择「返回房间」即可与原成员再来一局。本局线索、宝箱与挖过的地形重新准备。房主解散房间会结束会话，来宾离开已开局的房间后其余人可以继续。
 
@@ -18,7 +18,7 @@ Mac 首次以 1280 × 720 窗口启动。切换窗口、无边框全屏或分辨
 
 ## 在岛上怎么挖、怎么抢
 
-抵达 A–D 任一搜索区，自行选择从地面往下挖，或从侧面凿进去。默认岛上每个圈的半径为 18 米。斜线区域表示待搜索的范围。本队领到该区的真箱奖励后，海图标出实心点。赢得假箱比赛也能提前得到一个真箱的准确位置，空心菱形表示还可以去挖。每局重新采样藏点，真交点距离四个公开圈心的连线交点至少 10 米。凿到埋箱附近会听见空响，越近声音越清晰，准星下也有提示。回音只给挖掘者。集齐本队四条线索后，交点附近的大奖才会产生回音。
+抵达 A–D 任一搜索区，自行选择从地面往下挖，或从侧面凿进去。默认岛上每个圈的半径为 18 米。斜线区域表示待搜索的范围。本队领到该区的真箱奖励后，海图标出实心点。每局重新采样藏点，真交点距离四个公开圈心的连线交点至少 10 米。凿到埋箱附近会听见空响，越近声音越清晰，准星下也有提示。回音只给挖掘者。集齐本队四条线索后，交点附近的大奖才会产生回音。
 
 每个搜索区都有一只真箱，同一区还可能挖出房主配置的假箱。首次开启前，两种箱盖外观相同。每只箱只触发一场小游戏。揭晓为真箱时，开箱队和每支小游戏胜队都取得本箱的坐标和一枚钥匙碎片。其他队的任一队员随后到这只箱边按 E，就能直接为全队领取同样的奖励。每队每箱只领一次。
 
@@ -60,7 +60,20 @@ open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=4
 
 六个个人赛超时时，有正分的玩家按得分排序。同分时先达到该分者优先，同一服务器帧同时达分则使用本场种子裁定。所有人都零分时没有小游戏赢家，真箱仍给开箱队发奖。[六张地图的实机全景](Screenshots/ExpeditionVoxelGames.jpg)
 
-比赛结算时揭晓真假。假箱原址在全房海图留下灰叉。每支胜队各自得到一处本队尚未知晓的真箱坐标，优先标记本区，已知则顺延到下一处未知点。赢家和队友可立刻赶去挖箱，领取该箱奖励后，空心菱形才变成实心点并计入钥匙和交点进度。四处位置都已知时无需再标点。全员可能被分散到岛上新的安全位置，也可能进入持续 120 秒的身份混淆，期间姓名、队色和敌我标识一起隐藏。正常回岛会恢复原来的角色和位置，原处受阻则选择安全落点。
+假箱结算时，房主端按仍在场的人数、队伍、成绩与现场地形、设施，从八种事件中筛出可触发的项目，再等概率抽一件。全房看到同一结果和同一个假箱灰叉，下一只假箱仍可抽到相同事件。各队只有领取真箱才增加碎片与坐标。
+
+| 假箱事件 | 何时可以抽到 | 抽中后如何寻宝 |
+|---|---|---|
+| 船员集合 | 在场至少一支多人队，且有队员能安全靠拢 | 每支多人队以一名队友刚才的勘探位置为集合点。能在附近安全落地的队员集合，单人成队或找不到站位的队员按常规方式返岛。 |
+| 翻砂成坡 | 假箱旁有能安全成坡的地面 | 已开假箱旁一次翻起砂坡。全房玩家都可以借坡攀高、挖开坡面或继续垫土。 |
+| 风卷帆布 | 岛上至少还有一架可收放的晒帆架 | 所有可收放的帆架各切换一次。放下的帆遮挡视线和名牌，收起的帆让两侧重新互见。谁都能到绳尾按 E 再收放。 |
+| 开路好手 | 至少一支胜队 | 每支胜队全员的挖掘和泥团落地堆土半径翻倍。单铲深度、台高及投掷距离沿用常规值。 |
+| 乱流冲散 | 至少一支未胜队 | 每名未获胜的队员分别随机返岛，胜队回原处。个人赛全员零分时，抽中此项会让全员散开。 |
+| 迷雾换装 | 至少两名玩家 | 全员换上同一装束，隐藏名牌，暂停集合信号。之前取得的线索仍能查阅。 |
+| 弹跳潮 | 任意阵容 | 全员在岛上的普通起跳速度变为 1.5 倍，可以从较深的坑里直接跳回岸上。 |
+| 停火潮 | 至少两支在场队伍 | 泥球照常落地堆土，打中对手不会积累泥印或造成新眩晕，队伍可趁机接近或争夺箱锁。 |
+
+船员集合与乱流冲散只在返岛时安排一次落点。其他事件按原位安全返岛。砂坡和晒帆一次改变岛上的实物，下一场开赛时保留。迷宫多支追方队同胜时，若抽中开路好手，每支胜队都强化。开路好手、迷雾换装、弹跳潮和停火潮持续到下一场小游戏正式开始。中途补领已揭晓的真箱，或下一场加载中止后回岛，持续效果都保留。整局寻宝结束时清除。[开箱流程与验收用例](远征岛开箱交互.md#每只假箱随机触发一个事件)
 
 ## 用土团抢位或自救
 
@@ -72,13 +85,13 @@ open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=4
 
 ## 中立场景物体
 
-任意玩家都可以用左键拆除建筑。四个公共地标按横梁、立柱或石阶逐块拆除；岸路石堆、标柱和码头各自独立。铲到中立设施的主体、桅索、帆布卷或支架等实体部件，都能对整座设施造成损伤。累计三铲后拆除，击中树根和砂斗木销会先触发其专属机关。各端同时更新外形和碰撞。站位所在的码头已拆除时，回港会另选可以站立的落点。
+任何队伍都可以长按左键，沿准星逐铲挖掉公共地标、路标、码头和中立机关命中处的体素。红船的船壳、甲板和桅索可以分别开洞。洞口同时影响同行玩家看见的外形和实际通行范围。树根和砂斗木销仍可触发倒树、落砂。泊位损坏后，回港会另选可以站立的落点。
 
 倒树两端间隔约 14.6 米。三端试玩中，距树根 13.2 米处仍有树干阻挡；另一队挖低路面后，从树下实际走过 4.14 米。船首、船尾两处实体碰撞相距 22.63 米，挖通的横穿船舱路线长 10.43 米。砂斗落下的沙在这局抬高了约 10.75 × 4.48 米的地面，角色爬坡上升 0.85 米。实际露出地面的范围随地势变化。
 
 垂帆约 14 米宽，在距中央 6.48 米的侧路仍能遮住视线与姓名牌。潮孔相隔 8.4 米，高喷生效半径为 3.05 米。试玩角色在距孔心 2.5 米处主动跳跃，两次测试都落到前方约 13.5 米的岩台。
 
-| 白模外观 | 怎么用 |
+| 岛上外观 | 怎么用 |
 |---|---|
 | 绿冠、棕干的大树 | 靠近树根，用左键敲两下。树倒后从树下挖通，也可以在侧面填坡。 |
 | 砖红色旧船壳 | 朝船舷破洞里的沙按左键开挖。用右键沿舱壁丢土堆坡，可以上甲板。 |
@@ -90,10 +103,10 @@ open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=4
 
 开新一局时，服务器只选一次本局种子。宝箱布局沿用现有种子入口，中立物体从同一个种子按固定用途派生出独立的随机序列。这样调低树的出现率时，同一个种子的宝箱仍在原处。地图、配置和生成器版本相同时，指定种子应能复现整局初始布局。
 
-想在本版一局看全五种物体，可以在项目根目录运行下方命令，再从首页照常创建房间。指定种子只需由房主操作。平时直接打开 App 会在每次开局时重新取种子。
+想在本版一局看全五种物体，可以在项目根目录运行下方命令，再从首页创建房间，额外假箱使用默认的 4 个。指定种子只需由房主操作。平时直接打开 App 会在每次开局时重新取种子。
 
 ```sh
-open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=3
+open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=25
 ```
 
 在已保存的海岛上，程序按稳定的地形网格顺序找出符合下列条件的地点和朝向，再用种子抽取本局的物体种类、数量及摆位。候选点由地形产生，关卡作者可以调出现权重、间距和禁放范围。每类都允许缺席，合适位置用尽就少放。例如，同一段海岸这局可能在沙脊上露出半截船壳，下局船壳出现在另一段海岸，原处恢复成一条空沙脊。
@@ -112,6 +125,8 @@ open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=3
 
 从任一头把沙掏低，就能穿舱直达另一条岸路。也可以把沙沿舱壁堆成坡，踩上甲板看清沙脊背面的岔口。后来的人可以走现成的洞、踩现成的坡，还可以挖宽一侧的通道，留下另一侧的沙坡。船头和船尾各留一条露天岸路。
 
+岸边能从船首的青背海鸟木雕和斜挂的破帆辨认沉船。顺着龙骨铺设的长板在舱口断开，近看可以分辨旧红漆、浅色木茬和绑桅杆的铜箍。打开 Mac 试玩包里的「试看沉船.command」即可站在船首旁绕看或开挖。[沉船样板同机位对照](Screenshots/WreckPilotComparison.jpg) · [船舷实挖一铲](Screenshots/WreckPilotCarving.jpg)
+
 ### 采石场砂斗
 
 生成器寻找相邻的高台和下层便道，要求砂量足以堆坡接上台面，且原有上行路在落砂范围外。木斗的斜槽顺坡朝向岩壁。敲松槽口的木销，砂先从缝里漏下来，再沿槽滑下，靠墙堆成可走的坡，同时埋住下层便道的一截。放空的木斗保持空置。
@@ -122,17 +137,37 @@ open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=3
 
 生成器从有两个可见出口的岔口里选点，让两根帆杆横在来路视线与出口之间，侧面留有观察位置。旧帆卷在横杆上，拉松低处的系绳，帆就垂下来，遮住两个出口。帆布能直接穿过，擦过时会鼓起来，身后的人能看见刚才哪里动了一下。人在帆前回头看，也会被同一幅帆遮住。
 
-绳尾一直垂在路边，任何人都可以把帆重新升起、系回木桩。也可以登上侧坡越过帆顶观察。摆放时让帆面只遮住近处的岔口，两边仍能辨认远处的地标。
+绳尾完好时，任何人都可以把帆重新升起、系回木桩。铲开的帆洞可以透视，帆绳挖尽就无法再收放。也可以登上侧坡越过帆顶观察。摆放时让帆面只遮住近处的岔口，两边仍能辨认远处的地标。
 
 ### 双孔潮喷口
 
 生成器寻找海岸低岩台，要求两个孔都在海岸线以内可回填的地面上、台上有安全落脚面、侧面有天然上行路线。两个浅潮孔成对生成，溢口朝海。浪来之前，两孔先冒白泡，再各喷出一股矮水柱。用土填住其中一孔，下一涌就集中从另一孔喷出。看准白泡主动跳进水柱，可以借力登上低岩台。喷口朝上，经过岸路的人可以照常走。
 
-后来的人可以借同一股水上台，也能挖掉沙塞，让两个孔恢复原状。如果两个孔都被填住，水从侧缝排走。岩台旁保留能走上去的天然坡路。
+后来的人可以借同一股水上台，也能挖掉沙塞，让两个孔恢复原状。挖尽一侧的整圈礁石后，该孔停止喷水。如果两个孔都被填住，水从侧缝排走。岩台旁保留能走上去的天然坡路。
 
 可以在地形 Actor 的设置中将五种权重全部设为零，复验同一种子的空场寻宝。文末的联机命令可在默认配置下重放有物体的场景，检查各端地形、物体状态与角色通行情况。
 
-## 可编辑的白模
+## 可编辑的体素岛
+
+这一版可以直接从试玩包中的「全岛巡游.command」进岛。镜头从全岛和码头出发，经过倒树、沉船、砂斗、晒帆架和潮孔，再看四个寻宝地标与路肩。按空格即可接手角色，走到想试的物件旁，瞄准一块外露的木板、岩面或树根按左键。沿木板中间削一铲，再沿支柱根部横向挖穿，可以分别看到局部缺口和失去支撑后的脱落。
+
+石拱有楔石与拱肩，信标用分叉桅杆和顶盘，采石场的吊架跨在阶地上，斜鳍露出一段浅色骨脊。码头的铺板、缆绳和桩帽，宝箱的铜扣、锁眼和罗盘，以及沿岸的碎浪，在玩家视角下都可以近看。[四个地标升级前后](Screenshots/IslandFullArtComparison.jpg) · [主岛机关与植被](Screenshots/IslandFullArtField.jpg) · [码头与寻宝道具](Screenshots/IslandFullArtSalvage.jpg)
+
+海岸用浅暖沙，向陆地升高后逐渐出现草坡和灰绿色礁岩。挖低地面会露出赭色土层，深挖能见到岩层，堆高的新土沿用沙土色。木板、立柱、石拱和系缆桩都有削边，远处靠剪影认地标。红船的领航眼、砂斗的箭纹、紫帆的风玫瑰分别提示船首、落砂方向和可收放的帆面。
+
+主岛上，扇叶棕挑高树冠，滨海灌木、裂纹礁和枝状礁沿路肩成簇出现。生成器给玩家留出至少 2.3 米宽的路面，避开本局挖掘点，并从玩家眼高检查通向地标的视线。种子 25、默认四个假箱时，岛上有 4 株扇叶棕、11 丛灌木、4 块裂纹礁和 5 处枝状礁。[路肩近景](Screenshots/RoutePalmShoulder.jpg) · [沿路望向地标](Screenshots/RouteLandmarkSightline.jpg) · [同机位布景前后](Screenshots/RouteIslandComparison.jpg)
+
+准星对着实物按左键，可按落铲位置削掉外叶、礁石、船板、码头或地标的一角。断根的植株和失去支撑的构件会脱落。挖出悬空的宝箱时，箱体会落到下面的洞底。再掏空支撑，箱板会脱落，原发现点仍可以开箱。下面是本版 Mac 游戏中两次普通铲击各自的同机位实拍，以及同机三进程的逐件开挖记录。[裂纹礁与拱柱各挖一铲](Screenshots/IslandFullArtShovel.jpg) · [17 类物件的碰撞与同步结果](../ActDemo/Saved/FullIslandArtPackStructures/neutral/normal/summary.json)
+
+在项目根目录运行以下命令，按平常流程建房、出发，就能回看这局的布景。
+
+```sh
+open -n Builds/TreasureIsland/Mac/远征岛.app --args -ExpeditionSeed=25
+```
+
+前一版的实机画面来自默认四个假箱、种子 25 的远征。三人局里，船舱里的沙面挖低了 1.30 米，角色从新开的通道穿过 10.37 米。[加入路肩植被前的主岛](Screenshots/LowPolyIsland.jpg) · [岸边红船](Screenshots/LowPolyWreck.jpg) · [挖开后的船舱](Screenshots/LowPolyWreckPassage.jpg) · [岛上机关](Screenshots/LowPolyField.jpg)
+
+从港口开房、在码头组队，再进入小游戏时，木料、削边石块和礁石沿用同一套造型。[港口首页](Screenshots/LowPolyHarbour.jpg) · [队伍码头](Screenshots/LowPolyRoom.jpg) · [六处小游戏场地](Screenshots/LowPolyVenues.jpg) · [迷宫俯视](Screenshots/LowPolyMaze.jpg)
 
 | 设计决定 | 编辑与运行方式 |
 |---|---|
@@ -201,7 +236,7 @@ python3 Scripts/island_qa.py --scenario field --mode both
 python3 Scripts/island_qa.py --scenario games --seed 2026 --decoys 2 --mode both --screenshot
 python3 Scripts/island_qa.py --scenario games --arena-terrain --arena-views --seed 3 --mode normal --screenshot
 python3 Scripts/island_qa.py --scenario games --seed 3 --decoys 2 --venue-demolition --mode emulated --screenshot
-python3 Scripts/island_qa.py --scenario games --seed 2026 --decoys 2 --identity-shots --screenshot --mode normal
+python3 Scripts/island_qa.py --scenario games --decoy-events --mode both
 python3 Scripts/island_qa.py --scenario solo --decoys 0 --mode normal
 python3 Scripts/island_qa.py --scenario games-drop --seed 25 --mode normal --headless-host
 python3 Scripts/island_qa.py --scenario games-crew --game-only PartyCrystalHunt --seed 25 --mode emulated --headless-host
@@ -209,8 +244,8 @@ python3 Scripts/island_qa.py --scenario games-maze --seed 25 --mode normal --scr
 python3 Scripts/island_qa.py --scenario games-eight --game-only PartyCrownHold --seed 25 --mode normal --headless-host
 python3 Scripts/island_qa.py --scenario mud --mode both --screenshot
 python3 Scripts/island_qa.py --scenario solo --neutral-audit --seed 25 --headless-host --mode normal
-python3 Scripts/island_qa.py --scenario neutral --seed 3 --mode both --screenshot
-python3 Scripts/island_qa.py --scenario neutral --seed 3 --structures --mode both
+python3 Scripts/island_qa.py --scenario neutral --seed 25 --decoys 4 --mode both --screenshot
+python3 Scripts/island_qa.py --scenario neutral --seed 25 --decoys 4 --structures --mode both
 ```
 
 实走探针沿真实地面移动，通过普通挖掘、回港和开箱输入完成一局。为使每次地图改动都可复验，开发探针知道服务端本局的箱位。它验证移动、挖掘、操作和结算链路，玩家能否凭地标自行发现埋藏点，仍需真人盲玩评估。录像单独采集，避免截图写盘影响压力数据。
@@ -233,7 +268,7 @@ python3 Scripts/expedition_ui_qa.py --scenario internet --role guest --room-name
 
 ## 四个真箱与建筑复验
 
-迷宫追捕在同一台 Mac 上用三个两人队跑了两轮。发行包在模拟 80 毫秒往返延迟、2% 丢包下，各端读取的两套迷宫均有 81 个互通房间，拆补后的碰撞一致。逃方先行 8 秒后，第一轮经过完整 180 秒仍有一人存活。第二轮抓齐后，两支追方队各得到本队的真箱情报。另用三端检查一名追方来宾离开后仍可回岛。[六端打包版验收](../ActDemo/Saved/MazeChaseMac/games-maze/emulated/summary.json) · [掉线验收](../ActDemo/Saved/MazeChaseDropMac/games-drop/normal/summary.json)
+迷宫追捕在同一台 Mac 上用三个两人队跑了两轮。发行包在模拟 80 毫秒往返延迟、2% 丢包下，各端读取的两套迷宫均有 81 个互通房间，拆补后的碰撞一致。逃方先行 8 秒后，第一轮经过完整 180 秒仍有一人存活。第二轮抓齐后，两支追方队同时获胜。另用三端检查一名追方来宾离开后仍可回岛。[六端打包版验收](../ActDemo/Saved/MazeChaseMac/games-maze/emulated/summary.json) · [掉线验收](../ActDemo/Saved/MazeChaseDropMac/games-drop/normal/summary.json)
 
 房主分别把额外假箱设为 0、4、24。用同一组 256 个种子对照有无假箱的布局，A–D 四个真箱与最终交点逐一相同。设为 24 时累计核对 6,144 个假箱位置，并在一张岛上检查全部 24 个假箱能否挖出。[三人宝库争锁与 24 假箱验收](../ActDemo/Saved/KeyVaultFieldAcceptedQA/field/normal/summary.json)
 
@@ -243,7 +278,7 @@ python3 Scripts/expedition_ui_qa.py --scenario internet --role guest --room-name
 
 六张小游戏地图的外围共 60 座建筑、210 件可见构件。三进程测试把角色放在有支撑的棋盘格上，用原有挖掘操作逐座拆除。每一击后都核对三端的可见性与碰撞。穿礁赛道上，同一堵墙能挡住远处的拆除射线，走近后先挖到墙块。Mac 包在模拟 80 毫秒往返延迟、2% 丢包下走完七轮，实测拆除距离为 37.18–103.51 米。第七回合再进第一回合已经拆过的断桥场地，十座建筑全部恢复。[打包版六图拆除与奖励](../ActDemo/Saved/VenueDemolitionRelease/games/emulated/summary.json) · [编辑器三端交叉复验](../ActDemo/Saved/VenueDemolitionEditor/games/normal/summary.json)
 
-打包版海图截图展示了两个时刻。[三点已持钥，D 区仍待搜索](Screenshots/ExpeditionTreasureChartThree.jpg) · [四点连线与大奖交点](Screenshots/ExpeditionTreasureChartFour.jpg)。身份混淆期间，队友和敌队同穿雾衣，恢复后遮挡物仍能挡住名牌。[正常队友与对手名牌](Screenshots/ExpeditionCrewNames.jpg) · [雾衣外观](Screenshots/ExpeditionIdentityFog.jpg) · [名牌遮挡](Screenshots/ExpeditionCrewOcclusion.jpg) · [发行包三端迷雾与恢复复验](../ActDemo/Saved/ChestFinalShortIdentity/games/normal/summary.json)
+打包版海图截图展示了两个时刻。[三点已持钥，D 区仍待搜索](Screenshots/ExpeditionTreasureChartThree.jpg) · [四点连线与大奖交点](Screenshots/ExpeditionTreasureChartFour.jpg)。[正常队友与对手名牌](Screenshots/ExpeditionCrewNames.jpg) · [名牌遮挡](Screenshots/ExpeditionCrewOcclusion.jpg)
 
 早期三队测试在模拟 80 毫秒往返延迟、2% 丢包下验证了真箱奖励、假箱换位与身份混淆。旧记录的第七场来自另一队重开 A 箱。现行规则下该队在箱边按 E 直接领取。零假箱的单人房也完成了开库、消耗钥匙并返回原房。[旧版三队开箱和奖励](../ActDemo/Saved/FourChestRelease/games/emulated/summary.json) · [零假箱单人完整对局](../ActDemo/Saved/FourChestRelease/solo/normal/summary.json)
 

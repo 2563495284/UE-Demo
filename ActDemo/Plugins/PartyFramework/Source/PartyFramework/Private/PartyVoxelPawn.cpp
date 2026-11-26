@@ -1,4 +1,6 @@
 #include "PartyVoxelArena.h"
+#include "PartyCrewAppearance.h"
+#include "GameFramework/PlayerState.h"
 
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -47,14 +49,22 @@ APartyVoxelPawn::APartyVoxelPawn()
     Eye->bUsePawnControlRotation=true;
     Eye->bEnableFirstPersonScale=true;
     Eye->FirstPersonScale=.5f;
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> Orb(TEXT("/Engine/BasicShapes/Sphere"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Orb(TEXT("/Game/TreasureIsland/Art/Crew/SM_CarvedRound"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Mitten(TEXT("/Game/TreasureIsland/Art/Crew/SM_Mitten"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Block(TEXT("/Game/TreasureIsland/Art/Neutral/SM_HewnBlock"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Canvas(TEXT("/Game/TreasureIsland/Art/Crew/MI_Canvas"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Brass(TEXT("/Game/TreasureIsland/Art/Crew/MI_Brass"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Iron(TEXT("/Game/TreasureIsland/Art/Crew/MI_Iron"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Teal(TEXT("/Game/TreasureIsland/Art/Crew/MI_LagoonTrim"));
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Paint(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
     BaseMaterial=Paint.Object;
-    auto Part=[&](const TCHAR* Name,FVector Center,FVector Scale)
+    auto Part=[&](const TCHAR* Name,FVector Center,FVector Scale, UMaterialInterface* Surface, UStaticMesh* Shape=nullptr)
     {
         auto* M=CreateDefaultSubobject<UStaticMeshComponent>(FName(Name));
         M->SetupAttachment(GetCapsuleComponent());
-        M->SetStaticMesh(Orb.Object);
+        M->SetStaticMesh(Shape ? Shape : Orb.Object.Get());
+        M->SetMaterial(0,Surface);
+        M->SetReceivesDecals(false);
         M->SetRelativeLocation(Center);
         M->SetRelativeScale3D(Scale);
         M->SetCanEverAffectNavigation(false);
@@ -62,21 +72,28 @@ APartyVoxelPawn::APartyVoxelPawn()
         SuitParts.Add(M);
         return M;
     };
-    Body=Part(TEXT("Suit"),FVector(0,0,-12),FVector(.75,.70,1.02));
-    Part(TEXT("Helmet"),FVector(0,0,48),FVector(.79,.78,.70));
-    Part(TEXT("Muzzle"),FVector(31,0,42),FVector(.32,.51,.22));
-    Part(TEXT("EarLeft"),FVector(-3,-23,75),FVector(.24,.24,.34));
-    Part(TEXT("EarRight"),FVector(-3,23,75),FVector(.24,.24,.34));
+    // A compact island diver: oilskin jacket, brass collar and panelled faceplate.
+    Body=Part(TEXT("Suit"),{0,0,-19},{.74,.76,.82},Canvas.Object);
+    Part(TEXT("Helmet"),{2,0,40},{.80,.86,.71},Canvas.Object);
+    Part(TEXT("Collar"),{0,0,9},{.75,.82,.18},Brass.Object);
+    Part(TEXT("VisorFrame"),{32,0,42},{.26,.68,.41},Brass.Object);
+    Part(TEXT("Glass"),{39,0,42},{.17,.59,.33},Teal.Object);
+    Part(TEXT("Belt"),{-1,0,-37},{.72,.76,.14},Iron.Object);
+    Part(TEXT("AirTank"),{-31,0,-13},{.27,.48,.65},Teal.Object,Block.Object);
+    Part(TEXT("TankBand"),{-33,0,-10},{.29,.52,.12},Brass.Object,Block.Object);
     for (int32 I=0;I<2;++I)
     {
         const float Side=I ? 1.f : -1.f;
-        Gloves.Add(Part(I ? TEXT("RightGlove") : TEXT("LeftGlove"),{9.,Side*32.,-17.},{.26,.22,.32}));
-        Boots.Add(Part(I ? TEXT("RightBoot") : TEXT("LeftBoot"),{7.,Side*18.,-73.},{.37,.29,.27}));
+        Part(I ? TEXT("LeftBolt") : TEXT("RightBolt"),{0.,Side*39.,41.},{.22,.11,.24},Brass.Object);
+        Gloves.Add(Part(I ? TEXT("RightGlove") : TEXT("LeftGlove"),{9.,Side*32.,-17.},{.26,Side*.22,.32},Iron.Object,Mitten.Object));
+        Boots.Add(Part(I ? TEXT("RightBoot") : TEXT("LeftBoot"),{7.,Side*18.,-73.},{.37,.29,.27},Iron.Object));
         auto* Paw=CreateDefaultSubobject<UStaticMeshComponent>(I ? TEXT("FirstPersonRightPaw") : TEXT("FirstPersonLeftPaw"));
         Paw->SetupAttachment(Eye);
-        Paw->SetStaticMesh(Orb.Object);
+        Paw->SetStaticMesh(Mitten.Object);
+        Paw->SetMaterial(0,Iron.Object);
+        Paw->SetReceivesDecals(false);
         Paw->SetRelativeLocation({38.,Side*21.,-18.});
-        Paw->SetRelativeScale3D({.23,.13,.16});
+        Paw->SetRelativeScale3D({.23,Side*.14,.16});
         Paw->SetCollisionEnabled(ECollisionEnabled::NoCollision);
         Paw->SetCanEverAffectNavigation(false);
         Paw->SetOnlyOwnerSee(true);
@@ -85,6 +102,11 @@ APartyVoxelPawn::APartyVoxelPawn()
         Paw->SetVisibility(false);
         EyePaws.Add(Paw);
     }
+    CrewSculpture=Part(TEXT("CrewSculpture"),{0,0,-88},FVector::OneVector,nullptr);
+    CrewSculpture->SetStaticMesh(nullptr);
+    CrewSculpture->SetVisibility(false);
+    CrewBadge=Part(TEXT("CrewBadge"),{-36,0,-26},{.07,.43,.30},Canvas.Object);
+    CrewBadge->SetVisibility(false);
 }
 
 void APartyVoxelPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -105,11 +127,33 @@ void APartyVoxelPawn::SetCrewTint(FLinearColor Color)
     {
         SuitPaint = UMaterialInstanceDynamic::Create(BaseMaterial,this);
         Body->SetMaterial(0,SuitPaint);
+        CrewBadge->SetMaterial(0,SuitPaint);
         for (const auto& Glove : Gloves) Glove->SetMaterial(0,SuitPaint);
         for (const auto& Paw : EyePaws) Paw->SetMaterial(0,SuitPaint);
     }
     SuitColor = Color;
     SuitPaint->SetVectorParameterValue(TEXT("Color"),Color);
+}
+
+void APartyVoxelPawn::UpdateCrewModel()
+{
+    const auto* Appearance=Cast<IPartyCrewAppearance>(GetPlayerState());
+    bool bLongPaws=false;
+    UStaticMesh* Mesh=Appearance ? Appearance->GetPartyCharacterMesh(bLongPaws) : nullptr;
+    if (CrewSculpture->GetStaticMesh()==Mesh) return;
+
+    CrewSculpture->SetStaticMesh(Mesh);
+    for (const auto& Part : SuitParts)
+    {
+        if (Part==CrewSculpture || Part==CrewBadge) Part->SetVisibility(Mesh!=nullptr);
+        else if (!Gloves.Contains(Part) && !Boots.Contains(Part)) Part->SetVisibility(Mesh==nullptr);
+    }
+    for (const auto& Glove : Gloves)
+    {
+        FVector Scale=Glove->GetRelativeScale3D();
+        Scale.Z=bLongPaws ? .46 : .32;
+        Glove->SetRelativeScale3D(Scale);
+    }
 }
 
 void APartyVoxelPawn::SetLocalFirstPersonView(bool bFirstPerson)
@@ -259,7 +303,11 @@ void APartyVoxelPawn::ServerTool_Implementation(bool bPlace,FVector_NetQuantizeN
 void APartyVoxelPawn::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
-    if (GetNetMode()!=NM_DedicatedServer) UpdatePaws();
+    if (GetNetMode()!=NM_DedicatedServer)
+    {
+        UpdateCrewModel();
+        UpdatePaws();
+    }
     const bool bChase=Arena && Arena->IsChaseGame();
     const bool bCaught=bChase && Arena->IsCaught(Seat);
     if (bChase)

@@ -2,12 +2,14 @@
 """Exercise LAN treasure hunts and expedition rooms in independent UE processes."""
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
 import re
 import signal
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -29,13 +31,31 @@ VOXEL_GAMES = {"PartyReefRun", "PartyBeaconClimb", "PartyCrystalHunt", "PartyBri
 VEIL_SHOTS = ("PartyPull.png", "TransitionInBlack.png", "TransitionInArrival.png",
               "TransitionOutClosing.png", "TransitionOutBlack.png", "TransitionOutArrival.png")
 TREASURE_SHOTS = ("TreasureFragment.png", "TreasureForge.png", "TreasureVault.png")
-ROOM_CASES = {**GAME_CASES, "solo": (1, True), "coop": (2, True), "duel": (2, False), "crew-drop": (3, False),
+CHARACTER_CASES = {"character-pair": (2, False), "character-solo": (1, True)}
+ROOM_CASES = {**GAME_CASES, **CHARACTER_CASES, "solo": (1, True), "coop": (2, True), "duel": (2, False), "crew-drop": (3, False),
               "mud": (3, False), "field": (3, False), "neutral": (3, False), "crew-eight": (8, True), "eight-teams": (8, False)}
 GUESTS = [f"guest{seat}" for seat in range(1, 6)]
 ROLES = ["host", *GUESTS]
 FAILURE = re.compile(r"(?:VOXEL_PROTOCOL_ERROR|ISLAND_QA_CHECK passed=0|ISLAND_QA_TIMEOUT|Fatal error:).*", re.I)
+MAC_SHUTDOWN_INIT = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ ActDemo\[\d+:\d+\] \[UE4\] Shutdown handler: initialize\.")
 CHEST_RECEIPT = (r" round=(\d+) team=(\d+) mask=(\d+) points=(\d+) key=(\d+) outcome=(\d+)"
-                 r" scouted=(\d+) coordinates=(\d+) fragments=(\d+) crossing=(\d+)")
+                 r" scouted=(\d+) coordinates=(\d+) fragments=(\d+) crossing=(\d+) boosted=(\d+) event=(\d+) effects=(\d+)")
+DECOY_EVENTS = ("none", "wide_tools", "scatter", "disguise", "spring_tide", "ceasefire",
+                "crew_rally", "sand_ramp", "sail_gust")
+ONGOING_DECOYS = {1, 3, 4, 5}
+
+
+def replay_decoy(seed, chest, players, teams, winners, world_mask):
+    eligible = (bool(teams & winners), bool(teams & ~winners), players >= 2, players > 0, teams.bit_count() >= 2,
+                players > teams.bit_count() and bool(world_mask & 64), bool(world_mask & 128), bool(world_mask & 256))
+    pool = [event for event, allowed in enumerate(eligible, 1) if allowed]
+    digest = hashlib.sha1(struct.pack("<III", 0x44454359, seed & 0xffffffff, chest)).digest()
+    value = int.from_bytes(digest[:4], "big")
+    while True:
+        value = (196314165 * value + 907633515) & 0xffffffff
+        if value >= (1 << 32) % len(pool):
+            return pool[value % len(pool)]
+
 
 def verify_interaction(logs, rounds, allow_exit):
     expected = {(int(r[0]), direction) for r in rounds for direction in ("in", "out")}
@@ -81,8 +101,16 @@ def verify_interaction(logs, rounds, allow_exit):
 def verify_chest_revisit(logs, rounds, allow_exit, exercise_revisit):
     host = logs["host"]
     prepared = re.findall(r"PARTY_PREPARE round=(\d+) chest=(\d+)", host)
-    if prepared != [(row[0], row[2]) for row in rounds] or len({site for _, site in prepared}) != len(rounds):
-        raise RuntimeError("Each first opening must prepare exactly one minigame per physical chest")
+    aborted = set(re.findall(r"PARTY_ABORT round=(\d+)", host))
+    started = re.findall(r"PARTY_START round=(\d+) chest=(\d+)", host)
+    if ([entry for entry in prepared if entry[0] not in aborted] != started
+            or [site for _, site in started] != [row[2] for row in rounds]
+            or len({site for _, site in started}) != len(rounds)):
+        raise RuntimeError("Each physical chest must start and settle once, apart from cancelled load attempts")
+    completed = [round_id for round_id, _ in started]
+    restored = [round_id for round_id in re.findall(r"PARTY_SWAP round=(\d+) direction=out", host) if round_id in completed]
+    if restored != completed:
+        raise RuntimeError("Each completed round must restore players and apply its landing exactly once")
     genuine_mask = sum(1 << int(row[2]) for row in rounds if row[5] == "true")
     previous = {}
     for role, log in logs.items():
@@ -108,15 +136,14 @@ def verify_chest_revisit(logs, rounds, allow_exit, exercise_revisit):
         receipts = re.findall("EXPEDITION_REVISIT_RECEIPT" + CHEST_RECEIPT, log)
         if not receipts:
             raise RuntimeError(f"{role} missed the direct pickup receipt")
-        team, mask, _, _, outcome, scouted, _, _, _ = old
+        team, mask, _, _, outcome, _, _, _, _, boosted, event, effects = old
         if team == claimant:
             collectors.append(role)
             if mask != before:
                 raise RuntimeError(f"{role} had the wrong pre-claim inventory")
             mask = after
-            scouted &= ~bit
         points = bin(mask).count("1")
-        expected_state = (0, team, mask, points, int(points >= 3), outcome, scouted, mask | scouted, points % 3, int(mask == 15))
+        expected_state = (0, team, mask, points, int(points >= 3), outcome, 0, mask, points % 3, int(mask == 15), boosted, event, effects)
         if tuple(map(int, receipts[-1])) != expected_state:
             raise RuntimeError(f"{role} received incorrect progress after the direct pickup")
     if not any("VOXEL_REJECT 本队已取得这个箱子的碎片" in logs[role] for role in collectors):
@@ -125,48 +152,171 @@ def verify_chest_revisit(logs, rounds, allow_exit, exercise_revisit):
                 collectors=collectors, observed_by=list(previous), duplicate_rejected=True)
 
 
-def verify_private_scouting(logs, rounds, winning_masks, allow_exit, require_blind_rival, revisit):
-    pattern = re.compile("EXPEDITION_GAME_RECEIPT" + CHEST_RECEIPT)
-    snapshots = {role: {int(row[0]): tuple(map(int,row[1:])) for row in pattern.findall(log)}
-                 for role, log in logs.items() if role not in allow_exit}
-    previous = {role: (0, 0) for role in snapshots}
-    learned, privately_seen, claimed = [], [], []
-    for number, _, site, opener, winner, outcome, _ in rounds:
-        n, site, opener, winner = map(int, (number, site, opener, winner))
-        guest_points, awards = {}, {}
-        for role, by_round in snapshots.items():
-            if n not in by_round:
-                raise RuntimeError(f"{role} has no chart receipt for round {n}")
-            team, mask, points, key, _, scouted, coordinates, fragments, crossing = by_round[n]
-            old_mask, old_scouted = previous[role]
-            new_scout = scouted & ~old_scouted
-            crew_won = winning_masks[n] & (1 << team)
-            genuine_award = outcome == "true" and (team == opener or crew_won)
-            expected_mask = old_mask | (1 << site) if genuine_award else old_mask
-            earns_scout = outcome != "true" and crew_won and (old_mask | old_scouted) != 15
-            if (mask != expected_mask or scouted & mask or coordinates != (mask | scouted) or coordinates & ~15
-                    or points != bin(mask).count("1") or fragments != points % 3 or key != (points >= 3)
-                    or crossing != (mask == 15) or (scouted & ~new_scout) != (old_scouted & ~mask)
-                    or bin(new_scout).count("1") != int(earns_scout)):
-                raise RuntimeError(f"{role} round {n} invalid earned/scouted/private chart state {by_round[n]}")
-            if new_scout:
-                awards[role] = new_scout
-                learned.append(dict(round=n, role=role, team=team, site=new_scout.bit_length()-1))
-            if old_scouted & mask:
-                claimed.append(dict(round=n, role=role, site=site))
-            guest_points[role] = team, coordinates
-            previous[role] = mask, scouted
-        for winner_role, bit in awards.items():
-            for other, (team, coordinates) in guest_points.items():
-                if not winning_masks[n] & (1 << team) and not coordinates & bit and guest_points[winner_role][0] != opener:
-                    privately_seen.append(dict(round=n, winner=winner_role, blind_rival=other, site=bit.bit_length()-1))
-    if revisit:
-        for role in revisit["collectors"]:
-            if previous[role][1] & (1 << revisit["site"]):
-                claimed.append(dict(after_round=revisit["after_round"], role=role, site=revisit["site"], direct=True))
-    if require_blind_rival and (not privately_seen or not claimed):
-        raise RuntimeError("A rival must win a decoy, see a true site hidden on a losing chart, and collect the scouted site")
-    return dict(earned=learned, hidden_from=privately_seen, claimed=claimed)
+def verify_chest_effects(logs, rounds, winning_masks, events, allow_exit):
+    evidence = []
+    for role, log in logs.items():
+        if role in allow_exit:
+            continue
+        receipts = {int(row[0]): tuple(map(int, row[1:]))
+                    for row in re.findall("EXPEDITION_GAME_RECEIPT" + CHEST_RECEIPT, log)}
+        expected_sites = 0
+        for number, _, site, opener, _, outcome, _ in rounds:
+            n = int(number)
+            if n not in receipts:
+                raise RuntimeError(f"{role} missed chest receipt for round {n}")
+            team, mask, points, key, _, scouted, coordinates, fragments, crossing, boosted, event, effects = receipts[n]
+            won = bool(winning_masks[n] & (1 << team))
+            if outcome == "true" and (team == int(opener) or won):
+                expected_sites |= 1 << int(site)
+            count = expected_sites.bit_count()
+            expected_effects = {1: int(won), 3: 2, 4: 4, 5: 8}.get(events[n], 0)
+            if ((mask, coordinates, scouted, points, fragments, key, crossing, boosted, event, effects) !=
+                    (expected_sites, expected_sites, 0, count, count % 3, int(count >= 3),
+                     int(count == 4), int(events[n] == 1 and won), events[n], expected_effects)):
+                raise RuntimeError(f"{role} received incorrect private points, inventory or tools in round {n}: {receipts[n]}")
+            if outcome == "decoy":
+                evidence.append(dict(round=n, role=role, team=team, event=DECOY_EVENTS[event], effects=effects, boosted=bool(boosted), chart_mask=mask))
+    return evidence
+
+
+def verify_decoy_landings(host, winning_masks, events, count):
+    returns = {}
+    for n, seat, team, won, safe, distance in re.findall(
+            r"DECOY_QA_LANDING round=(\d+) seat=(\d+) team=(\d+) won=(\d+) safe_origin=(\d+) moved_cm=([\d.]+)", host):
+        n, seat, team, won, safe, distance = int(n), int(seat), int(team), int(won), int(safe), float(distance)
+        scatter = events[n] == 2 and not won
+        if (bool(won) != bool(winning_masks[n] & (1 << team)) or (scatter and distance < 499)
+                or (not scatter and events[n] != 6 and safe and distance >= 100.)):
+            raise RuntimeError(f"Unexpected decoy landing: round {n}, team {team}, winner {won}, moved {distance} cm")
+        returns[n,seat] = dict(round=n, seat=seat, team=team, won=bool(won), safe_origin=bool(safe), moved_cm=distance)
+    if set(returns) != {(n, seat) for n, event in events.items() if event for seat in range(count)}:
+        raise RuntimeError(f"Missing decoy landing after a completed round: {sorted(returns)}")
+    return list(returns.values())
+
+
+def verify_decoy_return(logs, winning_masks, events, count):
+    host = logs["host"]
+    previous_active = events[1] if events[1] in ONGOING_DECOYS else 0
+    previous_boost = winning_masks[1] if events[1] == 1 else 0
+    starts = [tuple(map(int, m)) for m in re.findall(
+        r"DECOY_QA_START round=(\d+) preceding_boost=(\d+) current_boost=(\d+) previous_event=(\d+) active=0", host)]
+    if starts != [(1, 0, 0, 0), (2, previous_boost, 0, previous_active)]:
+        raise RuntimeError(f"The next successful start did not clear the previous event: {starts}")
+    retries = re.findall(r"DECOY_QA_LOAD_RETRY round=2 retained_boost=(\d+) chest=(\d+) active=(\d+)", host)
+    if len(retries) != 1:
+        raise RuntimeError("Expected exactly one cancelled load and retry")
+    boost, chest, active = map(int, retries[0])
+    if boost != previous_boost or chest != 6 or active != previous_active:
+        raise RuntimeError(f"The cancelled load altered the previous effect or consumed a chest: {retries}")
+    observations = []
+    wait_for_hold = previous_active in (3, 4, 5)
+    for role, log in logs.items():
+        first = re.search(r"EXPEDITION_GAME_RECEIPT round=1 [^\n]*? effects=(\d+)", log)
+        if not first:
+            raise RuntimeError(f"{role} missed the original effect receipt")
+        original_effects = int(first[1])
+        required = ["held", "cancelled", "started"] if wait_for_hold else ["cancelled", "started"]
+        stages = []
+        for stage, event, effects, elapsed in re.findall(
+                r"DECOY_QA_CHECKPOINT stage=(\w+) event=(\d+) effects=(\d+) elapsed=([\d.]+)", log):
+            expected = (0, 0) if stage == "started" else (previous_active, original_effects)
+            if ((int(event), int(effects)) != expected or stage not in required or
+                    (stage == "held" and float(elapsed) < 32.)):
+                raise RuntimeError(f"{role} saw an invalid {stage} checkpoint: {event}, {effects}, {elapsed}")
+            if stages and stages[-1] == stage:
+                continue  # A delayed acknowledgement can trigger another observation on the same peer.
+            stages.append(stage)
+            observations.append(dict(role=role, stage=stage, event=DECOY_EVENTS[int(event)],
+                                     effects=int(effects), seconds_since_return=float(elapsed)))
+        if stages != required:
+            raise RuntimeError(f"{role} did not observe every event transition in order: {stages}")
+    landings = verify_decoy_landings(host, winning_masks, events, count)
+    world_observations = []
+    for n, event in events.items():
+        if event not in (6, 7, 8):
+            continue
+        stages = (0,) if event == 6 else (0, 1)
+        reference = {}
+        for role, log in logs.items():
+            rows = re.findall(rf"DECOY_QA_WORLD round={n} stage=(\d+) event=(\d+) seq=(\d+) crc=(\w+) sails=(\d+) measured_cm=([-\d.]+)", log)
+            world_stages = {}
+            for stage, observed_event, seq, crc, sails, measure in rows:
+                stage, seq, sails, measure = int(stage), int(seq), int(sails), float(measure)
+                if int(observed_event) != event or stage not in stages:
+                    raise RuntimeError(f"{role} saw an unexpected world effect in round {n}")
+                if event == 6 and measure > 65 or event == 8 and sails < 1:
+                    raise RuntimeError(f"{role} missed the returned pawn or usable sail in round {n}")
+                observed = (seq, crc, sails, measure if event == 7 else None)
+                if stage in reference and reference[stage] != observed:
+                    raise RuntimeError(f"{role} disagrees on the terrain or cloth in round {n} stage {stage}")
+                reference[stage] = observed
+                world_stages[stage] = dict(stage=stage, terrain_seq=seq, terrain_crc=crc, sails=sails, measured_cm=measure)
+            if tuple(world_stages) != stages:
+                raise RuntimeError(f"{role} missed the physical effect or its later manual edit in round {n}")
+            world_observations.append(dict(round=n, role=role, event=DECOY_EVENTS[event], stages=list(world_stages.values())))
+        if event == 7:
+            rise = re.search(rf"DECOY_QA_RAMP round={n} rise_cm=([\d.]+) from_chest_cm=([\d.]+)", host)
+            if (not rise or float(rise[1]) < 35 or not 250 < float(rise[2]) < 1400
+                    or reference[0][3] - reference[1][3] <= 8
+                    or reference[1][0] != reference[0][0] + 1 or reference[1][1] == reference[0][1]):
+                raise RuntimeError(f"Round {n} did not raise a standable sand ramp and let a player dig it")
+        elif event == 8 and reference[0] != reference[1]:
+            raise RuntimeError(f"The manual re-opening of a sail altered the terrain or number of sails in round {n}")
+        elif event == 6:
+            rally = {int(seat): (int(team), bool(int(target)), float(error)) for seat, team, target, error in
+                     re.findall(rf"DECOY_QA_RALLY round={n} seat=(\d+) team=(\d+) target=(\d+) anchor_cm=([\d.]+)", host)}
+            if set(rally) != set(range(count)) or not any(target for _, target, _ in rally.values()):
+                raise RuntimeError(f"Round {n} did not gather any crew mate")
+            for row in landings:
+                if row["round"] != n:
+                    continue
+                team, target, _ = rally[row["seat"]]
+                if team != row["team"] or not target and row["safe_origin"] and row["moved_cm"] >= 100:
+                    raise RuntimeError(f"A stationary anchor or singleton crew changed landing in round {n}")
+            if any(not 85 < distance <= 450 for _, target, distance in rally.values() if target):
+                raise RuntimeError(f"A rallying crew mate missed their stationary crew anchor in round {n}")
+    physical_effects = []
+    for n, event in events.items():
+        if event == 5:
+            contact = re.search(rf"DECOY_QA_CEASEFIRE round={n} enemy_marks=0 stun=0 ground_rise_cm=([\d.]+)", host)
+            if not contact or not 35 < float(contact[1]) < 48:
+                raise RuntimeError(f"Missing ceasefire contact and ground geometry evidence in round {n}")
+            physical_effects.append(dict(round=n, enemy_marks=0, stunned=False, pad_height_cm=float(contact[1])))
+        if event == 4:
+            jump = re.search(rf"DECOY_QA_JUMP round={n} normal_cm_s=([\d.]+) actual_cm_s=([\d.]+)", host)
+            if not jump or float(jump[1]) <= 0 or abs(float(jump[2]) - float(jump[1]) * 1.5) > .1:
+                raise RuntimeError(f"Missing ordinary jump physics in round {n}")
+            physical_effects.append(dict(round=n, normal_jump_cm_s=float(jump[1]), actual_jump_cm_s=float(jump[2])))
+    return dict(starts=starts, retained_after_cancel=DECOY_EVENTS[active], landings=landings,
+                peer_checkpoints=observations, physical_effects=physical_effects, world_observations=world_observations)
+
+
+def verify_decoy_brush_replay(logs, winner_mask):
+    expected_order = [("dig", 0), ("dig", 1), ("mud", 0), ("mud", 1)]
+    applied = [(int(seq), action, int(team), int(wide)) for seq,action,team,wide in re.findall(
+        r"DECOY_TOOL_USE seq=(\d+) action=(dig|mud) team=(\d+) wide=(\d)", logs["host"])]
+    if [(action, wide) for _,action,_,wide in applied] != expected_order:
+        raise RuntimeError(f"The four terrain edits did not use the compared tools: {applied}")
+    for _, _, team, wide in applied:
+        if bool(wide) != bool(winner_mask & (1 << team)):
+            raise RuntimeError(f"Team {team} got an incorrect brush width")
+    expected_edits = [(seq, action, wide) for seq, action, _, wide in applied]
+    pattern = (r"DECOY_TOOL_REPLAY seq=(\d+) action=(dig|mud) wide=(\d) crc=([\da-fA-F]+) "
+               r"center_cm=([-\d.]+) side_cm=([-\d.]+) outer_cm=([-\d.]+) width_cm=([\d.]+) travel_cm=([-\d.]+)")
+    profiles = None
+    for role, log in logs.items():
+        values = [(int(seq), action, int(wide), crc, float(center), float(side), float(outer), float(width), float(travel))
+                  for seq, action, wide, crc, center, side, outer, width, travel in re.findall(pattern, log)]
+        if [row[:3] for row in values] != expected_edits or (profiles is not None and profiles != values):
+            raise RuntimeError(f"{role} disagrees on brush application or the synchronized terrain profile: {values}")
+        profiles = values
+    reach = {(int(team), int(wide)) for team,wide in re.findall(
+        r"DECOY_TOOL_OUT_OF_REACH team=(\d+) wide=([01]) rejected=1", logs["host"])}
+    if reach != {(team,wide) for _,_,team,wide in applied}:
+        raise RuntimeError("A brush did not exercise the unchanged out-of-reach rejection")
+    return [dict(seq=seq, action=action, wide=bool(wide), crc=crc, center_cm=center, side_cm=side,
+                 outer_cm=outer, measured_width_cm=width, travel_cm=travel)
+            for seq,action,wide,crc,center,side,outer,width,travel in profiles]
 
 
 def verify_veil_pixels(directory):
@@ -200,7 +350,8 @@ def wait_for(processes, condition, timeout, description, allow_exit=()):
         for name, (process, path) in processes.items():
             if name in allow_exit or process.poll() is None:
                 continue
-            if process.returncode == -signal.SIGSEGV and not logs[name].strip():
+            startup = logs[name].strip()
+            if process.returncode == -signal.SIGSEGV and (not startup or MAC_SHUTDOWN_INIT.fullmatch(startup)):
                 raise EarlyLaunchCrash(f"{name} terminated before the first UE startup message")
             raise RuntimeError(f"{name} exited with {process.returncode}. See {path}")
         time.sleep(.25)
@@ -621,7 +772,7 @@ def summarize_game_abort(logs):
     attempts = re.findall(r"PARTY_PREPARE round=[12] chest=(\d+)", host)
     settled = re.findall(r"PARTY_CHEST_SETTLED round=(\d+) site=(\d+) outcome=(\d+) opener=\d+ winner=\d+ rewarded=(\d+)", host)
     if (len(attempts) != 2 or attempts[0] != attempts[1] or int(attempts[0]) <= 4 or len(settled) != 1
-            or settled[0] not in [("2", attempts[0], effect, "0") for effect in ("2","3")]):
+            or settled[0] != ("2", attempts[0], "4", "0")):
         raise RuntimeError("The two attempts did not settle the same false chest exactly once")
     moved = re.search(r"PARTY_ABORT_WALK target=guest cm=([\d.]+) unlocked=1", guest)
     if not moved or float(moved[1]) < 25.:
@@ -651,8 +802,8 @@ def run(args, ip, mode, directory):
         count, together = room
         guests = [f"guest{seat}" for seat in range(1, count)]
         shared.append(f"-ExpeditionPlayers={count}")
-        if args.identity_shots:
-            shared.append("-ExpeditionIdentityShots")
+        if args.decoy_events:
+            shared.append("-ExpeditionDecoyQA")
         if args.decoys is not None:
             shared.append(f"-ExpeditionDecoys={args.decoys}")
         elif args.scenario in GAME_CASES:
@@ -689,6 +840,8 @@ def run(args, ip, mode, directory):
                 shared.append("-ExpeditionGamesDropQA")
             if args.scenario == "games-abort":
                 shared.append("-ExpeditionAbortQA")
+        if args.scenario in CHARACTER_CASES:
+            shared.append("-CharacterSelectionQA")
         if args.scenario == "mud":
             shared.append("-ExpeditionMudQA")
             if args.mud_exit:
@@ -706,19 +859,18 @@ def run(args, ip, mode, directory):
         shared.append("-IslandPartyQA")
     if args.scenario == "party-timeout":
         shared.append("-IslandPartyTimeout")
-    address = f"{ip}:{args.port}"
     shot_output = directory
     if (args.scenario in ("field", "neutral", "mud") or args.scenario in GAME_CASES) and args.screenshot and not args.editor:
         with (args.app / "Contents/Info.plist").open("rb") as stream:
             bundle = plistlib.load(stream)["CFBundleIdentifier"]
         shot_output = Path.home() / "Library/Containers" / bundle / "Data/tmp/ExpeditionField" / str(time.time_ns())
     if args.interaction and args.screenshot and args.editor:
-        for name in (*VEIL_SHOTS, *TREASURE_SHOTS, "TreasureIntel.png", "TreasureFalseChart.png", "TreasureVaultOpened.png"):
+        for name in (*VEIL_SHOTS, *TREASURE_SHOTS, "TreasureFalseChart.png", "TreasureVaultOpened.png"):
             (shot_output / name).unlink(missing_ok=True)
     if args.render_guests:
         for guest in guests:
             (shot_output / guest).mkdir(parents=True,exist_ok=True)
-            for name in (*VEIL_SHOTS, "TreasureIntel.png"):
+            for name in VEIL_SHOTS:
                 (shot_output / guest / name).unlink(missing_ok=True)
     processes = {}
     with ExitStack() as stack:
@@ -731,6 +883,8 @@ def run(args, ip, mode, directory):
                 if (args.scenario in ("field", "neutral", "mud") or args.scenario in GAME_CASES):
                     render.append(f"-FieldShotsDir={shot_output if role == 'host' else shot_output / role}")
             scenario_flags = ["-NeutralLayoutAudit"] if role == "host" and args.neutral_audit else []
+            if role == "host" and args.route_scenery_audit:
+                scenario_flags.append("-RouteSceneryAudit")
             if role == "host" and args.seed is not None:
                 scenario_flags.append(f"-ExpeditionSeed={args.seed}")
             if role == "host" and args.scenario == "hunt":
@@ -745,7 +899,12 @@ def run(args, ip, mode, directory):
 
         try:
             launch("host", args.map + "?listen?bIsLanMatch")
-            wait_for(processes, lambda logs: "VOXEL_INITIAL crc=" in logs["host"], 120, "Host map did not initialize")
+            initialized = wait_for(processes, lambda logs: "VOXEL_INITIAL crc=" in logs["host"], 120, "Host map did not initialize")
+            # UE may choose another port if a previous or concurrent playtest is still releasing the requested one.
+            bound_port = re.search(r"IpNetDriver listening on port (\d+)", initialized["host"])
+            if not bound_port:
+                raise RuntimeError("The LAN host did not report a listening port")
+            address = f"{ip}:{bound_port[1]}"
             for guest in guests:
                 launch(guest, address)
                 if args.scenario != "neutral":
@@ -780,6 +939,8 @@ def run(args, ip, mode, directory):
                     os.killpg(processes[guests[-1]][0].pid, signal.SIGTERM)
                     allow_exit = (guests[-1],)
                 done_marker = "EXPEDITION_GAMES_DONE rounds="
+            if args.scenario in CHARACTER_CASES:
+                done_marker = "CHARACTER_PROOF_DONE"
             if args.repro_dig:
                 done_marker = "EXPEDITION_QA_REPRO_DONE"
             if args.scenario == "mud":
@@ -801,7 +962,26 @@ def run(args, ip, mode, directory):
                 timeout = 95 * (5 + decoys)
             logs = wait_for(processes, lambda logs: done_marker in logs["host"], timeout,
                             "The multiplayer scenario did not complete", allow_exit)
-            if args.repro_dig:
+            if args.scenario in CHARACTER_CASES:
+                expected = set(range(15))
+                if count == 1:
+                    expected -= {6, 7}  # A solo host has no withdrawing guest during countdown.
+                observed = {}
+                physical = {}
+                for role, log in logs.items():
+                    matches = re.findall(r"CHARACTER_PROOF_VIEW stage=(\d+) host=(\d+) guest=(-?\d+) phase=\d+ live_meshes=(\d+)", log)
+                    rows = {int(n): (int(host), int(guest)) for n, host, guest, _ in matches}
+                    physical[role] = {int(n): int(meshes) for n, _, _, meshes in matches}
+                    close_stages = {0, 1, 4, 8, 9, 10, 12, 13, 14}
+                    if any(physical[role].get(n) != count for n in close_stages):
+                        raise RuntimeError(f"{role} did not observe every nearby party member's real mesh: {physical[role]}")
+                    if set(rows) != expected:
+                        raise RuntimeError(f"{role} did not observe every expected PlayerState and physical character mesh: {rows}")
+                    observed[role] = rows
+                if any(rows != observed["host"] for rows in observed.values()):
+                    raise RuntimeError("The room peers observed different character models")
+                result = dict(scenario=args.scenario, processes=count, observations=observed, bound_meshes=physical)
+            elif args.repro_dig:
                 result = {"scenario": "d-shaft-repro", "position_xy": [1830, -4673], "depth_below_surface_cm": 150, "exposed_and_opened": True}
             elif args.scenario == "mud" and args.mud_exit:
                 cover = re.search(r"MUD_QA_COVER (.+)", logs["host"])
@@ -836,17 +1016,47 @@ def run(args, ip, mode, directory):
             elif args.scenario == "crew-drop":
                 result = {"scenario": args.scenario, "launched_crews": 3, "remaining_players": 2, "original_berths_preserved": True}
             elif args.structures:
-                done = re.search(r"SCENERY_QA_DONE (static=\d+ landmark_parts=\d+ docks=8 neutral=\d+ kinds=31 remaining=0) hits=(\d+) peers=3 recovery=1", logs["host"])
-                if not done or any(f"NEUTRAL_QA_VIEW stage=96 digest={done[1]}" not in log for log in logs.values()):
-                    raise RuntimeError("All three peers must observe the removed meshes and disabled collision")
-                attachment_hits = re.findall(r"SCENERY_QA_ATTACHMENT_STRIKE kind=(\d+) part=(\w+)", logs["host"])
-                attachment_faces = re.findall(r"SCENERY_QA_ATTACHMENT_FACE kind=(\d+) part=(\w+)", logs["host"])
-                if {kind for kind, _ in attachment_hits} != {"0", "1", "2", "3"}:
-                    raise RuntimeError("Missing authoritative shovel hits on the tree, ship, hopper, or sail attachments")
-                names = ("tree", "ship", "hopper", "sail")
-                result = dict(scenario="structures", processes=3, geometry=done[1], strikes=int(done[2]), safe_recovery=True,
-                              attachment_hits={name: [part for kind, part in attachment_hits if kind == str(index)] for index, name in enumerate(names)},
-                              exposed_attachments={name: sorted({part for kind, part in attachment_faces if kind == str(index)}) for index, name in enumerate(names)})
+                names = ("Cairn", "TrailBeacon", "Arch", "SignalNeedles", "Quarry", "Fin", "Dock",
+                         "Tree", "Ship", "Hopper", "Sail", "Tide", "FanPalm", "Saltbush", "SplitReef", "CoralSpur", "Chest")
+                done = re.search(r"SCENERY_QA_DONE classes=(\d+) strikes=(\d+) peers=3", logs["host"])
+                inventory = {name: dict(actors=int(actors), fields=int(fields)) for name, actors, fields in re.findall(
+                    r"SCENERY_VOXEL_INVENTORY class=(\w+) actors=(\d+) fields=(\d+)", logs["host"])}
+                cases = {name: dict(initial=int(initial), final=int(final), cuts=int(cuts), partial=int(partial),
+                                    different=int(different), repeated=int(repeated))
+                         for name, initial, final, cuts, partial, different, repeated in re.findall(
+                             r"SCENERY_VOXEL_CASE class=(\w+) initial=(\d+) final=(\d+) cuts=(\d+) partial=(\d+) different=(\d+) repeated=(\d+)", logs["host"])}
+                if not done or int(done[1]) != len(names) or set(inventory) != set(names) or set(cases) != set(names):
+                    raise RuntimeError("Missing a voxel inventory or physical shovel observation for a scenery class")
+                if inventory["Dock"]["actors"] != 8 or sum(inventory[name]["actors"] for name in names[:2]) != 48:
+                    raise RuntimeError("The eight landings and 48 trail markers must all have voxel fields")
+                if any(row["initial"] <= row["final"] or not row["cuts"] for row in cases.values()):
+                    raise RuntimeError("A scenery sample failed to lose occupied material to a normal shovel stroke")
+                route_names = names[12:16]
+                route = [cases[name] for name in route_names]
+                if any(row["final"] or not row["partial"] for row in route) or cases["Cairn"]["final"]:
+                    raise RuntimeError("Each new shape must survive a local cut and be completely excavatable")
+                if not any(r["different"] for r in route) or not any(r["repeated"] for r in route):
+                    raise RuntimeError("No evidence of excavation at distinct points and repeated strikes along the same ray")
+                opened = {name for name, a, b in re.findall(
+                    r"SCENERY_VOXEL_CUT class=(\w+) from=\d+ to=\d+ depth_before=(-?\d+) depth_after=(-?\d+)", logs["host"])
+                          if int(a) >= 0 and (int(b) < 0 or int(b) > int(a) + 1)}
+                if not set(route_names).issubset(opened):
+                    raise RuntimeError("One of the four new shapes did not open physical space behind a hit")
+                shared = re.findall(r"SCENERY_VOXEL_SHARED class=\w+ stage=(\d+) observed=(\S+) peers=3", logs["host"])
+                if len(shared) != int(done[2])+len(names):
+                    raise RuntimeError("The host did not compare the initial surface and every changed surface")
+                for role, log in logs.items():
+                    observed = set(re.findall(r"SCENERY_VOXEL_VIEW stage=(\d+) observed=(\S+)", log))
+                    if not set(shared).issubset(observed):
+                        raise RuntimeError(f"{role} missed a surface's occupancy, rendered triangles or collision trace")
+                result = dict(scenario="structures", processes=3, inventory=inventory, samples=cases,
+                              strikes=int(done[2]), synchronized_observations=len(shared))
+                if args.route_scenery_audit:
+                    audit = re.search(r"ROUTE_SCENERY_AUDIT seeds=64 pass=64 minimum=(\d+) maximum=(\d+) docks=8 landmarks=4 lanes=(\d+) sightlines=(\d+) decoys=(\d+)", logs["host"])
+                    if not audit or min(int(audit[i]) for i in range(1, 5)) <= 0:
+                        raise RuntimeError("Missing successful 64-seed route, sightline and excavation audit")
+                    result["route_audit"] = dict(seeds=64, minimum_sites=int(audit[1]), maximum_sites=int(audit[2]),
+                                                  protected_lanes=int(audit[3]), landmark_sightlines=int(audit[4]), decoys=int(audit[5]))
             elif args.scenario in ("field", "neutral"):
                 result = summarize_field(logs) if args.scenario == "field" else summarize_neutral(logs, args.neutral_kind)
                 if args.screenshot:
@@ -864,11 +1074,31 @@ def run(args, ip, mode, directory):
             elif args.scenario in GAME_CASES:
                 rounds = re.findall(r"EXPEDITION_GAME_RETURN round=(\d+) feature=(\w+) site=(\d+) opening=(\d+) winner=(-?\d+) result=(\w+) credited_mask=(\d+)", logs["host"])
                 winning_masks = {int(n): int(mask) for n, mask in re.findall(r"EXPEDITION_GAME_RETURN round=(\d+) [^\n]*? winners=(\d+)", logs["host"])}
+                events = {int(n): int(event) for n, event in re.findall(
+                    r"EXPEDITION_GAME_RETURN round=(\d+) [^\n]*? event=(\d+)", logs["host"])}
+                settlements = [(int(chest), int(outcome)) for chest, outcome in re.findall(
+                    r"PARTY_CHEST_SETTLED round=\d+ site=(\d+) outcome=(\d+)", logs["host"])]
+                draws = [tuple(map(int, row)) for row in re.findall(
+                    r"ISLAND_DECOY_DRAW round=\d+ chest=(\d+) event=(\d+) players=(\d+) crews=(\d+) winners=(\d+) world_mask=(\d+)", logs["host"])]
+                if ([(chest, event) for chest, event, *_ in draws] !=
+                        [(int(row[2]), events.get(int(row[0]))) for row in rounds if row[5] == "decoy"]):
+                    raise RuntimeError("A false chest drew repeatedly, skipped the draw, or changed its result")
+                seed_record = re.search(r"EXPEDITION_QA_SEED (-?\d+)", logs["host"])
+                for chest, event, players, teams, winners, world_mask in draws:
+                    if not seed_record or replay_decoy(int(seed_record[1]), chest, players, teams, winners, world_mask) != event:
+                        raise RuntimeError(f"Chest {chest} did not match the eligible seeded draw: {event=}, {world_mask=}")
+                if args.expect_decoy_event and DECOY_EVENTS[events[1]] != args.expect_decoy_event:
+                    raise RuntimeError(f"Expected first draw {args.expect_decoy_event}, got {DECOY_EVENTS[events[1]]}; actual draws: {draws}")
+                if (len(settlements) != len(rounds) or len(events) != len(rounds)
+                        or [chest for chest, _ in settlements] != [int(row[2]) for row in rounds]
+                        or any(event not in range(len(DECOY_EVENTS)) for event in events.values())
+                        or any((events[int(row[0])] == 0) != (row[5] == "true") for row in rounds)):
+                    raise RuntimeError("Expected one event per settled false chest and none for true chests or failed loads")
                 games = {row[1] for row in rounds}
                 if not rounds or any(game not in VOXEL_GAMES for game in games):
                     raise RuntimeError("A completed arena and its reveal are missing")
                 if args.game_only:
-                    if len(rounds) != (2 if args.scenario == "games-maze" else 1) or games != {args.game_only}:
+                    if len(rounds) != (2 if args.scenario == "games-maze" or args.decoy_events else 1) or games != {args.game_only}:
                         raise RuntimeError("The requested arena did not complete its expected rounds")
                 else:
                     layout = re.search(r"EXPEDITION_CHEST_LAYOUT true=4 false=(\d+) vault=1", logs["host"])
@@ -892,16 +1122,22 @@ def run(args, ip, mode, directory):
                             if site not in sites:
                                 credited |= 1 << team
                                 sites.add(site)
-                    if outcome not in ("true", "scatter", "disguise") or int(awarded) != credited:
+                    if outcome not in ("true", "decoy") or int(awarded) != credited:
                         raise RuntimeError(f"Unexpected credit mask at round {n}: got {awarded}, expected {credited}")
                 for role, log in logs.items():
-                    if role not in allow_exit and len(re.findall(r"PARTY_VENUE_VISIBLE round=\d+", log)) != len(rounds):
+                    if role in allow_exit:
+                        continue
+                    venues = [int(n) for n in re.findall(r"PARTY_VENUE_VISIBLE round=(\d+)", log)]
+                    if args.decoy_events:
+                        if venues not in ([1, 3], [1, 2, 3]):
+                            raise RuntimeError(f"{role} missed a completed arena around the cancelled load: {venues}")
+                    elif len(venues) != len(rounds):
                         raise RuntimeError(f"{role} did not stream every selected map")
                 if set(re.findall(r"EXPEDITION_STONE_DUG feature=(\w+)", logs["host"])) != games - {MAZE}:
                     raise RuntimeError("A played arena did not allow excavation of its stone foundation")
                 result = {"scenario": args.scenario, "processes": count, "departed": len(allow_exit),
                           "games": [dict(round=int(n), feature=g, site=int(site), opener=int(o), winner=int(w),
-                                         result=kind, winning_team_mask=winning_masks[int(n)], credited_team_mask=int(teams))
+                                         result=kind, event=DECOY_EVENTS[events[int(n)]], winning_team_mask=winning_masks[int(n)], credited_team_mask=int(teams))
                                     for n,g,site,o,w,kind,teams in rounds]}
                 snapshots = {}
                 snapshots_by_round = []
@@ -920,8 +1156,17 @@ def run(args, ip, mode, directory):
                     if snapshots_by_round and settled != snapshots_by_round:
                         raise RuntimeError(f"{role} disagrees on a completed round's seed, terrain, winner or scores")
                     snapshots_by_round = settled
-                    if set(per_game) != games or any(row[3] == 0 or row[4] < 0 for name, row in per_game.items() if name != MAZE):
-                        raise RuntimeError(f"{role} did not observe terrain edits and a winner in every arena")
+                    if set(per_game) != games:
+                        raise RuntimeError(f"{role} missed a played arena")
+                    for index, (_, board) in enumerate(settled):
+                        name, _, _, edits, winner, scores = board
+                        if name == MAZE:
+                            continue
+                        zero_round = args.decoy_events and index == 1
+                        if (winner < 0) != zero_round or (not zero_round and edits == 0):
+                            raise RuntimeError(f"{role} round {index+1} unexpected edits or winner: {board}")
+                        if zero_round and any(int(entry.split(":")[1]) for entry in scores.split(",")):
+                            raise RuntimeError(f"{role} zero-score round recorded points: {scores}")
                     if snapshots and snapshots != per_game:
                         raise RuntimeError(f"{role} and host disagree on the settled terrain, score or winner")
                     snapshots = per_game
@@ -930,6 +1175,7 @@ def run(args, ip, mode, directory):
                 if revisit:
                     result["direct_chest_pickup"] = revisit
                 if args.scenario == "games-maze":
+                    result["decoy_landings"] = verify_decoy_landings(logs["host"], winning_masks, events, count)
                     if "MAZE_QA_DEFAULT limit=180" not in logs["host"]:
                         raise RuntimeError("The unmodified chase duration was not verified")
                     if args.screenshot and not re.search(r"MAZE_CHASE_START [^\n]*seconds=180\b", logs["host"]):
@@ -961,17 +1207,24 @@ def run(args, ip, mode, directory):
                 result["replicated_boards_by_round"] = [
                     dict(round=int(r[0]), seed=int(seed), feature=name, grid=grid, changed=changed, winner=winner, scores=scores)
                     for r, (seed, (name, _, grid, changed, winner, scores)) in zip(rounds, snapshots_by_round)]
+                result["decoy_effects"] = verify_chest_effects(logs, rounds, winning_masks, events, allow_exit)
+                if args.decoy_events:
+                    if ([int(row[2]) for row in rounds] != [5, 6]
+                            or any(row[5] != "decoy" for row in rounds)
+                            or winning_masks[1].bit_count() != 1 or winning_masks[2] != 0):
+                        raise RuntimeError("Expected a won decoy followed by a zero-score decoy")
+                    boosted = [row["boosted"] for row in result["decoy_effects"] if row["round"] == 1]
+                    if sum(boosted) != ((1 if count == 1 else 2) if events[1] == 1 else 0):
+                        raise RuntimeError("Only a wide-tools draw can grant the tool boost to the winning crew")
+                    result["decoy_return"] = verify_decoy_return(logs, winning_masks, events, count)
+                    if count > 1 and events[1] == 1:
+                        result["decoy_tool_profiles"] = verify_decoy_brush_replay(logs, winning_masks[1])
                 if args.interaction:
                     result["transition_views"] = verify_interaction(logs, rounds, allow_exit)
-                    result["private_scouting"] = verify_private_scouting(logs, rounds, winning_masks, allow_exit,
-                        args.scenario == "games" and not args.game_only and any(row[5] != "true" for row in rounds), revisit)
                     if not args.game_only:
                         for role, log in logs.items():
                             if role not in allow_exit and "TREASURE_VAULT_REVEALED winner=" not in log:
                                 raise RuntimeError(f"{role} never saw the open final vault")
-                        if args.seed == 3 and (args.decoys is None or args.decoys >= 2):
-                            if not {"scatter", "disguise"} <= {row[5] for row in rounds}:
-                                raise RuntimeError("Seed 3 failed to exercise both previously reproducible decoy events")
                         result["vault_revealed_on_remaining_clients"] = True
                 if args.arena_terrain:
                     result["continuous_terrain"] = verify_arena_terrain(logs, rounds)
@@ -995,23 +1248,17 @@ def run(args, ip, mode, directory):
                         shots.extend(arena_view_shots(rounds))
                     if args.venue_demolition and "PartyBridgeDash" in games:
                         shots.extend(["VenueBridgeBefore.png", "VenueBridgeAfter.png"])
-                    if args.scenario != "games-maze" and not ((args.identity_shots or args.interaction) and args.game_only):
+                    if args.scenario != "games-maze" and not args.decoy_events and not (args.interaction and args.game_only):
                         shots.append("PartyTreasureHint.png")
                     if args.interaction:
                         shots.extend(VEIL_SHOTS[1:])
-                        if any(view["role"] == "host" for view in result["private_scouting"]["earned"]):
-                            shots.append("TreasureIntel.png")
-                        if any(row[5] in ("scatter", "disguise") for row in rounds):
+                        if any(row[5] == "decoy" for row in rounds):
                             shots.append("TreasureFalseChart.png")
                         if not args.game_only:
                             shots.extend(TREASURE_SHOTS)
                             shots.append("TreasureVaultOpened.png")
                     if not args.game_only:
                         shots.extend(["TreasureChart3.png", "TreasureChart4.png"])
-                    if args.identity_shots:
-                        if "EXPEDITION_IDENTITY_DONE allies=1 rivals=1 fog_names=0 occlusion=1" not in logs["host"]:
-                            raise RuntimeError("The rendered host did not verify names, fog recovery and nameplate occlusion")
-                        shots.extend(["IdentityFog.png", "IdentityFogChart.png", "IdentityRevealed.png", "IdentityOccluded.png"])
                     for name in shots:
                         if not (shot_output / name).is_file():
                             raise RuntimeError(f"Missing arena viewport capture {name}")
@@ -1041,8 +1288,6 @@ def run(args, ip, mode, directory):
                                 target = directory / guest
                                 target.mkdir(exist_ok=True)
                                 guest_shots = list(VEIL_SHOTS)
-                                if any(view["role"] == guest for view in result["private_scouting"]["earned"]):
-                                    guest_shots.append("TreasureIntel.png")
                                 for name in guest_shots:
                                     source = shot_output / guest / name
                                     if not source.is_file():
@@ -1124,7 +1369,8 @@ def main():
     parser.add_argument("--port", type=int, default=7792)
     parser.add_argument("--scenario", choices=("hunt", "party", "party-drop", "party-timeout", *ROOM_CASES), default="hunt")
     parser.add_argument("--decoys", type=int, choices=range(25), metavar="0..24", help="Apply the host room setting for extra false chests")
-    parser.add_argument("--identity-shots", action="store_true", help="Capture two crewmates and one rival before, during and after disguise")
+    parser.add_argument("--decoy-events", action="store_true", help="Verify two real random draws, separate effects, a cancelled load and a zero-score round")
+    parser.add_argument("--expect-decoy-event", choices=DECOY_EVENTS[1:], help="Require this result from the first natural draw in --decoy-events")
     parser.add_argument("--game-only", choices=sorted(VOXEL_GAMES), help="Use a single trap game during expedition games QA")
     parser.add_argument("--arena-terrain", action="store_true", help="Dig and fill off-grid with the normal mouse controls, compare collision profiles on each peer")
     parser.add_argument("--arena-views", action="store_true", help="Toggle V in each arena and verify local camera, visible body, center aim and island return")
@@ -1137,7 +1383,8 @@ def main():
     parser.add_argument("--headless-host", action="store_true", help="Disable Metal for iteration only")
     parser.add_argument("--render-guests", action="store_true", help="Capture and verify both sides of the portal from each guest's Metal viewport")
     parser.add_argument("--stress", action="store_true", help="Exercise 300 concurrent authoritative edits in an eight-player expedition")
-    parser.add_argument("--structures", action="store_true", help="Demolish all expedition structures with the digging tool and compare peer geometry")
+    parser.add_argument("--structures", action="store_true", help="Excavate 17 scenery classes and compare occupied cells, render geometry and collision across all peers")
+    parser.add_argument("--route-scenery-audit", action="store_true", help="Audit the roadside layout on 64 actual-map seeds alongside --structures")
     parser.add_argument("--neutral-kind", choices=("tree","ship","hopper","sail","tide"), help="Run one neutral interaction for diagnosis")
     parser.add_argument("--seed", type=int, help="Replay the private expedition round seed")
     parser.add_argument("--neutral-audit", action="store_true", help="Check neutral placement and routes on 64 actual-map seeds during setup")
@@ -1150,6 +1397,14 @@ def main():
     parser.add_argument("--map", help="Level package to host, defaults to the scenario's corresponding island")
     parser.add_argument("--output", type=Path, default=ROOT / "ActDemo/Saved/IslandQA")
     args = parser.parse_args()
+    if args.expect_decoy_event and not args.decoy_events:
+        parser.error("--expect-decoy-event requires --decoy-events")
+    if args.decoy_events:
+        if (args.scenario not in ("games", "games-solo") or args.decoys not in (None, 2)
+                or args.game_only not in (None, "PartyReefRun") or args.interaction):
+            parser.error("--decoy-events uses two reef races and two decoys in games or games-solo")
+        args.game_only = "PartyReefRun"
+        args.decoys = 2
     if args.scenario == "games-maze":
         if args.game_only not in (None, MAZE) or args.decoys == 0:
             parser.error("games-maze plays two maze rounds using one genuine chest and one decoy")
@@ -1170,14 +1425,14 @@ def main():
     if args.interaction and (args.scenario not in GAME_CASES or (args.screenshot and args.headless_host)
                              or (args.game_only and args.decoys == 0)):
         parser.error("--interaction needs a games scenario, a rendered host for screenshots and a decoy in single-game mode")
-    if args.identity_shots and (args.scenario != "games" or args.headless_host or not args.screenshot):
-        parser.error("--identity-shots requires --scenario games --screenshot with a rendered host")
     if args.game_only and args.scenario not in GAME_CASES:
         parser.error("--game-only requires a games scenario")
     if (args.venue_demolition or args.venue_smoke) and args.scenario != "games":
         parser.error("--venue-demolition and --venue-smoke run the three-player games scenario")
     if args.neutral_audit and args.scenario not in ROOM_CASES:
         parser.error("--neutral-audit requires an expedition room scenario")
+    if args.route_scenery_audit and not args.structures:
+        parser.error("--route-scenery-audit requires --structures")
     if args.structures and args.scenario != "neutral":
         parser.error("--structures uses --scenario neutral")
     if args.scenario == "neutral" and args.seed is None:

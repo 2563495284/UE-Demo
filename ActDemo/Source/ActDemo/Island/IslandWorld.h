@@ -5,6 +5,7 @@
 
 class UProceduralMeshComponent;
 class AVoxelCharacter;
+class AVoxelTerrain;
 
 UCLASS()
 class AIslandChest : public AActor
@@ -13,6 +14,8 @@ class AIslandChest : public AActor
 
 public:
     AIslandChest();
+    void SeatAtReveal(const AVoxelTerrain& Terrain);
+    double GetInteractionDistanceSquared(FVector Origin) const;
     void SetPrize(bool bValue);
     bool IsPrize() const { return bPrize; }
     void MarkChallengeResolved();
@@ -21,10 +24,12 @@ public:
     void AnimateLock(double FinishAt, bool bAssisted);
     void RevealPrize(double ServerTime);
     bool IsPrizeRevealed() const { return PrizeOpenedAt >= 0.; }
+    void BeginPlay() override;
     void Tick(float DeltaSeconds) override;
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:
+    UPROPERTY(Replicated) double DiscoveryRise = 0.;
     UFUNCTION() void OnRep_Prize();
     UFUNCTION() void OnRep_ChallengeResolved();
     UFUNCTION() void OnRep_PrizeOpened();
@@ -37,7 +42,10 @@ private:
     UPROPERTY() TObjectPtr<UStaticMeshComponent> ClaspMesh;
     UPROPERTY() TObjectPtr<UMaterialInterface> PrizeMaterial;
     UPROPERTY() TObjectPtr<UMaterialInterface> ClueMaterial;
+    UPROPERTY() TObjectPtr<UMaterialInterface> CompassFace;
     UPROPERTY(Transient) TObjectPtr<USceneComponent> Compass;
+    UPROPERTY() TObjectPtr<UMaterialInterface> GildedLacquer;
+    UPROPERTY() TObjectPtr<UStaticMesh> DialShape;
     UPROPERTY() TObjectPtr<UStaticMesh> CoinShape;
     UPROPERTY() TObjectPtr<UStaticMesh> NeedleShape;
     double LocalFinishAt = 0.0;
@@ -59,4 +67,5 @@ protected:
 
 private:
     UPROPERTY() TObjectPtr<UProceduralMeshComponent> WaterMesh;
+    UPROPERTY() TObjectPtr<UMaterialInterface> LagoonMaterial;
 };

@@ -1,4 +1,5 @@
 #include "Island/IslandBreakable.h"
+#include "Island/IslandSceneryVoxels.h"
 
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -53,6 +54,7 @@ void AIslandBreakable::SetUpExampleTree()
 void AIslandBreakable::BeginPlay()
 {
     Super::BeginPlay();
+    if (IsA<AIslandRescueRaft>()) IslandSceneryVoxels::Register(*this);
     OnRep_State();
 }
 
@@ -181,8 +183,8 @@ void AIslandBreakable::Tick(float DeltaSeconds)
 
 AIslandRescueRaft::AIslandRescueRaft()
 {
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube"));
-    GetMesh().SetStaticMesh(Cube.Object);
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Raft(TEXT("/Game/TreasureIsland/Art/Harbour/SM_RescueRaft"));
+    GetMesh().SetStaticMesh(Raft.Object);
     GetMesh().SetRelativeScale3D(FVector(2, 2, .35));
 }
 
@@ -242,12 +244,13 @@ void AIslandSceneryDamage::OnRep_Removed()
     }
 }
 
-void AIslandSceneryDamage::PlayDebris(UWorld& World, FVector Point, FVector Normal, UMaterialInterface* Material)
+void AIslandSceneryDamage::PlayDebris(UWorld& World, FVector Point, FVector Normal, UMaterialInterface* Material,
+    UStaticMesh* FragmentShape, FVector FragmentScale, UMaterialInterface* AlternateFinish)
 {
     if (World.GetNetMode() == NM_DedicatedServer || !FApp::CanEverRender()) return;
     // Short-lived local chips have no pawn or terrain collision.
-    UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-    if (!Cube) return;
+    UStaticMesh* Shape = FragmentShape ? FragmentShape : LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+    if (!Shape) return;
     FActorSpawnParameters Params;
     Params.ObjectFlags |= RF_Transient;
     AActor* FX = World.SpawnActor<AActor>(AActor::StaticClass(), Point, FRotator::ZeroRotator, Params);
@@ -259,13 +262,16 @@ void AIslandSceneryDamage::PlayDebris(UWorld& World, FVector Point, FVector Norm
         const double Angle = I * UE_TWO_PI / 6.;
         const FVector Out(FMath::Cos(Angle), FMath::Sin(Angle), 0.);
         Chip->SetMobility(EComponentMobility::Movable);
-        Chip->SetStaticMesh(Cube);
-        if (Material) Chip->SetMaterial(0, Material);
+        Chip->SetStaticMesh(Shape);
+        auto* Finish = AlternateFinish && I%3==1 ? AlternateFinish : Material;
+        if (Finish) Chip->SetMaterial(0, Finish);
         Chip->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
         Chip->SetCollisionResponseToAllChannels(ECR_Ignore);
         Chip->SetCanEverAffectNavigation(false);
-        Chip->SetWorldLocationAndRotation(Point + Normal * 8. + Out * 9., FRotator(I*12.,I*39.,0.));
-        Chip->SetWorldScale3D(FVector(.06 + .025 * (I % 3), .075, .13));
+        const FRotator Orientation=FragmentShape ? FRotator(-61.+I*29.,I*57.,I*33.) : FRotator(I*12.,I*39.,0.);
+        Chip->SetWorldLocationAndRotation(Point + Normal * 8. + Out * 9., Orientation);
+        Chip->SetWorldScale3D(FragmentShape ? FragmentScale*FVector(.80+.16*(I%3),1.,.75+.13*(I%4)) :
+            FVector(.06 + .025 * (I % 3), .075, .13));
         Chip->RegisterComponent();
         Chip->SetSimulatePhysics(true);
         Chip->SetPhysicsLinearVelocity(Normal * 160. + Out * 90. + FVector(0,0,235.));

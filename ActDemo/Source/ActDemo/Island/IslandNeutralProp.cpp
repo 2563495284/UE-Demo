@@ -8,7 +8,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "Island/IslandGameMode.h"
-#include "Island/IslandBreakable.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandPlayerController.h"
 #include "Materials/MaterialInterface.h"
 #include "Net/UnrealNetwork.h"
@@ -30,14 +30,50 @@ AIslandNeutralProp::AIslandNeutralProp()
     PrimaryActorTick.bCanEverTick = true;
     PrimaryActorTick.bStartWithTickEnabled = false;
     SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Origin")));
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> BoxAsset(TEXT("/Engine/BasicShapes/Cube.Cube"));
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> TubeAsset(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereAsset(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Material(TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> BoxAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_HewnBlock"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> TubeAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_TimberPost"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_ReefStone"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> CrownAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_LeafCrown"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> BarkAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_BarkSpar"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> SluiceAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_SluiceChute"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> WheelAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_SheaveWheel"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> LoadAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_SandHeap"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> SidePanelAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_WindSidePanel"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> RollAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_RolledCanvas"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> PennonAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_WindPennon"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> PoolAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_TidePool"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> BasaltAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_Basalt"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> CanvasAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_WindCanvas"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> SignalAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_SignalCanvas"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> HopperAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_HopperPanel"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> ThroatAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_HopperThroat"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> JetAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_TideJet"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> FoamAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_FoamCrest"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> DropAsset(TEXT("/Game/TreasureIsland/Art/Neutral/SM_Spray"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Material(TEXT("/Game/TreasureIsland/Art/Crew/M_CrewPigment"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> ShipMaterial(TEXT("/Game/TreasureIsland/Art/Neutral/M_WreckFinish"));
     Cube = BoxAsset.Object;
     Cylinder = TubeAsset.Object;
     Ball = SphereAsset.Object;
     PaintBase = Material.Object;
+    WreckFinish = ShipMaterial.Object;
+    LeafCrown = CrownAsset.Object;
+    BarkSpar = BarkAsset.Object;
+    SluiceChute = SluiceAsset.Object;
+    SheaveWheel = WheelAsset.Object;
+    SandHeap = LoadAsset.Object;
+    WindSidePanel = SidePanelAsset.Object;
+    RolledCanvas = RollAsset.Object;
+    WindPennon = PennonAsset.Object;
+    TidePool = PoolAsset.Object;
+    Basalt = BasaltAsset.Object;
+    WindCanvas = CanvasAsset.Object;
+    SignalCanvas = SignalAsset.Object;
+    HopperPanel = HopperAsset.Object;
+    HopperThroat = ThroatAsset.Object;
+    TideJet = JetAsset.Object;
+    FoamCrest = FoamAsset.Object;
+    SprayDrop = DropAsset.Object;
 }
 
 void AIslandNeutralProp::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -90,23 +126,13 @@ void AIslandNeutralProp::OnRep_State()
     if (!State.bInitialized || !GetWorld()) return;
     if (State.bDemolished)
     {
-        if (bBuilt && !IsHidden() && ServerNow() - State.ChangedAt < .8)
-        {
-            TInlineComponentArray<UStaticMeshComponent*> Parts(this);
-            // Spread debris over the full building footprint; distant peers reconstruct only the final state.
-            for (int32 I = 0; I < Parts.Num(); I += FMath::Max(1, Parts.Num()/5))
-            {
-                auto* Part = Parts[I];
-                if (Part->IsVisible()) AIslandSceneryDamage::PlayDebris(*GetWorld(), Part->Bounds.Origin,
-                    (Part->Bounds.Origin - GetActorLocation()).GetSafeNormal2D(), Part->GetMaterial(0));
-            }
-        }
         SetActorHiddenInGame(true);
         SetActorEnableCollision(false);
         SetActorTickEnabled(false);
         return;
     }
-    if (!bBuilt)
+    const bool bFirstBuild = !bBuilt;
+    if (bFirstBuild)
     {
         SetActorScale3D(IslandNeutral::SiteScale(State.Kind));
         switch (State.Kind)
@@ -119,6 +145,8 @@ void AIslandNeutralProp::OnRep_State()
         }
         bBuilt = true;
     }
+    // Bind at the authored size. A joining peer can receive an already unfurled sail.
+    if (bFirstBuild) IslandSceneryVoxels::Register(*this);
     UpdateVisuals(ServerNow());
     SetActorTickEnabled(State.Kind == EIslandNeutralKind::Tide || State.Kind == EIslandNeutralKind::Sail
         || (State.Kind == EIslandNeutralKind::Tree && (State.Phase == 1 || State.Phase == 2))
@@ -168,7 +196,9 @@ bool AIslandNeutralProp::TraceShovel(UWorld& World, FHitResult& Hit, const FVect
 bool AIslandNeutralProp::Strike(AIslandPlayerController& Player, const FHitResult& Hit)
 {
     if (!HasAuthority() || !bBuilt || IsDemolished() || !Player.GetHero() || !Hit.GetComponent()) return false;
-    if (Hit.GetComponent() == HitTarget)
+    auto* Source = IslandSceneryVoxels::SourceFor(Hit.GetComponent());
+    if (Source && (Source == HitTarget || Source->ComponentHasTag(TEXT("TreeNotch")))
+        && !IslandSceneryVoxels::IsExhausted(HitTarget))
     {
         if (State.Kind == EIslandNeutralKind::Tree && State.Phase < 2)
         {
@@ -178,65 +208,94 @@ bool AIslandNeutralProp::Strike(AIslandPlayerController& Player, const FHitResul
         if (State.Kind == EIslandNeutralKind::Hopper && State.Phase == 0)
         {
             bSandQueued = false;
-            SetPhase(1);
+            SetPhase(IslandSceneryVoxels::IsExhausted(SandLoad) ? 2 : 1);
             return true;
         }
     }
-#if !UE_BUILD_SHIPPING
-    if (!Hit.bBlockingHit && FParse::Param(FCommandLine::Get(),TEXT("NeutralDemolitionQA")))
-        UE_LOG(LogTemp, Display, TEXT("SCENERY_QA_ATTACHMENT_STRIKE kind=%d part=%s"), int32(State.Kind), *Hit.GetComponent()->GetName());
-#endif
-    MulticastChip(Hit.ImpactPoint, Hit.ImpactNormal);
-    if (++BodyStrikes >= 3)
-    {
-        State.bDemolished = true;
-        State.ChangedAt = ServerNow();
-        OnRep_State();
-        ForceNetUpdate();
-    }
-    return true;
+    return false; // The ordinary shovel now carves the struck cells.
 }
 
-void AIslandNeutralProp::MulticastChip_Implementation(FVector_NetQuantize Point, FVector_NetQuantizeNormal Normal)
+void AIslandNeutralProp::RefreshVoxelMechanism()
 {
-    AIslandSceneryDamage::PlayDebris(*GetWorld(), Point, Normal, HitTarget ? HitTarget->GetMaterial(0) : nullptr);
+    if (!HasAuthority() || !bBuilt || State.bDemolished) return;
+    if (State.Kind == EIslandNeutralKind::Tide)
+    {
+        uint8 Intact = 0;
+        for (int32 I = 0; I < TideLips.Num(); ++I)
+            if (!IslandSceneryVoxels::IsExhausted(TideLips[I])) Intact |= 1u << (I / 8);
+        if (Intact != State.IntactTideMouths)
+        {
+            State.IntactTideMouths = Intact;
+            ForceNetUpdate();
+        }
+    }
+    TInlineComponentArray<UPrimitiveComponent*> Parts(this);
+    for (auto* Part : Parts)
+    {
+        if (!Part->ComponentHasTag(TEXT("IslandVoxelPart"))) continue;
+        // The pin and its load have already left the hopper once sand spills.
+        if (State.Kind == EIslandNeutralKind::Hopper && State.Phase != 0 && (Part == HitTarget || Part == SandLoad))
+            continue;
+        if (!IslandSceneryVoxels::IsExhausted(Part)) return;
+    }
+    State.bDemolished = true;
+    State.ChangedAt = ServerNow();
+    OnRep_State();
+    ForceNetUpdate();
+}
+
+bool AIslandNeutralProp::CanToggleSail() const
+{
+    if (!State.bInitialized || !bBuilt || IsDemolished() || State.Kind != EIslandNeutralKind::Sail
+        || IslandSceneryVoxels::IsExhausted(HitTarget)) return false;
+    // Canvas and its hem alternate in Cloth; a remaining trim alone cannot obscure sight.
+    for (int32 Index = 0; Index < Cloth.Num(); Index += 2)
+        if (!IslandSceneryVoxels::IsExhausted(Cloth[Index])) return true;
+    return false;
 }
 
 bool AIslandNeutralProp::CanUseRope(const AIslandPlayerController& Player) const
 {
     const AVoxelCharacter* Hero = Player.GetHero();
-    if (IsDemolished() || State.Kind != EIslandNeutralKind::Sail || !Hero || !bBuilt) return false;
+    if (!Hero || !CanToggleSail()) return false;
     const FVector Aim = Hero->GetAimOrigin();
     const FVector Knot = GetInteractionPoint();
     if (FVector::DistSquared(Aim, Knot) > FMath::Square(200.)) return false;
     FHitResult Hit;
     FCollisionQueryParams Params(SCENE_QUERY_STAT(NeutralRope), false, Hero);
     return !GetWorld()->LineTraceSingleByChannel(Hit, Aim, Knot, ECC_Visibility, Params)
-        || Hit.GetComponent() == HitTarget;
+        || IslandSceneryVoxels::SourceFor(Hit.GetComponent()) == HitTarget;
 }
 
 bool AIslandNeutralProp::UseRope(AIslandPlayerController& Player)
 {
-    if (!HasAuthority() || !CanUseRope(Player) || ServerNow() - State.ChangedAt < .38) return false;
+    if (!CanUseRope(Player) || ServerNow() - State.ChangedAt < .38) return false;
+    return ToggleSail();
+}
+
+bool AIslandNeutralProp::ToggleSail()
+{
+    if (!HasAuthority() || !CanToggleSail()) return false;
     SetPhase(State.Phase == 0 ? 1 : 0);
     return true;
+}
+
+bool AIslandNeutralProp::IntersectsSail(FVector Start, FVector End) const
+{
+    FHitResult Hit;
+    FCollisionQueryParams Params(SCENE_QUERY_STAT(NeutralSailSight), true);
+    for (int32 I = 0; I < Cloth.Num(); I += 2)
+    {
+        UPrimitiveComponent* Panel = IslandSceneryVoxels::SurfaceFor(Cloth[I]);
+        if (Panel && Panel->IsQueryCollisionEnabled() && Panel->LineTraceComponent(Hit, Start, End, Params)) return true;
+    }
+    return false;
 }
 
 bool AIslandNeutralProp::AnySailObscures(UWorld& World, const FVector& Start, const FVector& End)
 {
     for (TActorIterator<AIslandNeutralProp> It(&World); It; ++It)
-    {
-        if (It->IsDemolished() || It->GetKind() != EIslandNeutralKind::Sail) continue;
-        // Check the current cloth panels in mesh space, including their movement as a pawn crosses.
-        for (int32 I = 0; I < It->Cloth.Num(); I += 2)
-        {
-            const FTransform& Panel = It->Cloth[I]->GetComponentTransform();
-            const FVector A = Panel.InverseTransformPosition(Start);
-            const FVector B = Panel.InverseTransformPosition(End);
-            const FBox Bounds = It->Cloth[I]->GetStaticMesh()->GetBoundingBox();
-            if (FMath::LineBoxIntersection(Bounds,A,B,B-A)) return true;
-        }
-    }
+        if (!It->IsDemolished() && It->GetKind() == EIslandNeutralKind::Sail && It->IntersectsSail(Start, End)) return true;
     return false;
 }
 
@@ -244,7 +303,10 @@ void AIslandNeutralProp::TouchSail(UPrimitiveComponent* Overlap, AActor* Other, 
     int32 BodyIndex, bool bSwept, const FHitResult& Sweep)
 {
     if (!HasAuthority() || State.Phase != 1 || !Cast<AVoxelCharacter>(Other)) return;
-    const double Y = GetActorTransform().InverseTransformPosition(Other->GetActorLocation()).Y;
+    const FVector Origin = Other->GetActorLocation();
+    const FVector Across = GetActorForwardVector() * 130.;
+    if (!IntersectsSail(Origin - Across, Origin + Across)) return;
+    const double Y = GetActorTransform().InverseTransformPosition(Origin).Y;
     State.RippleSide = Y < -57. ? -1 : (Y > 57. ? 1 : 0);
     State.RippleAt = ServerNow();
     SetActorTickEnabled(true);
@@ -293,7 +355,7 @@ double AIslandNeutralProp::TideCycle(double Now) const
 bool AIslandNeutralProp::IsTideBoostReady() const
 {
     const double Cycle = TideCycle(ServerNow());
-    return (State.PlugMask == 1 || State.PlugMask == 2) && Cycle >= .36 && Cycle <= 2.;
+    return (State.PlugMask == 1 || State.PlugMask == 2) && HasTideLip(State.PlugMask == 1 ? 1 : 0) && Cycle >= .36 && Cycle <= 2.;
 }
 
 bool AIslandNeutralProp::TryTideJump(AVoxelCharacter& Hero)
@@ -317,12 +379,15 @@ bool AIslandNeutralProp::TryTideJump(AVoxelCharacter& Hero)
 
 TArray<FVector> AIslandNeutralProp::GetSandCenters() const
 {
+    const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
+    return MakeSandRamp(GetActorTransform(), Terrain ? Terrain->GetDensity() : nullptr);
+}
+
+TArray<FVector> AIslandNeutralProp::MakeSandRamp(const FTransform& Frame, const FVoxelDensity* Density)
+{
     // Adjacent 75 cm sphere brushes overlap in three dimensions. Columns below
     // the walk surface join the existing earth instead of leaving a suspended ramp.
     TArray<FVector> Centers;
-    const AVoxelTerrain* Terrain = AVoxelTerrain::Find(GetWorld());
-    const FVoxelDensity* Density = Terrain ? Terrain->GetDensity() : nullptr;
-    const FTransform& Frame = GetActorTransform();
     for (int32 Step = 0; Step < 12; ++Step)
     {
         const double X = 25. + 33. * Step;
@@ -350,8 +415,9 @@ bool AIslandNeutralProp::IsTreeLandingClear() const
 {
     FCollisionObjectQueryParams Pawns(ECC_Pawn);
     FCollisionQueryParams Query(SCENE_QUERY_STAT(NeutralTreeLanding), false, this);
-    for (const UStaticMeshComponent* Mesh : TreeSolids)
+    for (UStaticMeshComponent* Mesh : TreeSolids)
     {
+        if (IslandSceneryVoxels::IsExhausted(Mesh)) continue;
         const FVector Half = Mesh->GetStaticMesh()->GetBoundingBox().GetExtent() * Mesh->GetComponentScale().GetAbs();
         if (GetWorld()->OverlapAnyTestByObjectType(Mesh->GetComponentLocation(), Mesh->GetComponentQuat(), Pawns,
             FCollisionShape::MakeBox(Half), Query))

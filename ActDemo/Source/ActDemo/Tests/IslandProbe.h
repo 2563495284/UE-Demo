@@ -2,11 +2,15 @@
 
 #include "GameFramework/Actor.h"
 #include "Island/IslandRules.h"
+#include "Tests/ExpeditionDecoyToolProof.h"
 #include "IslandProbe.generated.h"
 
 class AIslandGameMode;
 class AIslandNeutralProp;
 class AIslandPlayerController;
+
+UENUM()
+enum class EIslandDecoyCheck : uint8 { None, Held, Cancelled, Started };
 
 UCLASS()
 class AIslandProbePeer : public AActor
@@ -20,6 +24,11 @@ public:
     UFUNCTION(Client, Reliable) void ClientInspect(int32 Epoch, bool bDigest);
     UFUNCTION(Client, Reliable) void ClientOpenChest();
     UFUNCTION(Client, Reliable) void ClientJoinCrew(int32 Team, bool bReady);
+    UFUNCTION(Client, Reliable) void ClientCharacterInput(int32 Model, int32 Team, int32 Ready, bool bModelLast = false);
+    UFUNCTION(Client, Reliable) void ClientCharacterInspect(int32 Stage, EIslandPhase Phase, FIntVector Host, FIntVector Guest, int32 Members);
+    UFUNCTION(Server, Reliable) void ServerCharacterObserved(int32 Stage);
+    int32 CharacterObserved = INDEX_NONE;
+    int32 CharacterLocallySeen = INDEX_NONE;
     UFUNCTION(Client, Reliable) void ClientStress(int32 Stage);
     UFUNCTION(Client, Reliable) void ClientShowChart();
     UFUNCTION(Client, Reliable) void ClientStrike(FVector Target);
@@ -31,6 +40,7 @@ public:
     UFUNCTION(Client, Reliable) void ClientFieldKeepDigging(bool bKeep, FVector Target);
     UFUNCTION(Client, Reliable) void ClientFieldRally();
     UFUNCTION(Client, Reliable) void ClientNeutralInspect(int32 Stage);
+    UFUNCTION(Client, Reliable) void ClientSceneryInspect(int32 Stage, AActor* Subject, FName Part, FVector Eye, FVector Aim);
     UFUNCTION(Server, Reliable) void ServerNeutralReport(int32 Stage, const FString& Digest);
     UFUNCTION(Client, Reliable) void ClientNeutralInput(uint8 Action, FVector Target);
     UFUNCTION(Client, Reliable) void ClientWalkToDig(FVector Target);
@@ -51,13 +61,20 @@ public:
     UFUNCTION(Server, Reliable) void ServerVenueReport(int32 Round, int32 Gone, int32 Pieces);
     UFUNCTION(Client, Reliable) void ClientGameWalk(FVector Destination);
     UFUNCTION(Client, Reliable) void ClientGameReceipt(int32 Round, bool bVerifyRepeatedClaim = false);
-    UFUNCTION(Server, Reliable) void ServerGameReceipt(int32 Round, const FIslandClues& Clues, uint8 Outcome, bool bDisguised);
+    UFUNCTION(Server, Reliable) void ServerGameReceipt(int32 Round, const FIslandClues& Clues, uint8 Outcome, uint8 Event, uint8 Effects);
     UFUNCTION(Server, Reliable) void ServerMeasure(int32 Epoch, FIslandClues Clues, int32 Boxes, int32 Winner,
         uint32 Sequence, const FString& Digest);
     UFUNCTION(Server, Reliable) void ServerStress(int32 Stage);
 
     TWeakObjectPtr<class AIslandProbe> Coordinator;
     int32 Seat = INDEX_NONE;
+    EIslandDecoyCheck ConfirmedDecoyCheck = EIslandDecoyCheck::None;
+    UFUNCTION(Client, Reliable) void ClientCheckDecoy(EIslandDecoyCheck Check, EIslandDecoyEvent Event, int32 BoostMask, double ReturnedAt);
+    UFUNCTION(Server, Reliable) void ServerConfirmDecoy(EIslandDecoyCheck Check);
+    UFUNCTION(Client, Reliable) void ClientObserveDecoyWorld(int32 Round, int32 Stage, EIslandDecoyEvent Event,
+        FVector Target, FVector2D SpentChest, uint32 Sequence, uint32 Checksum, const TArray<FIntVector>& Sails);
+    UFUNCTION(Server, Reliable) void ServerObservedDecoyWorld(int32 Round, int32 Stage);
+    int32 DecoyObservedRound = 0, DecoyObservedStage = INDEX_NONE;
 
 private:
     int32 StressStage = 0;
@@ -120,7 +137,7 @@ public:
     void RecordNeutral(int32 Seat, int32 Stage, const FString& Digest);
     void RecordMud(int32 Seat, int32 Stage, uint32 Sequence, uint32 Checksum, int32 Top);
     void RecordDig(int32 Seat, uint32 Sequence, uint32 Checksum, int32 Drop, int32 ReferenceDelta);
-    void RecordGameReceipt(int32 Seat, int32 Round, const FIslandClues& Clues, uint8 Outcome, bool bDisguised);
+    void RecordGameReceipt(int32 Seat, int32 Round, const FIslandClues& Clues, uint8 Outcome, uint8 Event, uint8 Effects);
     void RecordVenueReport(int32 Seat, int32 Round, int32 Gone, int32 Pieces);
 
 private:
@@ -136,6 +153,10 @@ private:
     void TickParty(double Now);
     void TickExpedition(double Now);
     void TickExpeditionGame(double Now);
+    void TickCharacterSelection(double Now);
+    int32 CharacterStage = INDEX_NONE;
+    double CharacterStageAt = 0.;
+    double NextCharacterPoll = 0.;
     void PlayExpeditionGame(class APartyVoxelSession& Arena);
     void PlayMazeChase(class APartyVoxelSession& Arena);
     int32 GameWinnerMask = 0;
@@ -170,6 +191,28 @@ private:
     uint32 GameTerrainCRC = 0;
     TMap<int32, FIslandClues> GamePreviousClues;
     TArray<FVector> GameBeforePositions;
+    TSet<int32> UnsafeReturnSeats;
+    void SnapshotDecoyWorld();
+    bool TickDecoyWorld(EIslandDecoyEvent Event, double Now);
+    void AimDecoyRope(AIslandNeutralProp& Sail);
+    uint32 DecoyTerrainSequence = 0;
+    int32 DecoyWorldMask = 0, DecoyWorldStage = 0;
+    double DecoyWorldInputAt = 0.;
+    TArray<FVector> DecoyRampFloors;
+    TOptional<FVector> DecoyRampPeak;
+    TArray<FIntVector> DecoySailsBefore;
+    int32 BoostMaskBeforeGame = 0;
+    EIslandDecoyEvent ActiveBeforeGame{};
+    double FirstDecoyReturnedAt = 0.;
+    bool bCheckingDecoyHold = false;
+    bool AllPeersObservedDecoy(EIslandDecoyCheck Check, EIslandDecoyEvent Event, int32 BoostMask);
+    int32 CeasefireGroundSequence = INDEX_NONE;
+    double CeasefireFloorBefore = 0.;
+    bool bInjectedDecoyLoadFailure = false;
+    bool bVerifiedDecoyLoadRollback = false;
+    bool bMeasuringDecoyTools = false;
+    friend struct FExpeditionDecoyToolProof;
+    FExpeditionDecoyToolProof DecoyTools;
     TOptional<FIntVector> StoneProofCell;
     bool bStoneDug = false;
     double StoneHeightBefore = 0.;
@@ -180,7 +223,13 @@ private:
     void StartNeutralCheck(double Now);
     void TickNeutralCheck(double Now);
     void TickSceneryCheck(double Now);
-    int32 SceneryHits = 0;
+    int32 SceneryCase = 0, SceneryHits = 0, SceneryCuts = 0;
+    int32 SceneryInitial = 0, SceneryAttempts = 0;
+    TWeakObjectPtr<class UProceduralMeshComponent> SceneryField;
+    FVector SceneryEye = FVector::ZeroVector, SceneryAim = FVector::ForwardVector;
+    FVector SceneryFirstPoint = FVector::ZeroVector;
+    bool bSceneryPartial = false, bSceneryDifferent = false, bSceneryRepeated = false;
+    bool bSceneryInventory = false;
     void SetNeutralStep(int32 Next, double Now);
     bool NeutralAim(int32 Seat, uint8 Action, const FVector& Target, const AActor* AimActor);
     void NeutralFrame(const AIslandNeutralProp& Prop);

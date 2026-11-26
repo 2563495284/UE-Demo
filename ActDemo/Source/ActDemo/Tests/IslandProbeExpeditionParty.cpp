@@ -1,6 +1,7 @@
 #include "Tests/IslandProbe.h"
-#include "Tests/ExpeditionIdentityProof.h"
 
+#include "Abilities/ExpeditionAbility.h"
+#include "Island/ExpeditionAnimalComponent.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -21,6 +22,36 @@
 
 namespace
 {
+constexpr double DecoyObservationSeconds = 32.;
+
+bool IsIslandWideEvent(EIslandDecoyEvent Event)
+{
+    return Event == EIslandDecoyEvent::Disguise || Event == EIslandDecoyEvent::SpringTide || Event == EIslandDecoyEvent::Ceasefire;
+}
+
+uint8 ExpectedDecoyEffects(EIslandDecoyEvent Event, bool bBoosted)
+{
+    switch (Event)
+    {
+    case EIslandDecoyEvent::WideTools: return bBoosted ? 1 : 0;
+    case EIslandDecoyEvent::Disguise: return 2;
+    case EIslandDecoyEvent::SpringTide: return 4;
+    case EIslandDecoyEvent::Ceasefire: return 8;
+    default: return 0;
+    }
+}
+
+// Keep these observations independent of the result enum. The jump value is the movement component's actual input.
+uint8 ObservedEffects(const AIslandGameState& State, const AIslandPlayerController& Player)
+{
+    const auto* Move = CastChecked<UExpeditionCharacterMovement>(Player.GetHero()->GetCharacterMovement());
+    const float Jump = Move->GetIslandJumpZVelocity();
+    if (!FMath::IsNearlyEqual(Jump, Move->JumpZVelocity) && !FMath::IsNearlyEqual(Jump, 1.5f * Move->JumpZVelocity))
+        return 0xff;
+    return (State.HasDecoyToolBoost(Player.GetTeam()) ? 1 : 0) | (State.IsIdentityDisguised() ? 2 : 0)
+        | (Jump > Move->JumpZVelocity ? 4 : 0) | (State.IsDecoyEventActive(EIslandDecoyEvent::Ceasefire) ? 8 : 0);
+}
+
 constexpr int32 VenueBuildingCount = 10;
 constexpr int32 AllVenueBuildings = (1 << VenueBuildingCount) - 1;
 
@@ -175,8 +206,8 @@ void AIslandProbePeer::TickInteractionProof(AIslandPlayerController& Player)
         const auto* HUD = Cast<AIslandHUD>(Player.GetHUD());
         if (HUD && HUD->GetTreasureFeedbackFrame(Stage, Age) && Stage != LastTreasureShot)
         {
-            const float DesiredAge = Stage == TEXT("Forge") ? .95f : Stage == TEXT("Vault") ? 1.2f : Stage == TEXT("Intel") ? .85f : .45f;
-            if (Age >= DesiredAge && (Stage == TEXT("Fragment") || Stage == TEXT("Forge") || Stage == TEXT("Vault") || Stage == TEXT("Intel")))
+            const float DesiredAge = Stage == TEXT("Forge") ? .95f : Stage == TEXT("Vault") ? 1.2f : .45f;
+            if (Age >= DesiredAge && (Stage == TEXT("Fragment") || Stage == TEXT("Forge") || Stage == TEXT("Vault")))
             {
                 const FString Path = VenuePhotoPath(*(TEXT("Treasure") + Stage.ToString() + TEXT(".png")));
                 if (!IFileManager::Get().FileExists(*Path))
@@ -686,19 +717,24 @@ void AIslandProbePeer::ClientGameReceipt_Implementation(int32 Round, bool bVerif
     uint8 Coordinates = 0;
     for (int32 Index = 0; Index < Clues.Points.Num(); ++Index)
         if (!Clues.Points[Index].IsNearlyZero()) Coordinates |= 1u << Index;
-    UE_LOG(LogTemp, Display, TEXT("%s round=%d team=%d mask=%d points=%d key=%d outcome=%d scouted=%d coordinates=%d fragments=%d crossing=%d"),
+    const uint8 Effects = ObservedEffects(*GS, *Player);
+#if !UE_BUILD_SHIPPING
+    if (GS->IsIdentityDisguised() && !Player->GetHero()->IsInFirstPersonView() &&
+        !Player->GetHero()->FindComponentByClass<UExpeditionAnimalComponent>()->ShowsOutfit(true)) return;
+#endif
+    UE_LOG(LogTemp, Display, TEXT("%s round=%d team=%d mask=%d points=%d key=%d outcome=%d scouted=%d coordinates=%d fragments=%d crossing=%d boosted=%d event=%d effects=%d"),
         Round ? TEXT("EXPEDITION_GAME_RECEIPT") : TEXT("EXPEDITION_REVISIT_RECEIPT"),
         Round, Self->Team, Clues.Mask, Clues.Count(), Clues.HasKey(), int32(GS->PartyOutcome), Clues.ScoutedMask,
-        Coordinates, Clues.FragmentCount(), !Clues.Crossing.IsNearlyZero());
-    ServerGameReceipt(Round, Clues, uint8(GS->PartyOutcome), GS->IsIdentityDisguised());
+        Coordinates, Clues.FragmentCount(), !Clues.Crossing.IsNearlyZero(), GS->HasDecoyToolBoost(Self->Team), int32(GS->PartyDecoyEvent), Effects);
+    ServerGameReceipt(Round, Clues, uint8(GS->PartyOutcome), uint8(GS->PartyDecoyEvent), Effects);
 }
 
-void AIslandProbePeer::ServerGameReceipt_Implementation(int32 Round, const FIslandClues& Clues, uint8 Outcome, bool bDisguised)
+void AIslandProbePeer::ServerGameReceipt_Implementation(int32 Round, const FIslandClues& Clues, uint8 Outcome, uint8 Event, uint8 Effects)
 {
-    if (auto* Probe = Coordinator.Get()) Probe->RecordGameReceipt(Seat, Round, Clues, Outcome, bDisguised);
+    if (auto* Probe = Coordinator.Get()) Probe->RecordGameReceipt(Seat, Round, Clues, Outcome, Event, Effects);
 }
 
-void AIslandProbe::RecordGameReceipt(int32 Seat, int32 Round, const FIslandClues& Clues, uint8 Outcome, bool bDisguised)
+void AIslandProbe::RecordGameReceipt(int32 Seat, int32 Round, const FIslandClues& Clues, uint8 Outcome, uint8 Event, uint8 Effects)
 {
     if (!Mode->GetPlayers().IsValidIndex(Seat)) return;
     if (bTestingChestRevisit ? Round != 0 : (!bGameStarted || Round != GameCount + 1)) return;
@@ -708,15 +744,61 @@ void AIslandProbe::RecordGameReceipt(int32 Seat, int32 Round, const FIslandClues
     // HUD state and private progress travel on different channels. Give the last update time to arrive.
     if (Outcome != uint8(State->PartyOutcome) || Clues.Mask != Expected.Mask || Clues.ScoutedMask != Expected.ScoutedMask ||
         Clues.bKeySpent != Expected.bKeySpent || Clues.bUsesKeyFragments != Expected.bUsesKeyFragments || Clues.HasKey() != Expected.HasKey() || Clues.Points.Num() != IslandRules::ClueCount ||
-        bDisguised != State->IsIdentityDisguised()) return;
+        Event != uint8(State->PartyDecoyEvent) || Effects != ObservedEffects(*State, *CastChecked<AIslandPlayerController>(Mode->GetPlayers()[Seat]))) return;
     for (int32 Index = 0; Index < IslandRules::ClueCount; ++Index)
     {
-        const FVector2D ExpectedPoint = ((Clues.Mask | Clues.ScoutedMask) & (1u << Index)) ?
+        const FVector2D ExpectedPoint = (Clues.Mask & (1u << Index)) ?
             FVector2D(Mode->HiddenLayout.GetCenter(Index)) : FVector2D::ZeroVector;
-        Require(Clues.Points[Index].Equals(ExpectedPoint, .02), TEXT("local exact positions match only this crew's awarded or scouted chests"));
+        Require(Clues.Points[Index].Equals(ExpectedPoint, .02), TEXT("local exact positions match only this crew's claimed genuine chests"));
     }
     Require(Clues.Crossing.Equals(Expected.Crossing, .02), TEXT("client chart has the team's correct vault information"));
     Reports.Add(Seat);
+}
+
+void AIslandProbePeer::ClientCheckDecoy_Implementation(EIslandDecoyCheck Check, EIslandDecoyEvent Event, int32 BoostMask, double ReturnedAt)
+{
+    const auto* Player = CastChecked<AIslandPlayerController>(GetOwner());
+    const auto* State = GetWorld()->GetGameState<AIslandGameState>();
+    const bool bStarted = Check == EIslandDecoyCheck::Started;
+    if (!State || State->Phase != (bStarted ? EIslandPhase::PartyPlaying : EIslandPhase::Hunting)
+        || State->ActiveDecoyEvent != Event || State->DecoyToolBoostMask != BoostMask) return;
+    const double Elapsed = State->GetServerWorldTimeSeconds() - ReturnedAt;
+    uint8 Effects = 0;
+    if (bStarted)
+    {
+        if (State->PartyOutcome != EIslandChestOutcome::Unknown || State->IsIdentityDisguised() || !Cast<APartyPawn>(Player->GetPawn())) return;
+    }
+    else
+    {
+        if (!Player->GetHero() || (Check == EIslandDecoyCheck::Held && (Elapsed < DecoyObservationSeconds || State->PartyDecoyEvent != Event))
+            || (Check == EIslandDecoyCheck::Cancelled && State->PartyOutcome != EIslandChestOutcome::Unknown)) return;
+        Effects = ObservedEffects(*State, *Player);
+        if (Effects != ExpectedDecoyEffects(Event, State->HasDecoyToolBoost(Player->GetTeam()))) return;
+#if !UE_BUILD_SHIPPING
+        if (Event == EIslandDecoyEvent::Disguise && !Player->GetHero()->IsInFirstPersonView() &&
+            !Player->GetHero()->FindComponentByClass<UExpeditionAnimalComponent>()->ShowsOutfit(true)) return;
+#endif
+    }
+    const TCHAR* Stage = bStarted ? TEXT("started") : Check == EIslandDecoyCheck::Held ? TEXT("held") : TEXT("cancelled");
+    UE_LOG(LogTemp, Display, TEXT("DECOY_QA_CHECKPOINT stage=%s event=%d effects=%u elapsed=%.2f"), Stage, int32(Event), uint32(Effects), Elapsed);
+    ServerConfirmDecoy(Check);
+}
+
+void AIslandProbePeer::ServerConfirmDecoy_Implementation(EIslandDecoyCheck Check)
+{
+    ConfirmedDecoyCheck = Check;
+}
+
+bool AIslandProbe::AllPeersObservedDecoy(EIslandDecoyCheck Check, EIslandDecoyEvent Event, int32 BoostMask)
+{
+    bool bConfirmed = true;
+    for (const auto& Peer : Peers)
+    {
+        if (Peer->ConfirmedDecoyCheck == Check) continue;
+        bConfirmed = false;
+        Peer->ClientCheckDecoy(Check, Event, BoostMask, FirstDecoyReturnedAt);
+    }
+    return bConfirmed;
 }
 
 void AIslandProbe::StartNextGame()
@@ -725,12 +807,15 @@ void AIslandProbe::StartNextGame()
     ExpeditionOpener = 0;
     int32 Chest = INDEX_NONE;
     const int32 UniqueChests = IslandRules::ClueCount + Mode->HiddenLayout.Decoys.Num();
-    if (GameCount == 1 && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMazeQA")))
+    if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA")))
+    {
+        if (GameCount < 2) Chest = IslandRules::PrizeIndex + 1 + GameCount;
+    }
+    else if (GameCount == 1 && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMazeQA")))
         Chest = IslandRules::PrizeIndex + 1;
     else if (!OnlyGame.IsNone() && GameCount == 0)
     {
-        const bool bFalseFirst=FParse::Param(FCommandLine::Get(),TEXT("ExpeditionIdentityShots"))
-            || FParse::Param(FCommandLine::Get(),TEXT("ExpeditionInteractionQA"))
+        const bool bFalseFirst=FParse::Param(FCommandLine::Get(),TEXT("ExpeditionInteractionQA"))
             || FParse::Param(FCommandLine::Get(),TEXT("ExpeditionAbortQA"));
         if (bFalseFirst && Mode->HiddenLayout.Decoys.IsEmpty())
         {
@@ -747,14 +832,6 @@ void AIslandProbe::StartNextGame()
         for (int32 Seat = 1; Seat < Players.Num() && Chest == INDEX_NONE; ++Seat)
         {
             const int32 Team = Players[Seat]->GetPlayerState<AIslandPlayerState>()->Team;
-            for (int32 I = 0; I < IslandRules::ClueCount; ++I)
-                if ((Mode->TeamClues[Team].ScoutedMask & (1u << I)) && IsValid(Mode->Exposed[I]) &&
-                    Mode->Exposed[I]->IsChallengeResolved() && Mode->CanClaimChest(Team, I))
-                {
-                    ExpeditionOpener = Seat;
-                    Chest = I;
-                    break;
-                }
             for (int32 I = 0; Chest == INDEX_NONE && I < IslandRules::ClueCount; ++I)
                 if (IsValid(Mode->Exposed[I]) && Mode->Exposed[I]->IsChallengeResolved() && Mode->CanClaimChest(Team, I))
                 {
@@ -814,7 +891,7 @@ void AIslandProbe::TickChestRevisit()
         const auto& Old = GamePreviousClues.FindChecked(Crew);
         const uint8 Added = Crew == Team ? Bit : 0;
         const auto& Current = Mode->TeamClues[Crew];
-        Require(Current.Mask == (Old.Mask | Added) && Current.ScoutedMask == (Old.ScoutedMask & ~Added)
+        Require(Current.Mask == (Old.Mask | Added) && Current.ScoutedMask == 0 && State->DecoyToolBoostMask == BoostMaskBeforeGame
             && Players[Seat]->GetPawn() == OriginalPawns[Seat].Get(),
             TEXT("a direct pickup changes only the claiming crew's progress and leaves every island pawn in place"));
         if (!Reports.Contains(Seat)) Peers[Seat]->ClientGameReceipt(0, Seat == ExpeditionOpener);
@@ -828,11 +905,43 @@ void AIslandProbe::TickChestRevisit()
 void AIslandProbe::TickExpeditionGame(double Now)
 {
     const auto* Round = Mode->GetGameState<AIslandGameState>();
+    if (bCheckingDecoyHold)
+    {
+        if (Round->GetServerWorldTimeSeconds() - FirstDecoyReturnedAt < DecoyObservationSeconds || Now - LastAction < .4) return;
+        LastAction = Now;
+        Require(Round->IsDecoyEventActive(Round->PartyDecoyEvent), TEXT("island-wide event survives an extended hunt"));
+        if (AllPeersObservedDecoy(EIslandDecoyCheck::Held, Round->PartyDecoyEvent, 0))
+        {
+            bCheckingDecoyHold = false;
+            StartNextGame();
+        }
+        return;
+    }
+    if (bMeasuringDecoyTools)
+    {
+        if (!DecoyTools.Tick(*Mode, *Round)) return;
+        bMeasuringDecoyTools = false;
+        Require(DecoyTools.Passed(), TEXT("real island tool strokes match across boosted and normal crews"));
+        if (!DecoyTools.Passed()) return;
+        StartNextGame();
+        return;
+    }
     const bool bShots = FParse::Param(FCommandLine::Get(), TEXT("IslandScreenshot"));
     const bool bInteraction = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionInteractionQA"));
     const bool bAbort = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionAbortQA"));
     const bool bViews = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaViewsQA"));
     const bool bTerrain = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaTerrainQA"));
+    const bool bDecoyQA = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA"));
+    const bool bZeroScore = bDecoyQA && GameCount == 1;
+    if (bZeroScore && !bInjectedDecoyLoadFailure && Round->Phase == EIslandPhase::PartyLoading)
+    {
+        // Exercise the same prepare-failure path as a failed venue asset load while a boost is live.
+        Mode->bPartyPrepareFailed = true;
+        bInjectedDecoyLoadFailure = true;
+    }
+    if (Round->Phase == EIslandPhase::PartyLoading)
+        Require(Round->ActiveDecoyEvent == ActiveBeforeGame && Round->DecoyToolBoostMask == BoostMaskBeforeGame,
+            TEXT("a pending load preserves the active event"));
     const bool bMazeProof = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMazeQA"));
     if (bShots && !bInteraction && GameCount == 0 && !bIssued && Round->Phase == EIslandPhase::PartyLoading
         && Round->GetServerWorldTimeSeconds() - Round->PartyStartedAt >= .42)
@@ -859,6 +968,7 @@ void AIslandProbe::TickExpeditionGame(double Now)
                 UE_LOG(LogTemp, Display, TEXT("MAZE_QA_DEFAULT limit=180"));
             if (!(bMazeProof && bShots && GameCount == 0)) Session->RoundSeconds = bMazeProof ? 34.f : 8.f;
         }
+        else if (bZeroScore) Session->RoundSeconds = 6.f;
         else Session->RoundSeconds = bAllVenueBuildings || bTerrain ? 44.f : (bVenueProof || bViews) ? 26.f : 23.f;
     }
     if (Round->Phase == EIslandPhase::PartyPlaying && Session)
@@ -866,6 +976,26 @@ void AIslandProbe::TickExpeditionGame(double Now)
         if (!bGameStarted)
         {
             bGameStarted = true;
+            Require(Round->DecoyToolBoostMask == 0 && Round->ActiveDecoyEvent == EIslandDecoyEvent::None &&
+                Round->PartyDecoyEvent == EIslandDecoyEvent::None && !Round->IsIdentityDisguised(),
+                TEXT("a successfully started game clears the old event and conceals the next draw"));
+            UE_LOG(LogTemp, Display, TEXT("DECOY_QA_START round=%d preceding_boost=%d current_boost=%d previous_event=%d active=0"),
+                GameCount+1, BoostMaskBeforeGame, Round->DecoyToolBoostMask, int32(ActiveBeforeGame));
+            for (int32 Seat=0; Seat<Players.Num(); ++Seat)
+            {
+                auto* PC = CastChecked<AIslandPlayerController>(Players[Seat]);
+                const auto* Body = CastChecked<AVoxelCharacter>(OriginalPawns[Seat].Get());
+                const auto* Capsule = Body->GetCapsuleComponent();
+                const auto& Entry = Mode->PartyPlayers.FindChecked(PC);
+                GameBeforePositions[Seat] = Body->GetActorLocation();
+                const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight());
+                if (Entry.bReturnToDock || GetWorld()->OverlapBlockingTestByChannel(Body->GetActorLocation(),
+                    Body->GetActorQuat(), Capsule->GetCollisionObjectType(), Shape,
+                    FCollisionQueryParams(SCENE_QUERY_STAT(DecoyQASafeOrigin), false, Body),
+                    FCollisionResponseParams(Capsule->GetCollisionResponseToChannels())))
+                    UnsafeReturnSeats.Add(Seat);
+            }
+            if (bDecoyQA) SnapshotDecoyWorld();
             if (bViews)
                 for (const auto& Peer : Peers) Peer->ClientInspectArenaView(GameCount+1, Mode->CurrentPartyFeature);
             VenueStep = EVenueStep::Entry;
@@ -879,7 +1009,7 @@ void AIslandProbe::TickExpeditionGame(double Now)
                 if (GameCount == 2) GameWinnerSeat = 0;
                 if (GameCount == IslandRules::ClueCount) GameWinnerSeat = 1;
             }
-            Require(Round->PartyOutcome == EIslandChestOutcome::Unknown && Mode->PartyRoundId == uint32(GameCount + (bAbort ? 2 : 1))
+            Require(Round->PartyOutcome == EIslandChestOutcome::Unknown && Mode->PartyRoundId == uint32(GameCount + 1 + (bAbort || bVerifiedDecoyLoadRollback ? 1 : 0))
                 && Session->GetActorLocation().Equals(APartyVoxelSession::ArenaOrigin(), 1.), TEXT("all players entered the selected remote arena once"));
             for (AVoxelPlayerController* Player : Players)
                 Require(Cast<APartyVoxelPawn>(Player->GetPawn()) != nullptr, TEXT("participant possesses the arena character"));
@@ -891,6 +1021,7 @@ void AIslandProbe::TickExpeditionGame(double Now)
                 UE_LOG(LogTemp, Display, TEXT("EXPEDITION_GAMES_DROP_READY"));
             }
         }
+        if (bZeroScore && !AllPeersObservedDecoy(EIslandDecoyCheck::Started, EIslandDecoyEvent::None, 0)) return;
         if (Round->PartyOutcome != EIslandChestOutcome::Unknown || Round->PartyWinnerTeam != INDEX_NONE || Round->PartyWinnerMask)
             Require(false, TEXT("early public reveal"));
         for (const auto& Entry : GamePreviousClues)
@@ -917,7 +1048,7 @@ void AIslandProbe::TickExpeditionGame(double Now)
                 FScreenshotRequest::RequestScreenshot(FPaths::Combine(Dir, Mode->CurrentPartyFeature.ToString()+TEXT(".png")), false, false);
             }
             if (Session->IsChaseGame()) PlayMazeChase(*Session);
-            else PlayExpeditionGame(*Session);
+            else if (!bZeroScore || !bStoneDug) PlayExpeditionGame(*Session);
             const bool bOverviewReady = Session->IsChaseGame() ? (!bMazeProof || GameCount == 0)
                 : Session->Score(GameWinnerSeat) > 0;
             if (bShots && !bGameOverviewShot && bOverviewReady)
@@ -944,6 +1075,12 @@ void AIslandProbe::TickExpeditionGame(double Now)
                     Require(GameAction >= 7 && bSurvived == (GameCount == 0),
                         TEXT("maze finished by survival in round one and full capture in round two"));
             }
+            else if (bZeroScore)
+            {
+                Require(Session->GetWinningSeat() == INDEX_NONE && Session->GetWinningTeamMask() == 0,
+                    TEXT("all zero scores produce no winning crew"));
+                GameWinnerMask = 0;
+            }
             else
             {
                 Require(Session->GetWinningSeat() == GameWinnerSeat && Session->Score(GameWinnerSeat) > 0,
@@ -962,13 +1099,25 @@ void AIslandProbe::TickExpeditionGame(double Now)
     if (Round->Phase != EIslandPhase::Hunting) return;
     if (!bGameStarted)
     {
+        if (bInjectedDecoyLoadFailure && !bVerifiedDecoyLoadRollback)
+        {
+            Require(Round->ActiveDecoyEvent == ActiveBeforeGame && Round->DecoyToolBoostMask == BoostMaskBeforeGame
+                && Round->PartyDecoyEvent == EIslandDecoyEvent::None
+                && Round->PartyOutcome == EIslandChestOutcome::Unknown && Round->SpentFalsePoints.Num() == 1
+                && Mode->CanClaimChest(Players[ExpeditionOpener]->GetPlayerState<AIslandPlayerState>()->Team, NextDig),
+                TEXT("failed next load preserves ongoing effects and leaves the unopened decoy available for retry"));
+            if (!AllPeersObservedDecoy(EIslandDecoyCheck::Cancelled, ActiveBeforeGame, BoostMaskBeforeGame)) return;
+            bVerifiedDecoyLoadRollback = true;
+            UE_LOG(LogTemp, Display, TEXT("DECOY_QA_LOAD_RETRY round=2 retained_boost=%d chest=%d active=%d"),
+                Round->DecoyToolBoostMask, NextDig, int32(Round->ActiveDecoyEvent));
+        }
         if (bAbort && Mode->PartyRoundId == 1)
         {
             if (!AbortRecoveredAt)
             {
                 AbortRecoveredAt = Now;
                 Require(Round->PartyOutcome == EIslandChestOutcome::Unknown && !Round->PartyRewardMask
-                    && Round->SpentFalsePoints.IsEmpty() && !Round->IsIdentityDisguised()
+                    && Round->DecoyToolBoostMask == BoostMaskBeforeGame && Round->SpentFalsePoints.IsEmpty() && !Round->IsIdentityDisguised()
                     && !Mode->TeamClues.ContainsByPredicate([](const FIslandClues& Clues) { return Clues.Mask || Clues.ScoutedMask; })
                     && Mode->CanClaimChest(Players[ExpeditionOpener]->GetPlayerState<AIslandPlayerState>()->Team, NextDig),
                     TEXT("failed loading leaves the false chest available without an effect, chart marker or reward"));
@@ -978,15 +1127,26 @@ void AIslandProbe::TickExpeditionGame(double Now)
         Peers[ExpeditionOpener]->ClientOpenChest();
         return;
     }
-    Require(!Session && Mode->PartyPlayers.IsEmpty() && Mode->GetTerrain()->GetChecksum() == GameTerrainCRC,
+    Require(!Session && Mode->PartyPlayers.IsEmpty() && (CeasefireGroundSequence != INDEX_NONE
+        || Round->PartyDecoyEvent == EIslandDecoyEvent::SandRamp || Mode->GetTerrain()->GetChecksum() == GameTerrainCRC),
         TEXT("arena unloaded with island edits preserved"));
     const int32 OpenerTeam = Players[ExpeditionOpener]->GetPlayerState<AIslandPlayerState>()->Team;
     const bool bTrue = !Mode->HiddenLayout.IsDecoy(NextDig);
     const int32 Area = bTrue ? NextDig : Mode->HiddenLayout.Decoys[NextDig - IslandRules::PrizeIndex - 1].ClueIndex;
+    int32 ParticipantMask = 0;
+    for (const auto& Player : Players) ParticipantMask |= 1 << Player->GetPlayerState<AIslandPlayerState>()->Team;
+    const EIslandDecoyEvent ExpectedEvent = Round->PartyDecoyEvent;
+    Require(bTrue == (ExpectedEvent == EIslandDecoyEvent::None), TEXT("only decoys draw an event"));
+    if (bDecoyQA && !bTrue)
+        Require(ExpectedEvent == IslandRules::DrawDecoyEvent(Mode->DecoyEventSeed, NextDig, Players.Num(),
+            ParticipantMask, GameWinnerMask, DecoyWorldMask), TEXT("the settled event matches the eligible seeded draw"));
+    const EIslandDecoyEvent ExpectedActive = IsIslandWideEvent(ExpectedEvent) || ExpectedEvent == EIslandDecoyEvent::WideTools
+        ? ExpectedEvent : EIslandDecoyEvent::None;
+    Require(Round->ActiveDecoyEvent == ExpectedActive,
+        TEXT("only the one drawn event can stay active after return"));
     int32 NewlyCredited = 0;
-    const bool bScatter = Round->PartyOutcome == EIslandChestOutcome::Scatter;
     Require(Round->PartySite == Area && Round->PartyOpeningTeam == OpenerTeam && Round->PartyWinnerMask == GameWinnerMask
-        && (bTrue ? Round->PartyOutcome == EIslandChestOutcome::Genuine : bScatter || Round->PartyOutcome == EIslandChestOutcome::Disguise),
+        && Round->PartyOutcome == (bTrue ? EIslandChestOutcome::Genuine : EIslandChestOutcome::Decoy),
         TEXT("only the finished minigame reveals this chest and the opening/winning crews"));
     for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
     {
@@ -997,15 +1157,9 @@ void AIslandProbe::TickExpeditionGame(double Now)
         const bool bAwarded = bTrue && (Team == OpenerTeam || bWon);
         const uint8 Expected = bAwarded ? Previous | (1u << NextDig) : Previous;
         const auto& Progress = Mode->TeamClues[Team];
-        const uint8 NewScouts = Progress.ScoutedMask & ~Before.ScoutedMask;
-        const bool bEarnsScout = !bTrue && bWon && (Before.Mask | Before.ScoutedMask) != 15;
-        const uint8 CarriedScouts = Before.ScoutedMask & ~Expected;
-        Require((Progress.ScoutedMask & Expected) == 0 && (Progress.ScoutedMask & ~NewScouts) == CarriedScouts
-            && (bEarnsScout ? FMath::IsPowerOfTwo(uint32(NewScouts)) && NewScouts != 0 : NewScouts == 0),
-            TEXT("only the decoy winner learns one new genuine location; claiming it retires the scout marker"));
-        for (int32 I = 0; I < IslandRules::ClueCount; ++I)
-            if (NewScouts & (1u << I))
-                Require(Mode->CanClaimChest(Team, I), TEXT("a scouted genuine chest remains claimable in play"));
+        const uint8 ExpectedEffects = ExpectedDecoyEffects(ExpectedEvent, bWon);
+        Require(Progress.ScoutedMask == 0 && ObservedEffects(*Round, *CastChecked<AIslandPlayerController>(Players[Seat])) == ExpectedEffects,
+            TEXT("each crew experiences only the drawn effect and no treasure information"));
         if (Expected != Previous) NewlyCredited |= 1 << Team;
         Require(Progress.Mask == Expected && Progress.HasKey() == (Progress.Count() >= 3)
             && Progress.FragmentCount() == Progress.Count() % 3 && Progress.Complete() == (Progress.Count() == 4),
@@ -1016,12 +1170,54 @@ void AIslandProbe::TickExpeditionGame(double Now)
             Require(Progress.Crossing.IsNearlyZero() && !Mode->CanClaimChest(Team, IslandRules::PrizeIndex),
                 TEXT("a crew without the four private points cannot locate or open the final vault"));
         Require(Players[Seat]->GetPawn() == OriginalPawns[Seat].Get(), TEXT("participant returned to the same island pawn"));
-        if (bScatter)
+        if (!bTrue && !Reports.Contains(Seat))
         {
             const FVector Location = Players[Seat]->GetPawn()->GetActorLocation();
-            Require(FVector::Dist2D(GameBeforePositions[Seat], Location) > 200., TEXT("scatter moved every participant"));
-            for (int32 Other = 0; Other < Seat; ++Other)
-                Require(FVector::Dist2D(Players[Other]->GetPawn()->GetActorLocation(), Location) > 85., TEXT("scatter destinations are distinct"));
+            const double Moved = FVector::Dist2D(GameBeforePositions[Seat], Location);
+            const bool bShouldScatter = ExpectedEvent == EIslandDecoyEvent::Scatter && !bWon;
+            const bool bRally = ExpectedEvent == EIslandDecoyEvent::CrewRally;
+            if (bRally && bDecoyQA)
+            {
+                // The authority may pick a different safe anchor at the return boundary.
+                // Observe actual landings against each participant's departure position.
+                const bool bMoved = Moved >= 100.;
+                int32 CrewSize = 0;
+                double AnchorDistance = TNumericLimits<double>::Max();
+                for (int32 Other = 0; Other < Players.Num(); ++Other)
+                {
+                    const FVector P = Players[Other]->GetPawn()->GetActorLocation();
+                    if (Seat != Other)
+                        Require(FVector::Dist2D(Location, P) > 85., TEXT("rally destinations leave separate standing room"));
+                    if (Players[Other]->GetPlayerState<AIslandPlayerState>()->Team != Team) continue;
+                    ++CrewSize;
+                    if (Other != Seat && FVector::Dist2D(P, GameBeforePositions[Other]) < 100.)
+                        AnchorDistance = FMath::Min(AnchorDistance, FVector::Dist2D(Location, P));
+                }
+                if (CrewSize == 1 && !UnsafeReturnSeats.Contains(Seat))
+                    Require(!bMoved, TEXT("a singleton crew returns to its original safe position"));
+                if (bMoved && CrewSize > 1)
+                {
+                    Require(AnchorDistance <= 450., TEXT("a gathered crew mate lands beside a team member who stayed at their own origin"));
+                    const auto* Hero = Players[Seat]->GetHero();
+                    FFindFloorResult Floor;
+                    Hero->GetCharacterMovement()->FindFloor(Location, Floor, false);
+                    Require(Floor.IsWalkableFloor(), TEXT("the gathered character capsule has a walkable floor at its final landing"));
+                }
+                UE_LOG(LogTemp, Display, TEXT("DECOY_QA_RALLY round=%d seat=%d team=%d target=%d anchor_cm=%.1f"),
+                    GameCount+1, Seat, Team, bMoved && CrewSize > 1, bMoved && CrewSize > 1 ? AnchorDistance : 0.);
+            }
+            if (!bShouldScatter && !bRally && !UnsafeReturnSeats.Contains(Seat))
+                Require(Moved < 100., TEXT("players outside Scatter return to their original clear positions"));
+            if (bShouldScatter)
+            {
+                Require(Moved >= 499., TEXT("each non-winning player scatters away from their own departure point"));
+                for (int32 Other = 0; Other < Players.Num(); ++Other)
+                    if (Other != Seat)
+                        Require(FVector::Dist2D(Players[Other]->GetPawn()->GetActorLocation(), Location) > 85.,
+                            TEXT("scattered players do not overlap any other returning participant"));
+            }
+            UE_LOG(LogTemp, Display, TEXT("DECOY_QA_LANDING round=%d seat=%d team=%d won=%d safe_origin=%d moved_cm=%.1f"),
+                GameCount+1, Seat, Team, bWon, !UnsafeReturnSeats.Contains(Seat), Moved);
         }
         if (!Reports.Contains(Seat)) Peers[Seat]->ClientGameReceipt(GameCount + 1);
     }
@@ -1034,13 +1230,7 @@ void AIslandProbe::TickExpeditionGame(double Now)
         const FVector2D Spent(Mode->HiddenLayout.GetCenter(NextDig));
         Require(Round->SpentFalsePoints.ContainsByPredicate([&](const FVector2D& Point){ return Point.Equals(Spent,.02); }),
             TEXT("spent false chest is marked on the public chart"));
-        if (Round->PartyOutcome == EIslandChestOutcome::Disguise)
-            Require(Round->IsIdentityDisguised(), TEXT("the disguise event remains active on return"));
     }
-    if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionIdentityShots")) && !CaptureExpeditionIdentity(*Mode, Players)) return;
-    if (bInteraction && bShots && !bTrue && Mode->TeamClues[OpenerTeam].ScoutedMask != GamePreviousClues.FindChecked(OpenerTeam).ScoutedMask
-        && Players[0]->GetPlayerState<AIslandPlayerState>()->Team == OpenerTeam && !IFileManager::Get().FileExists(*VenuePhotoPath(TEXT("TreasureIntel.png"))))
-        return;
     if (bInteraction && bShots && bTrue && OnlyGame.IsNone())
     {
         const TCHAR* Needed = GameCount == 0 ? TEXT("TreasureFragment.png") : GameCount == 2 ? TEXT("TreasureForge.png") :
@@ -1061,11 +1251,60 @@ void AIslandProbe::TickExpeditionGame(double Now)
         LastAction = Now + .6;
         return;
     }
-    UE_LOG(LogTemp, Display, TEXT("EXPEDITION_GAME_RETURN round=%d feature=%s site=%d opening=%d winner=%d result=%s credited_mask=%d winners=%d"),
+    if (bDecoyQA && !TickDecoyWorld(ExpectedEvent, Now)) return;
+    if (bDecoyQA && ExpectedEvent == EIslandDecoyEvent::Ceasefire)
+    {
+        auto* Terrain = Mode->GetTerrain();
+        FHitResult Floor;
+        if (!Terrain->TraceRock({6600.,-2100.,1500.}, {6600.,-2100.,-600.}, nullptr, Floor))
+        {
+            Require(false, TEXT("ceasefire ground collision fixture exists"));
+            return;
+        }
+        if (CeasefireGroundSequence == INDEX_NONE)
+        {
+            auto* Thrower = CastChecked<AIslandPlayerController>(Players[0]);
+            AVoxelCharacter* Target = nullptr;
+            for (AVoxelPlayerController* Player : Players)
+                if (CastChecked<AIslandPlayerController>(Player)->GetTeam() != Thrower->GetTeam()) Target = Player->GetHero();
+            if (!Target || Target->IsMudImmune() || !Mode->CanPlayerAct(*CastChecked<AIslandPlayerController>(Target->GetController())))
+            {
+                Require(false, TEXT("ceasefire contact fixture is a normally hittable opponent"));
+                return;
+            }
+            // Deliver the same impact payload as a mud ball touching an enemy capsule, then a real terrain hit.
+            FHitResult Contact(Target, Target->GetCapsuleComponent(), Target->GetActorLocation(), FVector::UpVector);
+            uint8 Marks = 0;
+            const auto* Marked = Mode->ResolveMudImpact(*Thrower, Contact, Marks);
+            Require(!Marked && !Marks && !Mode->GetMudMarks(*Target) && !Target->IsMudStunned(),
+                TEXT("a ceasefire capsule contact creates no mud mark or stun"));
+            CeasefireGroundSequence = Terrain->GetAppliedSequence() + 1;
+            CeasefireFloorBefore = Floor.ImpactPoint.Z;
+            Mode->ResolveMudImpact(*Thrower, Floor, Marks);
+            return;
+        }
+        if (int32(Terrain->GetAppliedSequence()) < CeasefireGroundSequence || Terrain->IsBusy()) return;
+        const double Rise = Floor.ImpactPoint.Z - CeasefireFloorBefore;
+        Require(Rise > 35. && Rise < 48., TEXT("a ceasefire ground contact still builds a standable normal pad"));
+        UE_LOG(LogTemp,Display,TEXT("DECOY_QA_CEASEFIRE round=%d enemy_marks=0 stun=0 ground_rise_cm=%.1f"),GameCount+1,Rise);
+    }
+    if (bDecoyQA && ExpectedEvent == EIslandDecoyEvent::SpringTide)
+    {
+        auto* Move = CastChecked<UExpeditionCharacterMovement>(Players[0]->GetHero()->GetCharacterMovement());
+        if (!Move->IsMovingOnGround()) return;
+        const bool bJumped = Move->DoJump(false, 1.f/60.f);
+        Require(bJumped && FMath::IsNearlyEqual(Move->Velocity.Z, double(Move->JumpZVelocity * 1.5f), .01),
+            TEXT("a real ordinary jump enters falling at one and a half normal vertical speed"));
+        UE_LOG(LogTemp,Display,TEXT("DECOY_QA_JUMP round=%d normal_cm_s=%.1f actual_cm_s=%.1f"),GameCount+1,Move->JumpZVelocity,Move->Velocity.Z);
+    }
+    UE_LOG(LogTemp, Display, TEXT("EXPEDITION_GAME_RETURN round=%d feature=%s site=%d opening=%d winner=%d result=%s credited_mask=%d winners=%d event=%d"),
         GameCount + 1, *Mode->CurrentPartyFeature.ToString(), NextDig, OpenerTeam, Round->PartyWinnerTeam,
-        bTrue ? TEXT("true") : bScatter ? TEXT("scatter") : TEXT("disguise"), Round->PartyRewardMask, Round->PartyWinnerMask);
+        bTrue ? TEXT("true") : TEXT("decoy"), Round->PartyRewardMask, Round->PartyWinnerMask, int32(ExpectedEvent));
     ++GameCount;
-    if (bGamesScenario) StartNextGame();
+    if (bDecoyQA && GameCount == 1) FirstDecoyReturnedAt = Round->GetServerWorldTimeSeconds();
+    if (bDecoyQA && GameCount == 1 && ExpectedEvent == EIslandDecoyEvent::WideTools && Players.Num() > 1) bMeasuringDecoyTools = true;
+    else if (bDecoyQA && GameCount == 1 && IsIslandWideEvent(ExpectedEvent)) bCheckingDecoyHold = true;
+    else if (bGamesScenario) StartNextGame();
     else
     {
         ++Epoch;
@@ -1276,6 +1515,7 @@ void AIslandProbe::PlayExpeditionGame(APartyVoxelSession& Arena)
         bStoneDug = true;
         UE_LOG(LogTemp, Display, TEXT("EXPEDITION_STONE_DUG feature=%s cell=%s"), *Mode->CurrentPartyFeature.ToString(), *StoneProofCell->ToString());
     }
+    if (GameCount == 1 && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA"))) return;
     const FName Feature = Mode->CurrentPartyFeature;
     const bool bReopenChannel = OnlyGame==TEXT("PartyFloodGates") && Mode->GetPlayers().Num()>=2
         && FParse::Param(FCommandLine::Get(),TEXT("ExpeditionArenaTerrainQA"));

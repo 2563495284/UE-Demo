@@ -1,6 +1,9 @@
 #include "Island/IslandGameMode.h"
 #include "Abilities/ExpeditionMudEffect.h"
 #include "Island/IslandBreakable.h"
+#include "Island/IslandSceneryVoxels.h"
+#include "Voxel/IslandRouteLayout.h"
+#include "Voxel/IslandRouteVoxel.h"
 #include "Island/IslandNeutralProp.h"
 #include "Island/IslandNeutralLayout.h"
 #include "Island/ExpeditionDock.h"
@@ -89,6 +92,9 @@ FString AIslandGameMode::InitNewPlayer(APlayerController* Player, const FUniqueN
     if (bExpeditionRoom && Error.IsEmpty())
     {
         auto* State = Player->GetPlayerState<AIslandPlayerState>();
+        const FString Model = UGameplayStatics::ParseOption(Options, TEXT("CrewModel"));
+        if (Model.Len() == 1 && FChar::IsDigit(Model[0]))
+            State->SetCharacterModel(Model[0] - TEXT('0'));
         FGuid::Parse(UGameplayStatics::ParseOption(Options, TEXT("RoomMember")), State->MemberId);
         if (!State->MemberId.IsValid())
         {
@@ -193,7 +199,9 @@ bool AIslandGameMode::PrepareRound(FString& Error)
     int32 LayoutSeed = static_cast<int32>(FPlatformTime::Cycles64());
 #if !UE_BUILD_SHIPPING
     // Designers can replay a layout in the normal front end without starting an automated probe.
-    FParse::Value(FCommandLine::Get(), TEXT("ExpeditionSeed="), LayoutSeed);
+    if (!FParse::Value(FCommandLine::Get(), TEXT("ExpeditionSeed="), LayoutSeed)
+        && GetNetMode() == NM_Standalone && FParse::Param(FCommandLine::Get(), TEXT("WreckPreview")))
+        LayoutSeed = 25;
 #endif
     if (IslandRules::GenerateLayout(LayoutSeed, Decoys, Circles, Density, RandomLayout, &Error, false, SearchObstacles, CanReachDecoy))
     {
@@ -246,6 +254,10 @@ bool AIslandGameMode::PrepareRound(FString& Error)
 #endif
         TArray<FIslandNeutralPlacement> Layout;
         IslandNeutral::Generate(Survey, LayoutSeed, HiddenLayout, Layout);
+        const auto Sites = IslandRouteLayout::Build(*GetWorld(), *Terrain, Survey, HiddenLayout, Layout);
+        GetWorld()->SpawnActor<AIslandVoxelEdits>();
+        for (const auto& Site : Sites)
+            AIslandRouteVoxel::Spawn(*GetWorld(), Site.Kind, Site.Location, Site.Yaw, Site.Variant);
         for (const auto& Placement : Layout)
         {
             const FTransform Transform(FRotator(0., Placement.Yaw, 0.), FVector(Placement.Location), IslandNeutral::SiteScale(Placement.Kind));
@@ -431,6 +443,20 @@ void AIslandGameMode::ChooseTeam(AIslandPlayerController& Player, int32 Team)
     PositionCrews();
 }
 
+void AIslandGameMode::ChooseCharacter(AIslandPlayerController& Player, int32 ModelIndex)
+{
+    const auto* Round = GetGameState<AIslandGameState>();
+    auto* Member = Player.GetPlayerState<AIslandPlayerState>();
+    if (!bExpeditionRoom || !Round || !Member || !IslandRules::IsCharacterModel(ModelIndex)) return;
+    if (Round->Phase != EIslandPhase::Waiting)
+    {
+        Player.ClientEditRejected(TEXT("只能在候船时更换角色。"));
+        return;
+    }
+    Member->SetCharacterModel(ModelIndex);
+    Player.ClientCharacterChosen(ModelIndex);
+}
+
 void AIslandGameMode::SetRoomReady(AIslandPlayerController& Player, bool bReady)
 {
     auto* Round = GetGameState<AIslandGameState>();
@@ -546,12 +572,19 @@ bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim)
 {
     const FVector Start = Hero.GetAimOrigin();
     FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandPropStrike), false, &Hero);
+    Query.bReturnFaceIndex=bExpeditionRoom;
     FHitResult Hit;
     if (AIslandNeutralProp::TraceShovel(*GetWorld(), Hit, Start, Start + Aim * AimReach, Query))
     {
-        if (auto* Neutral = Cast<AIslandNeutralProp>(Hit.GetActor()))
+        if (bExpeditionRoom)
         {
-            if (auto* Player = Cast<AIslandPlayerController>(Hero.GetController())) return Neutral->Strike(*Player, Hit);
+            auto* Player = Cast<AIslandPlayerController>(Hero.GetController());
+            const auto* Round = GetGameState<AIslandGameState>();
+            const bool bWide = Player && Round && Round->HasDecoyToolBoost(Player->GetTeam());
+            if (auto* Route = Cast<AIslandRouteVoxel>(Hit.GetActor())) return Route->Strike(Hit,bWide);
+            if (auto* Neutral = Cast<AIslandNeutralProp>(Hit.GetActor()))
+                if (Player && Neutral->Strike(*Player,Hit)) return true;
+            return IslandSceneryVoxels::Strike(Hit,bWide);
         }
         if (AIslandBreakable* Prop = Cast<AIslandBreakable>(Hit.GetActor()))
         {
@@ -573,6 +606,7 @@ void AIslandGameMode::RevealChestIfClear(int32 Index)
     if (!GetTerrain()->IsVolumeClear(FBox::BuildAABB(Center, IslandRules::ChestExtent))) return;
     if (AIslandChest* Chest = GetWorld()->SpawnActor<AIslandChest>(Center, FRotator::ZeroRotator))
     {
+        if (bExpeditionRoom) Chest->SeatAtReveal(*GetTerrain());
         Chest->SetPrize(bPrize);
         Exposed[Index] = Chest;
     }
@@ -793,22 +827,6 @@ bool AIslandGameMode::GiveClue(int32 Team, int32 Index)
     return true;
 }
 
-void AIslandGameMode::ScoutTreasureForWinner(int32 Team, int32 PreferredSite)
-{
-    if (!TeamClues.IsValidIndex(Team)) return;
-    FIslandClues& Snapshot = TeamClues[Team];
-    for (int32 Offset = 0; Offset < IslandRules::ClueCount; ++Offset)
-    {
-        const int32 Site = (PreferredSite + Offset) % IslandRules::ClueCount;
-        const uint8 Bit = 1u << Site;
-        if ((Snapshot.Mask | Snapshot.ScoutedMask) & Bit) continue;
-        Snapshot.ScoutedMask |= Bit;
-        Snapshot.Points[Site] = FVector2D(HiddenLayout.Centers[Site]);
-        SendClueSnapshot(Team);
-        return;
-    }
-}
-
 void AIslandGameMode::SendClueSnapshot(int32 Team)
 {
     for (AVoxelPlayerController* Player : GetPlayers())
@@ -830,7 +848,7 @@ void AIslandGameMode::PublishWinner(int32 Team)
         if (!TeamClues[Team].CanOpenPrize()) return;
         TeamClues[Team].bKeySpent = true;
         SendClueSnapshot(Team);
-        Round->DisguiseUntil = 0.;
+        Round->ClearDecoyEffect();
     }
     Round->Winner = Team;
     Round->Phase = EIslandPhase::Finished;
@@ -882,32 +900,58 @@ void AIslandGameMode::RestartIsland()
     }
 }
 
-FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player, TOptional<FVector> InlandTarget)
+TOptional<FVector> AIslandGameMode::FindStandingFloor(const AVoxelCharacter* Hero, FVector Start, double Reach) const
+{
+    const UCapsuleComponent* Capsule = Hero ? Hero->GetCapsuleComponent()
+        : GetDefault<AVoxelCharacter>()->GetCapsuleComponent();
+    // ReturnToStart releases crouch; reserve enough room even for a loser who entered the arena buried.
+    const double HalfHeight = FMath::Max(Capsule->GetScaledCapsuleHalfHeight(),
+        GetDefault<AVoxelCharacter>()->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() * Capsule->GetShapeScale());
+    const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), HalfHeight);
+    const FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandSafeReturn), false, Hero);
+    const FCollisionResponseParams Responses(Capsule->GetCollisionResponseToChannels());
+    FHitResult Hit;
+    if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, Start - FVector(0, 0, Reach), ECC_Visibility, Query)
+        || Hit.ImpactPoint.Z < 0 || Hit.ImpactNormal.Z < .72
+        || (!Cast<AVoxelTerrain>(Hit.GetActor()) && !Cast<AIslandBreakable>(Hit.GetActor())
+            && !Cast<AStaticMeshActor>(Hit.GetActor())))
+    {
+        return {};
+    }
+    const FVector Location = Hit.ImpactPoint + FVector(0, 0, HalfHeight + 4.0);
+    if (GetWorld()->OverlapBlockingTestByChannel(Location, FQuat::Identity, Capsule->GetCollisionObjectType(), Shape, Query, Responses))
+    {
+        return {};
+    }
+    return Location;
+}
+
+FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player, TOptional<FVector> InlandTarget,
+    TConstArrayView<FVector> KeepAwayFrom)
 {
     const FTransform& Original = Player.StartTransform;
     const AVoxelCharacter* Hero = Player.GetHero();
     const UCapsuleComponent* Capsule = Hero ? Hero->GetCapsuleComponent()
         : GetDefault<AVoxelCharacter>()->GetCapsuleComponent();
-    const double HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+    // ReturnToStart releases crouch; reserve enough room even for a loser who entered the arena buried.
+    const double HalfHeight = FMath::Max(Capsule->GetScaledCapsuleHalfHeight(),
+        GetDefault<AVoxelCharacter>()->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() * Capsule->GetShapeScale());
     const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), HalfHeight);
     const FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandSafeReturn), false, Hero);
     const FCollisionResponseParams Responses(Capsule->GetCollisionResponseToChannels());
+    const auto HasClearance = [&](const FVector& Position)
+    {
+        return !KeepAwayFrom.ContainsByPredicate([&](const FVector& Other)
+        {
+            return FVector::DistSquaredXY(Other, Position) < FMath::Square(500.);
+        });
+    };
     const auto FindFloor = [&](const FVector& Start, double Reach) -> TOptional<FTransform>
     {
-        FHitResult Hit;
-        if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, Start - FVector(0, 0, Reach), ECC_Visibility, Query)
-            || Hit.ImpactPoint.Z < 0 || Hit.ImpactNormal.Z < .72
-            || (!Cast<AVoxelTerrain>(Hit.GetActor()) && !Cast<AIslandBreakable>(Hit.GetActor())
-                && !Cast<AStaticMeshActor>(Hit.GetActor())))
-        {
-            return {};
-        }
-        const FVector Location = Hit.ImpactPoint + FVector(0, 0, HalfHeight + 4.0);
-        if (GetWorld()->OverlapBlockingTestByChannel(Location, FQuat::Identity, Capsule->GetCollisionObjectType(), Shape, Query, Responses))
-        {
-            return {};
-        }
-        return FTransform(Original.GetRotation(), Location);
+        if (!HasClearance(Start)) return {};
+        const auto Location = FindStandingFloor(Hero, Start, Reach);
+        if (!Location) return {};
+        return FTransform(Original.GetRotation(), Location.GetValue());
     };
 
     if (InlandTarget.IsSet())
@@ -966,7 +1010,8 @@ FTransform AIslandGameMode::FindSafeReturn(const AVoxelPlayerController& Player,
     {
         Outward = FVector::ForwardVector;
     }
-    const FVector Escape = Outward * FMath::Max(Original.GetLocation().Size2D() + 650.0, GetTerrain()->GetShoreExtent() + 800.0);
+    FVector Escape = Outward * FMath::Max(Original.GetLocation().Size2D() + 650.0, GetTerrain()->GetShoreExtent() + 800.0);
+    while (!HasClearance(Escape)) Escape += Outward * 550.;
     if (const TOptional<FTransform> Result = FindFloor(Escape + FVector(0, 0, 500), 550))
     {
         return Result.GetValue();
