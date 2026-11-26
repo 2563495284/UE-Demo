@@ -1,16 +1,10 @@
 #include "ActIslandFrontCommandlet.h"
+#include "ExpeditionDaylight.h"
+#include "ExpeditionSceneryArt.h"
 #include "Island/IslandFrontMode.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
-#include "Components/DirectionalLightComponent.h"
-#include "Components/SkyAtmosphereComponent.h"
-#include "Components/SkyLightComponent.h"
 #include "Components/StaticMeshComponent.h"
-#include "Engine/DirectionalLight.h"
-#include "Engine/ExponentialHeightFog.h"
-#include "Components/ExponentialHeightFogComponent.h"
-#include "Engine/PostProcessVolume.h"
-#include "Engine/SkyLight.h"
 #include "Engine/StaticMeshActor.h"
 #include "FileHelpers.h"
 #include "GameFramework/WorldSettings.h"
@@ -21,10 +15,19 @@ UActIslandFrontCommandlet::UActIslandFrontCommandlet()
     IsClient = IsServer = false;
 }
 
-int32 UActIslandFrontCommandlet::Main(const FString&)
+int32 UActIslandFrontCommandlet::Main(const FString& Params)
 {
     const TCHAR* Path = TEXT("/Game/TreasureIsland/L_IslandFront");
-    if (FPackageName::DoesPackageExist(Path)) return 0;
+    if (FPackageName::DoesPackageExist(Path))
+    {
+        const bool bScenery = FParse::Param(*Params,TEXT("RefreshScenery"));
+        const bool bLighting = FParse::Param(*Params,TEXT("RefreshLighting"));
+        if (!bScenery && !bLighting) return 0;
+        UWorld* Existing = UEditorLoadingAndSavingUtils::LoadMap(Path);
+        if (!Existing || (bScenery && !ExpeditionSceneryArt::DressHarbour(*Existing))) return 1;
+        if (bLighting) ExpeditionDaylight::Apply(*Existing, ExpeditionDaylight::ELocation::Harbour);
+        return UEditorLoadingAndSavingUtils::SaveMap(Existing,Path) ? 0 : 1;
+    }
     UWorld* World = UEditorLoadingAndSavingUtils::NewBlankMap(false);
     if (!World) return 1;
     World->GetWorldSettings()->DefaultGameMode = AIslandFrontMode::StaticClass();
@@ -69,22 +72,6 @@ int32 UActIslandFrontCommandlet::Main(const FString&)
     Cam->GetCameraComponent()->SetFieldOfView(62.f);
     Cam->GetCameraComponent()->bConstrainAspectRatio = false;
     Cam->SetActorLabel(TEXT("Harbour entrance view"));
-    auto* Sun = World->SpawnActor<ADirectionalLight>(FVector(0,0,1400),FRotator(-32,-47,0));
-    Sun->SetMobility(EComponentMobility::Movable);
-    auto* Light = CastChecked<UDirectionalLightComponent>(Sun->GetLightComponent());
-    Light->SetIntensity(4.5f);
-    Light->bAtmosphereSunLight = true;
-    World->SpawnActor<ASkyAtmosphere>();
-    auto* Sky = World->SpawnActor<ASkyLight>();
-    Sky->GetLightComponent()->SetMobility(EComponentMobility::Movable);
-    Sky->GetLightComponent()->SetIntensity(.95f);
-    auto* Fog = World->SpawnActor<AExponentialHeightFog>();
-    Fog->GetComponent()->SetFogDensity(.008f);
-    auto* Post = World->SpawnActor<APostProcessVolume>();
-    Post->bUnbound = true;
-    Post->Settings.bOverride_DynamicGlobalIlluminationMethod = true;
-    Post->Settings.DynamicGlobalIlluminationMethod = EDynamicGlobalIlluminationMethod::None;
-    Post->Settings.bOverride_ReflectionMethod = true;
-    Post->Settings.ReflectionMethod = EReflectionMethod::None;
-    return UEditorLoadingAndSavingUtils::SaveMap(World, Path) ? 0 : 1;
+    ExpeditionDaylight::Apply(*World, ExpeditionDaylight::ELocation::Harbour);
+    return ExpeditionSceneryArt::DressHarbour(*World) && UEditorLoadingAndSavingUtils::SaveMap(World, Path) ? 0 : 1;
 }

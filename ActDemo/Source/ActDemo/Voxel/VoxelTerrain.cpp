@@ -1,5 +1,10 @@
 #include "Voxel/VoxelTerrain.h"
+#if !UE_BUILD_SHIPPING
+#include "Tests/ExpeditionDecoyToolProof.h"
+#endif
 #include "Voxel/ExpeditionSurface.h"
+#include "Voxel/IslandRouteVoxel.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Voxel/ExpeditionImpact.h"
 #if !UE_BUILD_SHIPPING
 #include "Tests/ExpeditionWalk.h"
@@ -11,12 +16,14 @@
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
 #include "Components/StaticMeshComponent.h"
-#include "Containers/StaticArray.h"
+#include "VoxelSurfaceKernel.h"
 #include "EngineUtils.h"
-#include "Generators/MarchingCubes.h"
+#include "Engine/StaticMesh.h"
 #include "Misc/App.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ProceduralMeshComponent.h"
+#include "Serialization/CustomVersion.h"
 #include "UObject/ConstructorHelpers.h"
 
 struct FVoxelMeshBuild
@@ -29,6 +36,10 @@ struct FVoxelMeshBuild
 
 namespace
 {
+    const FGuid SearchCircleVersion(0x606858E0, 0x8F94453B, 0xA477256A, 0xBDF22F55);
+    constexpr int32 WideExpeditionCircles = 1;
+    const FCustomVersionRegistration RegisterSearchCircleVersion(SearchCircleVersion, WideExpeditionCircles, TEXT("ExpeditionSearchCircles"));
+
     TSharedPtr<FVoxelDensity, ESPMode::ThreadSafe> BuildDensity(EVoxelLayout Layout, TConstArrayView<FVoxelBrushStamp> Stamps)
     {
         auto Result = MakeShared<FVoxelDensity, ESPMode::ThreadSafe>(Layout);
@@ -39,40 +50,15 @@ namespace
         return Result;
     }
 
-    struct FChunkSamples
-    {
-        static constexpr int32 Width = VoxelPlayground::CellsPerChunk + 5;
-        TStaticArray<int16, Width * Width * Width> Values;
-
-        int16 Sample(int32 X, int32 Y, int32 Z) const
-        {
-            return Values[(X + 2) + Width * ((Y + 2) + Width * (Z + 2))];
-        }
-
-        FVector Gradient(const FIntVector& P) const
-        {
-            const int16* At = &Values[P.X + 2 + Width * (P.Y + 2 + Width * (P.Z + 2))];
-            return FVector(At[1] - At[-1], At[Width] - At[-Width], At[Width*Width] - At[-Width*Width]);
-        }
-    };
-
-    // Use GeometryCore's topology with direct edge indices for our fixed, dense 16-cell chunks.
-    // Adjacent cells share the same edge slot, including when their corner order is reversed.
-    struct FChunkTopology : UE::Geometry::FMarchingCubes
-    {
-        using FMarchingCubes::EdgeIndices;
-        using FMarchingCubes::TriTable;
-    };
-
     FProcMeshSection MeshChunk(const FVoxelDensity& Density, int32 Index, const FVoxelDensityPatch* Patch)
     {
         using namespace VoxelPlayground;
         constexpr int32 Side = CellsPerChunk;
-        constexpr int32 Width = FChunkSamples::Width;
-        constexpr int32 EdgeWidth = Side + 1;
+        constexpr int32 Width = VoxelSurfaceKernel::FChunkSamples::Width;
+        static_assert(Side == VoxelSurfaceKernel::CellsPerChunk && Spacing == VoxelSurfaceKernel::Spacing);
         const FIntVector First = Density.Grid.ChunkCoordinates(Index) * Side;
         const FVector Start(Density.Grid.Origin + First * Spacing);
-        FChunkSamples Samples;
+        VoxelSurfaceKernel::FChunkSamples Samples;
         for (int32 Z = 0; Z < Width; ++Z)
         {
             for (int32 Y = 0; Y < Width; ++Y)
@@ -80,7 +66,23 @@ namespace
                 Density.CopySampleRow(First + FIntVector(-2, Y - 2, Z - 2), Width, &Samples.Values[Width * (Y + Width * Z)]);
             }
         }
-        if (Patch)
+        // A detached structure can span many chunks. Limit each chunk's overlay
+        // pass to the smaller of its sample window and the sparse edit.
+        if (Patch && Patch->Samples.Num() > Samples.Values.Num())
+        {
+            const FIntVector StartPoint = First - FIntVector(2);
+            const FIntVector Low = StartPoint.ComponentMax(FIntVector::ZeroValue);
+            const FIntVector High = (StartPoint + FIntVector(Width - 1)).ComponentMin(Density.Grid.Cells);
+            for (int32 Z = Low.Z; Z <= High.Z; ++Z)
+                for (int32 Y = Low.Y; Y <= High.Y; ++Y)
+                {
+                    const int32 RowStart = Density.Grid.SampleIndex({Low.X, Y, Z});
+                    int16* Dest = &Samples.Values[Low.X - StartPoint.X + Width * (Y - StartPoint.Y + Width * (Z - StartPoint.Z))];
+                    for (int32 X = 0; X <= High.X - Low.X; ++X)
+                        if (const int16* Value = Patch->Samples.Find(RowStart + X)) Dest[X] = *Value;
+                }
+        }
+        else if (Patch)
         {
             const int32 Row = Density.Grid.Cells.X + 1;
             const int32 Plane = Row * (Density.Grid.Cells.Y + 1);
@@ -93,78 +95,17 @@ namespace
             }
         }
 
-        static const FIntVector Corners[] = {{0,0,0},{1,0,0},{1,0,1},{0,0,1},{0,1,0},{1,1,0},{1,1,1},{0,1,1}};
-        static constexpr int32 CornerOffsets[] = {0,1, 1+Width*Width,Width*Width, Width,Width+1,Width+1+Width*Width,Width+Width*Width};
-        TStaticArray<uint16, EdgeWidth * EdgeWidth * EdgeWidth * 3> EdgeVertices;
-        FMemory::Memset(EdgeVertices.GetData(), 0xff, sizeof(EdgeVertices));
-        uint32 Inside[EdgeWidth][EdgeWidth];
-        for (int32 Z = 0; Z < EdgeWidth; ++Z)
-            for (int32 Y = 0; Y < EdgeWidth; ++Y)
-            {
-                uint32 Bits = 0;
-                for (int32 X = 0; X < EdgeWidth; ++X) Bits |= uint32(Samples.Sample(X,Y,Z) < 0) << X;
-                Inside[Z][Y] = Bits;
-            }
-        FProcMeshSection Section;
-        for (int32 Z = 0; Z < Side; ++Z)
+        FProcMeshSection Section = VoxelSurfaceKernel::BuildChunk(Samples, Start);
+        if (Density.Layout == EVoxelLayout::Expedition)
         {
-            for (int32 Y = 0; Y < Side; ++Y)
+            for (FProcMeshVertex& Vertex : Section.ProcVertexBuffer)
             {
-                // Eight equal corner signs cannot emit a triangle. Skip whole spans of air or solid rock.
-                const uint32 AnySolid = Inside[Z][Y] | Inside[Z+1][Y] | Inside[Z][Y+1] | Inside[Z+1][Y+1];
-                const uint32 AllSolid = Inside[Z][Y] & Inside[Z+1][Y] & Inside[Z][Y+1] & Inside[Z+1][Y+1];
-                uint32 Crossings = (AnySolid | (AnySolid >> 1)) & ~(AllSolid & (AllSolid >> 1)) & ((1u << Side) - 1);
-                while (Crossings)
-                {
-                    const int32 X = FMath::CountTrailingZeros(Crossings);
-                    Crossings &= Crossings - 1;
-                    const int16* Cell = &Samples.Values[X + 2 + Width * (Y + 2 + Width * (Z + 2))];
-                    int32 Mask = 0;
-                    for (int32 C = 0; C < 8; ++C) Mask |= int32(Cell[CornerOffsets[C]] < 0) << C;
-                    const FIntVector Origin(X,Y,Z);
-                    const auto GetVertex = [&](int32 Edge) -> uint32
-                    {
-                        const int32 A = FChunkTopology::EdgeIndices[Edge][0], B = FChunkTopology::EdgeIndices[Edge][1];
-                        const FIntVector Delta = Corners[B] - Corners[A];
-                        const FIntVector Lower = Origin + Corners[A].ComponentMin(Corners[B]);
-                        const int32 Axis = Delta.X != 0 ? 0 : (Delta.Y != 0 ? 1 : 2);
-                        uint16& Cached = EdgeVertices[Axis + 3 * (Lower.X + EdgeWidth * (Lower.Y + EdgeWidth * Lower.Z))];
-                        if (Cached != MAX_uint16) return Cached;
-                        const double VA = Cell[CornerOffsets[A]] == 0 ? .01 : double(Cell[CornerOffsets[A]]);
-                        const double VB = Cell[CornerOffsets[B]] == 0 ? .01 : double(Cell[CornerOffsets[B]]);
-                        const double Alpha = VA / (VA - VB);
-                        const FVector Local = FVector(Origin + Corners[A]) + FVector(Delta) * Alpha;
-                        Cached = Section.ProcVertexBuffer.Num();
-                        FProcMeshVertex& Vertex = Section.ProcVertexBuffer.AddDefaulted_GetRef();
-                        Vertex.Position = Start + Local * Spacing;
-                        // A marching-cubes vertex lies on a grid edge, so its trilinear gradient
-                        // is the linear interpolation of the two endpoint gradients.
-                        Vertex.Normal = FMath::Lerp(Samples.Gradient(Origin + Corners[A]), Samples.Gradient(Origin + Corners[B]), Alpha)
-                            .GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
-                        FVector Tangent, Bitangent;
-                        Vertex.Normal.FindBestAxisVectors(Tangent, Bitangent);
-                        Vertex.Tangent = FProcMeshTangent(Tangent, false);
-                        Vertex.UV0 = FVector2D(Vertex.Position) / 100.;
-                        Section.SectionLocalBox += Vertex.Position;
-                        return Cached;
-                    };
-                    for (uint64 Triangles = FChunkTopology::TriTable[Mask]; Triangles; Triangles >>= 12)
-                    {
-                        const uint32 A = GetVertex(Triangles & 15);
-                        const uint32 B = GetVertex((Triangles >> 4) & 15);
-                        const uint32 C = GetVertex((Triangles >> 8) & 15);
-                        const auto& VA = Section.ProcVertexBuffer[A];
-                        const auto& VB = Section.ProcVertexBuffer[B];
-                        const auto& VC = Section.ProcVertexBuffer[C];
-                        const FVector Face = FVector::CrossProduct(VB.Position - VA.Position, VC.Position - VA.Position);
-                        if (Face.SizeSquared() <= UE_SMALL_NUMBER) continue;
-                        const bool bReverse = FVector::DotProduct(Face, VA.Normal + VB.Normal + VC.Normal) > 0.;
-                        Section.ProcIndexBuffer.Append({A, bReverse ? C : B, bReverse ? B : C});
-                    }
-                }
+                const FVector& P = Vertex.Position;
+                const int32 Surface = BaseHeight(Density.Layout, FMath::RoundToInt(P.X), FMath::RoundToInt(P.Y));
+                // Zero on original ground, positive into a cut, negative on a newly built mound.
+                Vertex.UV1.X = Surface - P.Z;
             }
         }
-        Section.bEnableCollision = !Section.ProcIndexBuffer.IsEmpty();
         return Section;
     }
 }
@@ -177,8 +118,12 @@ AVoxelTerrain::AVoxelTerrain()
     SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Origin")));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube"));
     FragmentMesh = Cube.Object;
-    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Rock(TEXT("/Game/LevelPrototyping/Materials/MI_PrototypeGrid_Gray"));
-    ExpeditionRockMaterial = Rock.Object;
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Ground(TEXT("/Game/TreasureIsland/FX/M_IslandGround"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Clod(TEXT("/Game/TreasureIsland/Art/Neutral/SM_ReefStone"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClodPigment(TEXT("/Game/TreasureIsland/Art/Neutral/M_ClodPigment"));
+    IslandGround = Ground.Object;
+    ExpeditionClodMesh = Clod.Object;
+    ExpeditionClodPigment = ClodPigment.Object;
 
     for (int32 Index = 0; Index < VoxelPlayground::ChunkCount; ++Index)
     {
@@ -192,12 +137,21 @@ void AVoxelTerrain::ConfigureChunk(UProceduralMeshComponent& Chunk)
 {
     Chunk.SetupAttachment(RootComponent);
     Chunk.SetCollisionProfileName(TEXT("BlockAll"));
-    if (Layout == EVoxelLayout::Expedition) Chunk.SetMaterial(0,ExpeditionRockMaterial);
+    if (Layout == EVoxelLayout::Expedition) Chunk.SetMaterial(0,IslandGround);
     Chunk.SetGenerateOverlapEvents(false);
     Chunk.SetCanEverAffectNavigation(false);
     Chunk.bUseComplexAsSimpleCollision = true;
     // Keep the visible surface and walking collision on the same committed version.
     Chunk.bUseAsyncCooking = false;
+}
+
+void AVoxelTerrain::ApplyBakedGroundMaterial(UProceduralMeshComponent& Tile) const
+{
+    // Old maps saved the whitebox grid as a per-component override. Keep other authored surfaces.
+    const UMaterialInterface* Current = Tile.GetMaterial(0);
+    if (!Tile.GetNumOverrideMaterials() || !Current || Current->GetPathName() ==
+        TEXT("/Game/LevelPrototyping/Materials/MI_PrototypeGrid_Gray.MI_PrototypeGrid_Gray"))
+        Tile.SetMaterial(0,IslandGround);
 }
 
 UProceduralMeshComponent* AVoxelTerrain::CreateChunk(int32 Index)
@@ -221,10 +175,9 @@ AVoxelTerrain* AVoxelTerrain::Find(UWorld* World)
 
 uint32 AVoxelTerrain::GetInitialChecksum() const
 {
-    uint32 Hash = GetChecksum();
-    // Include the terrain edit protocol revision in the expedition room readiness check.
-    constexpr uint32 ExpeditionEditProtocol = 4;
-    if (Layout == EVoxelLayout::Expedition) Hash = HashCombineFast(Hash, ExpeditionEditProtocol);
+    // All layouts replay the same grounded edit protocol on every peer.
+    constexpr uint32 TerrainEditProtocol = 6;
+    uint32 Hash = HashCombineFast(GetChecksum(), TerrainEditProtocol);
     if (Layout != EVoxelLayout::Playground)
     {
         for (const FIslandSearchCircle& Circle : SearchCircles)
@@ -261,7 +214,7 @@ void AVoxelTerrain::BakeExpeditionSurface()
             continue;
         }
         if (!BakedTiles[Index]) BakedTiles[Index]=MakeSurfaceComponent(true);
-        if (!BakedTiles[Index]->GetNumOverrideMaterials()) BakedTiles[Index]->SetMaterial(0,ExpeditionRockMaterial);
+        ApplyBakedGroundMaterial(*BakedTiles[Index]);
         BakedTiles[Index]->SetProcMeshSection(0,Section);
     }
 }
@@ -428,15 +381,26 @@ void AVoxelTerrain::SetSearchCircle(int32 Index, FIslandSearchCircle Circle)
 }
 #endif
 
+void AVoxelTerrain::Serialize(FArchive& Ar)
+{
+    Super::Serialize(Ar);
+    Ar.UsingCustomVersion(SearchCircleVersion);
+}
+
 void AVoxelTerrain::PostLoad()
 {
     Super::PostLoad();
+    if (Layout == EVoxelLayout::Expedition && GetLinkerCustomVersion(SearchCircleVersion) < WideExpeditionCircles)
+    {
+        for (FIslandSearchCircle& Circle : SearchCircles)
+            if (Circle.Radius == 410) Circle.Radius = IslandRules::ExpeditionSearchRadius;
+    }
     // The editor temporarily hides coarse tiles underneath its transient sculpt preview.
     // A level saved during a stroke must reload its original baked collision and visibility.
     for (UProceduralMeshComponent* Tile : BakedTiles)
     {
         if (!Tile) continue;
-        if (!Tile->GetNumOverrideMaterials()) Tile->SetMaterial(0,ExpeditionRockMaterial);
+        ApplyBakedGroundMaterial(*Tile);
         Tile->SetVisibility(true);
         Tile->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
     }
@@ -446,13 +410,14 @@ void AVoxelTerrain::BeginPlay()
 {
     Super::BeginPlay();
 #if !UE_BUILD_SHIPPING
-    if (Layout == EVoxelLayout::Expedition && HasAuthority() && FParse::Param(FCommandLine::Get(),TEXT("ExpeditionWalkQA")))
+    if (Layout == EVoxelLayout::Expedition && HasAuthority() && (FParse::Param(FCommandLine::Get(),TEXT("ExpeditionWalkQA"))
+        || (GetNetMode() == NM_Standalone && FParse::Param(FCommandLine::Get(),TEXT("WreckPreview")))))
         GetWorld()->SpawnActor<AExpeditionWalk>();
 #endif
     if (Layout == EVoxelLayout::Expedition)
     {
-        for (UProceduralMeshComponent* Chunk : MeshChunks) if (Chunk) Chunk->SetMaterial(0,ExpeditionRockMaterial);
-        for (UProceduralMeshComponent* Tile : BakedTiles) if (Tile && !Tile->GetNumOverrideMaterials()) Tile->SetMaterial(0,ExpeditionRockMaterial);
+        for (UProceduralMeshComponent* Chunk : MeshChunks) if (Chunk) Chunk->SetMaterial(0,IslandGround);
+        for (UProceduralMeshComponent* Tile : BakedTiles) if (Tile) ApplyBakedGroundMaterial(*Tile);
     }
     MeshChunks.SetNum(FVoxelGrid::ForLayout(Layout).NumChunks());
     StartBuild({}, {}, {}, {});
@@ -574,6 +539,10 @@ void AVoxelTerrain::StartBuild(FVoxelDensityPatch Patch, TOptional<FVoxelEdit> E
                 if (Edit.IsSet())
                 {
                     Terrain->AppliedSequence = Edit->Sequence;
+#if !UE_BUILD_SHIPPING
+                    static const bool bCheckDecoyTools = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA"));
+                    if (bCheckDecoyTools) FExpeditionDecoyToolProof::ObserveCommitted(*Terrain, *Edit);
+#endif
                     if (Terrain->CanSeeExcavation(Edit.GetValue()))
                     {
                         Terrain->SpawnFragments(Edit.GetValue());
@@ -631,7 +600,27 @@ void AVoxelTerrain::Commit(FVoxelMeshBuild& Build)
         }
     }
     Density = MoveTemp(Build.Density);
+    FBox LostSupport(ForceInit);
+    if (Layout == EVoxelLayout::Expedition && HasAuthority())
+    {
+        // Include remote material removed by grounding as well as the brush itself.
+        // A fill that only adds material cannot sever any existing attachment.
+        for (const auto& Change : Build.Patch.Samples)
+        {
+            const FIntVector Cell = Density->Grid.SampleCoordinates(Change.Key);
+            if (Change.Value > Density->Sample(Cell))
+                LostSupport += FVector(Density->Grid.Origin + Cell * VoxelPlayground::Spacing);
+        }
+    }
     Density->Apply(Build.Patch);
+    if (LostSupport.IsValid)
+    {
+        const FBox Changed = LostSupport.ExpandBy(VoxelPlayground::Spacing);
+        for (TActorIterator<AIslandRouteVoxel> It(GetWorld()); It; ++It)
+            if (It->Field()->Bounds.GetBox().ExpandBy(VoxelPlayground::Spacing).Intersect(Changed))
+                It->RefreshGrounding(*this);
+        IslandSceneryVoxels::CheckFoundations(*GetWorld(), Changed);
+    }
 }
 
 bool AVoxelTerrain::CanSeeExcavation(const FVoxelEdit& Edit) const
@@ -654,22 +643,32 @@ void AVoxelTerrain::SpawnFragments(const FVoxelEdit& Edit)
     if (!Local || !Local->IsLocalController() || !Local->PlayerCameraManager) return;
     // The fist-sized stones are local feedback around a strike.
     if (FVector::DistSquared(Local->PlayerCameraManager->GetCameraLocation(), FVector(Edit.Center)) > FMath::Square(2600.)) return;
+    const bool bIsland = Layout == EVoxelLayout::Expedition && ExpeditionClodMesh && ExpeditionClodPigment;
     if (!Debris)
     {
         Debris = NewObject<UInstancedStaticMeshComponent>(this);
         Debris->SetupAttachment(RootComponent);
-        Debris->SetStaticMesh(FragmentMesh);
+        Debris->SetStaticMesh(bIsland ? ExpeditionClodMesh.Get() : FragmentMesh.Get());
+        if (bIsland)
+        {
+            Debris->SetNumCustomDataFloats(5);
+            Debris->SetMaterial(0, ExpeditionClodPigment);
+        }
         Debris->SetMobility(EComponentMobility::Movable);
         Debris->SetCollisionEnabled(ECollisionEnabled::NoCollision);
         Debris->SetCanEverAffectNavigation(false);
         Debris->SetCastShadow(false);
         Debris->RegisterComponent();
     }
+    const float Depth = bIsland ? VoxelPlayground::BaseHeight(Layout, Edit.Center.X, Edit.Center.Y) - Edit.Center.Z : 0.f;
     for (int32 Index = 0; Index < 7; ++Index)
     {
         FTransform Transform(FMath::VRand().Rotation(), FVector(Edit.Center) + FMath::VRand() * 40., FVector(FMath::FRandRange(.055f, .13f)));
-        Fragments.Add({Transform, FMath::VRand() * 210. + FVector(0, 0, 180), 0.f});
+        // The original strike supplies the material sample while the clod tumbles through the air.
+        const int32 Slot = Fragments.Add({Transform, FMath::VRand() * 210. + FVector(0, 0, 180), 0.f,
+            {float(Edit.Center.X), float(Edit.Center.Y), float(Edit.Center.Z), Depth, Edit.SurfaceNormal.Z / 1000.f}});
         if (Fragments.Num() > Debris->GetInstanceCount()) Debris->AddInstance(Transform, true);
+        if (bIsland) Debris->SetCustomData(Slot, MakeArrayView(Fragments[Slot].SoilSample));
     }
     SetActorTickEnabled(true);
 }
@@ -685,6 +684,8 @@ void AVoxelTerrain::Tick(float DeltaSeconds)
         if (Fragment.Age >= .45f)
         {
             Fragments.RemoveAtSwap(Index, 1, EAllowShrinking::No);
+            if (Debris->NumCustomDataFloats && Fragments.IsValidIndex(Index))
+                Debris->SetCustomData(Index, MakeArrayView(Fragments[Index].SoilSample));
             continue;
         }
         Fragment.Velocity.Z -= 630.f * DeltaSeconds;

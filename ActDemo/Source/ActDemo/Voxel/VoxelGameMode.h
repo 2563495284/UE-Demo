@@ -20,7 +20,7 @@ public:
     void ReceiveReady(AVoxelPlayerController& Player, uint32 Checksum);
     void RequestEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim);
     // Server-only. The impact uses the first blocking surface; burial uses a fixed foot anchor.
-    void QueueMudLanding(const FVector& Impact, const FVector& Normal, TFunction<void(bool)> Completion = {});
+    void QueueMudLanding(const FVector& Impact, const FVector& Normal, bool bWideFootprint, TFunction<void(bool)> Completion = {});
     void QueueBurialLayer(AVoxelCharacter& Victim, const FVector& FootAnchor, int32 Layer, TFunction<void(bool)> Completion = {});
     virtual void RecoverPlayer(AVoxelPlayerController& Player);
     AVoxelTerrain* GetTerrain() const { return Terrain; }
@@ -45,7 +45,7 @@ protected:
     virtual void RoundSetupFailed(const FString& Error) {}
     virtual bool StopOnGuestExit() const { return true; }
     virtual bool PrepareRound(FString& Error) { return true; }
-    virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim) { return false; }
+    virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim);
     virtual void OnRoundStarted() {}
     virtual void OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source) {}
     virtual void UpdateEnvironment();
@@ -54,6 +54,7 @@ protected:
     const TArray<TObjectPtr<AVoxelPlayerController>>& GetPlayers() const { return Players; }
     void FinishRound(const FString& Message);
     void EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFunction<void(bool)> Completion);
+    bool CanStartEnvironmentFill(const TArray<FVector>& Centers) const;
 
 private:
     friend class AVoxelPlaygroundProbe;
@@ -72,6 +73,7 @@ private:
     };
 
     void EnqueueMud(FVoxelEdit Edit, TFunction<void(bool)> Completion);
+    bool MakeEnvironmentFill(const TArray<FVector>& Centers, FVoxelEdit& Fill) const;
     bool CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts = nullptr) const;
     void EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, TOptional<FIntVector> ProbeCenter);
     bool ResolveEdit(const FRequest& Request, AVoxelCharacter& Hero, FVoxelEdit& Edit) const;

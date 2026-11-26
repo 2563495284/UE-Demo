@@ -36,12 +36,15 @@ struct FVoxelEdit
     UPROPERTY() EVoxelAction Action = EVoxelAction::Punch;
     UPROPERTY() FIntVector Center = FIntVector::ZeroValue;
     UPROPERTY() uint8 BrushId = 0;
+    // The server records the footprint with the edit, so replay does not need the current crew buff.
+    UPROPERTY() bool bWideFootprint = false;
+    int32 FootprintScale() const { return bWideFootprint ? 2 : 1; }
     // Surface direction as fixed-point thousandths; all peers evaluate the same cut.
     UPROPERTY() FIntVector SurfaceNormal = FIntVector(0, 0, 1000);
     UPROPERTY() TArray<FVoxelProtectedBox> ProtectedBoxes;
     // All lobes of an environmental sand spill share one sequence and collision commit.
     UPROPERTY() TArray<FIntVector> ExtraFillCenters;
-    static constexpr int32 MaxFillCenters = 64;
+    static constexpr int32 MaxFillCenters = 128;
 };
 
 USTRUCT()
@@ -91,6 +94,7 @@ struct FVoxelGrid
     FIntVector ChunkCoordinates(int32 Index) const;
     bool Contains(const FIntVector& Point) const;
     int32 SampleIndex(const FIntVector& Point) const;
+    FIntVector SampleCoordinates(int32 Index) const;
     bool IsValidEdit(const FVoxelEdit& Edit) const;
 };
 
@@ -112,6 +116,7 @@ struct FVoxelDensity
     bool IsVolumeClear(const FBox& Box) const;
     bool IsVolumeSolid(const FBox& Box) const;
     ACTDEMO_API TOptional<double> SurfaceAt(FVector2D Position) const;
+    ACTDEMO_API double SignedDistanceAt(FVector World) const;
     int32 ShoreDistance(int32 X, int32 Y) const { return VoxelPlayground::ShoreDistance(Layout, X, Y); }
     const TSet<int32>& EditedColumns() const { return PromotedColumns; }
     ACTDEMO_API uint32 Checksum() const;
@@ -121,9 +126,12 @@ struct FVoxelDensity
     const EVoxelLayout Layout;
 
 private:
-    FVoxelDensityPatch PrepareStamp(const FVoxelBrushStamp& Stamp, const FVoxelEdit* PartyEdit) const;
+    FVoxelDensityPatch PrepareStamp(const FVoxelBrushStamp& Stamp, const FVoxelEdit* PartyEdit, bool& bTouchesSolid) const;
+    void ResolveSupport(FVoxelDensityPatch& Patch, bool bAdd, bool bTouchesSolid) const;
     bool VolumeMatches(const FBox& Box, bool bSolid) const;
     TArray<int16> Samples;
+    // Columns in which the original terrain touches the world's foundation layer.
+    TBitArray<> Foundation;
     // The expedition base is a cooked height surface. Retain only column boundaries and changed samples.
     TArray<FIntPoint> BaseColumns;
     // Only edited blocks allocate the full field. Meshing can then read a contiguous row at a time.

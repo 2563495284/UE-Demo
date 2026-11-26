@@ -7,7 +7,7 @@
 #include "VoxelCharacter.generated.h"
 
 class AVoxelTerrain;
-class UAnimSequence;
+class UCameraComponent;
 class USpringArmComponent;
 class UExpeditionAnimalComponent;
 
@@ -27,6 +27,9 @@ public:
     UFUNCTION(NetMulticast, Unreliable) void MulticastExpeditionDig();
 
     FVector GetAimOrigin() const;
+    bool IsInFirstPersonView() const;
+    UCameraComponent* GetEyeCamera() const { return EyeCamera; }
+    void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
     void MoveOnGrid(const FVector2D& Input, double ViewYaw);
     void SetWantsClimb(bool bEnabled);
     bool IsClimbingRock() const;
@@ -46,7 +49,9 @@ private:
     UPROPERTY(VisibleAnywhere) TObjectPtr<UAbilitySystemComponent> AbilitySystem;
     UPROPERTY(VisibleAnywhere) TObjectPtr<UExpeditionAnimalComponent> ExpeditionAnimal;
     UPROPERTY() TObjectPtr<USpringArmComponent> Boom;
-    UPROPERTY() TObjectPtr<UAnimSequence> SwingAnimation;
+    UPROPERTY(VisibleAnywhere) TObjectPtr<UCameraComponent> EyeCamera;
+    float ToolStrokeRemaining = 0.f;
+    float ToolStrokeDegrees = 0.f;
     bool bGrantedExpeditionAbilities = false;
     bool bClearingMud = false;
     TWeakObjectPtr<AVoxelTerrain> Terrain;

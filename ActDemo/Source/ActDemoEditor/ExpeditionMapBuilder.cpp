@@ -1,14 +1,10 @@
 #include "ExpeditionMapBuilder.h"
+#include "ExpeditionDaylight.h"
+#include "ExpeditionSceneryArt.h"
 
-#include "Components/DirectionalLightComponent.h"
 #include "Components/SceneComponent.h"
-#include "Components/SkyLightComponent.h"
-#include "Components/SkyAtmosphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
-#include "Engine/DirectionalLight.h"
-#include "Engine/PostProcessVolume.h"
-#include "Engine/SkyLight.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "FileHelpers.h"
@@ -207,21 +203,32 @@ namespace
         }
         for (TActorIterator<AExpeditionLandmark> It(&World); It; ++It) Marks.Add(It->ClueIndex);
         if (Docks.Num()!=8 || Marks.Num()!=4) return false;
-        Terrain->RebuildEditorPreview();
-        const FVoxelDensity* Density=Terrain->GetEditorDensity();
+        // ApplyEditorStamps records authored edits. Probe a transient copy because verification
+        // can be combined with a refresh that saves this same world after the check.
+        FActorSpawnParameters Params;
+        Params.Template = Terrain;
+        Params.ObjectFlags = RF_Transient;
+        Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        AVoxelTerrain* Preview = World.SpawnActor<AVoxelTerrain>(Terrain->GetClass(), Terrain->GetActorTransform(), Params);
+        if (!Preview) return false;
+        Preview->RebuildEditorPreview();
+        const FVoxelDensity* Density=Preview->GetEditorDensity();
         FIslandTreasureLayout Hunt;
         FString Error;
-        bool bValid=CheckLandingRoutes(World,*Terrain);
-        bValid &= Density && IslandRules::GenerateLayout(0,0,Terrain->GetSearchCircles(),*Density,Hunt,&Error,true);
+        const bool bRoutes = CheckLandingRoutes(World,*Preview);
+        const bool bLayout = Density && IslandRules::GenerateLayout(0,0,Terrain->GetSearchCircles(),*Density,Hunt,&Error,true,IslandRules::CollectSearchObstacles(World));
         FHitResult Hit;
-        bValid &= Terrain->TraceEditorPreview({0,0,1600},{0,0,-600},Hit);
-        const int32 Height=Ground(0,0);
-        const FVoxelBrushStamp Stroke{{0,0,Height},125,false};
+        const bool bHitBefore = Preview->TraceEditorPreview({0,0,1600},{0,0,-600},Hit);
         const double Before=Hit.ImpactPoint.Z;
-        // The verification world is transient to the process. Never save the test dig.
-        bValid &= Terrain->ApplyEditorStamps(MakeArrayView(&Stroke,1));
-        bValid &= Terrain->TraceEditorPreview({0,0,1600},{0,0,-600},Hit) && Hit.ImpactPoint.Z < Before-70;
-        Terrain->ClearEditorPreview();
+        const int32 Height = FMath::RoundToInt(Before);
+        const FVoxelBrushStamp Stroke{{0,0,Height},125,false};
+        const bool bEdited = bHitBefore && Preview->ApplyEditorStamps(MakeArrayView(&Stroke,1));
+        const bool bHitAfter = Preview->TraceEditorPreview({0,0,1600},{0,0,-600},Hit);
+        const bool bValid = bRoutes && bLayout && bHitBefore && bEdited && bHitAfter && Hit.ImpactPoint.Z < Before-70;
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_MAP_DIG routes=%d layout=%d hit_before=%d before_z=%.1f stamp_z=%d edited=%d hit_after=%d after_z=%.1f"),
+            bRoutes,bLayout,bHitBefore,Before,Height,bEdited,bHitAfter,Hit.ImpactPoint.Z);
+        Preview->ClearEditorPreview();
+        Preview->Destroy();
         UE_LOG(LogTemp,Display,TEXT("EXPEDITION_MAP_CHECK docks=%d landmarks=%d valid=%d error=%s"),Docks.Num(),Marks.Num(),bValid,*Error);
         return bValid;
     }
@@ -234,20 +241,24 @@ int32 BuildExpeditionMap(const FString& Params)
     {
         const bool bRebake = FParse::Param(*Params,TEXT("RebakeExpeditionSurface"));
         const bool bVerify = FParse::Param(*Params,TEXT("VerifyExpedition"));
-        if (bRebake || bVerify)
+        const bool bRefreshArt = FParse::Param(*Params,TEXT("RefreshScenery"));
+        const bool bLighting = FParse::Param(*Params,TEXT("RefreshLighting"));
+        if (bRebake || bVerify || bRefreshArt || bLighting)
         {
             UWorld* Existing=UEditorLoadingAndSavingUtils::LoadMap(Path);
             if (!Existing) return 1;
+            if (bRefreshArt && !ExpeditionSceneryArt::DressIsland(*Existing)) return 1;
+            if (bLighting) ExpeditionDaylight::Apply(*Existing, ExpeditionDaylight::ELocation::Island);
             if (bRebake)
             {
                 AVoxelTerrain* Terrain=AVoxelTerrain::Find(Existing);
                 if (!Terrain || Terrain->Layout!=Layout) return 1;
                 Terrain->BakeExpeditionSurface();
                 for (TActorIterator<AExpeditionDock> Dock(Existing); Dock; ++Dock) Dock->RefreshLandingNumber();
-                if (!UEditorLoadingAndSavingUtils::SaveMap(Existing,Path)) return 1;
                 UE_LOG(LogTemp,Display,TEXT("EXPEDITION_SURFACE_BAKED preserved authored actors and brush strokes"));
             }
             if (bVerify && !Verify(*Existing)) return 1;
+            if ((bRebake || bRefreshArt || bLighting) && !UEditorLoadingAndSavingUtils::SaveMap(Existing,Path)) return 1;
         }
         UE_LOG(LogTemp, Display, TEXT("VOXEL_MAP_READY %s (existing authored map)"),Path);
         return 0;
@@ -265,7 +276,7 @@ int32 BuildExpeditionMap(const FString& Params)
     const FIntPoint Regions[]={{4300,1780},{-1780,4300},{-4300,-1780},{1780,-4300}};
     for (int32 Index=0;Index<4;++Index)
     {
-        Terrain->SetSearchCircle(Index,{Regions[Index],410});
+        Terrain->SetSearchCircle(Index,{Regions[Index],IslandRules::ExpeditionSearchRadius});
         Landmark(Art,Index,FVector2D(Regions[Index]));
     }
     Terrain->BakeExpeditionSurface();
@@ -305,20 +316,8 @@ int32 BuildExpeditionMap(const FString& Params)
             Mesh->SetWorldScale3D({.55,.55,H/100.});
         }
     }
-    auto* Sun=World->SpawnActor<ADirectionalLight>(FVector(0,0,1200),FRotator(-48,-34,0));
-    Sun->SetMobility(EComponentMobility::Movable);
-    Sun->GetLightComponent()->SetIntensity(5.f);
-    CastChecked<UDirectionalLightComponent>(Sun->GetLightComponent())->bAtmosphereSunLight=true;
-    World->SpawnActor<ASkyAtmosphere>();
-    auto* Sky=World->SpawnActor<ASkyLight>();
-    Sky->GetLightComponent()->SetMobility(EComponentMobility::Movable);
-    Sky->GetLightComponent()->SetIntensity(1.5f);
-    auto* Lighting=World->SpawnActor<APostProcessVolume>();
-    Lighting->bUnbound=true;
-    Lighting->Settings.bOverride_DynamicGlobalIlluminationMethod=true;
-    Lighting->Settings.DynamicGlobalIlluminationMethod=EDynamicGlobalIlluminationMethod::None;
-    Lighting->Settings.bOverride_ReflectionMethod=true;
-    Lighting->Settings.ReflectionMethod=EReflectionMethod::None;
+    ExpeditionDaylight::Apply(*World, ExpeditionDaylight::ELocation::Island);
+    if (!ExpeditionSceneryArt::DressIsland(*World)) return 1;
     if (!UEditorLoadingAndSavingUtils::SaveMap(World,Path)) return 1;
     UE_LOG(LogTemp,Display,TEXT("VOXEL_MAP_READY %s (eight landings, four excavation shelves, baked surface)"),Path);
     return FParse::Param(*Params,TEXT("VerifyExpedition")) && !Verify(*World) ? 1 : 0;

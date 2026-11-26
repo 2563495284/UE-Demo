@@ -1,4 +1,5 @@
 #include "Island/IslandState.h"
+#include "Island/ExpeditionAnimalComponent.h"
 #include "Island/IslandWorld.h"
 #include "GameFramework/PlayerController.h"
 #include "Net/UnrealNetwork.h"
@@ -16,16 +17,66 @@ void AIslandGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
     DOREPLIFETIME(AIslandGameState, LaunchedTeams);
     DOREPLIFETIME(AIslandGameState, StartAtServerTime);
     DOREPLIFETIME(AIslandGameState, RoomNotice);
+    DOREPLIFETIME(AIslandGameState, PartyStartedAt);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerName);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerTeam);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerMask);
+    DOREPLIFETIME(AIslandGameState, DecoyToolBoostMask);
+    DOREPLIFETIME(AIslandGameState, ActiveDecoyEvent);
+    DOREPLIFETIME(AIslandGameState, PartyWinnerUntil);
+    DOREPLIFETIME(AIslandGameState, PartyOutcome);
+    DOREPLIFETIME(AIslandGameState, PartyDecoyEvent);
+    DOREPLIFETIME(AIslandGameState, PartyOpeningTeam);
+    DOREPLIFETIME(AIslandGameState, PartySite);
+    DOREPLIFETIME(AIslandGameState, PartyRewardMask);
+    DOREPLIFETIME(AIslandGameState, SpentFalsePoints);
+}
+
+void AIslandGameState::BeginDecoyEffect()
+{
+    if (!IslandRules::IsPersistentDecoyEvent(PartyDecoyEvent)) return;
+    ActiveDecoyEvent = PartyDecoyEvent;
+    DecoyToolBoostMask = ActiveDecoyEvent == EIslandDecoyEvent::WideTools ? PartyWinnerMask : 0;
+    ForceNetUpdate();
+}
+
+void AIslandGameState::ClearDecoyEffect()
+{
+    ActiveDecoyEvent = EIslandDecoyEvent::None;
+    DecoyToolBoostMask = 0;
+    ForceNetUpdate();
 }
 
 void AIslandPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(AIslandPlayerState, Team);
+    DOREPLIFETIME(AIslandPlayerState, SelectedCharacter);
     DOREPLIFETIME(AIslandPlayerState, bHost);
     DOREPLIFETIME(AIslandPlayerState, bRoomReady);
     DOREPLIFETIME(AIslandPlayerState, bMapReady);
     DOREPLIFETIME_CONDITION(AIslandPlayerState, LockView, COND_OwnerOnly);
+}
+
+int32 AIslandPlayerState::GetCharacterModel() const
+{
+    return IslandRules::IsCharacterModel(SelectedCharacter) ? SelectedCharacter : uint32(GetPlayerId()) % IslandRules::CharacterModelCount;
+}
+
+UStaticMesh* AIslandPlayerState::GetPartyCharacterMesh(bool& bLongPaws) const
+{
+    const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
+    if (!Round || !Round->bRoomLobby || Round->IsIdentityDisguised()) return nullptr;
+    const int32 Model = GetCharacterModel();
+    bLongPaws = Model == 1;
+    return GetDefault<UExpeditionAnimalComponent>()->GetCharacterMesh(Model);
+}
+
+void AIslandPlayerState::SetCharacterModel(int32 ModelIndex)
+{
+    if (!HasAuthority() || !IslandRules::IsCharacterModel(ModelIndex) || SelectedCharacter == ModelIndex) return;
+    SelectedCharacter = ModelIndex;
+    ForceNetUpdate();
 }
 
 void AIslandPlayerState::SetLockView(const FIslandLockView& NewView)

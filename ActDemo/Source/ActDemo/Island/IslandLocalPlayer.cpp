@@ -1,4 +1,5 @@
 #include "Island/IslandLocalPlayer.h"
+#include "Island/IslandRules.h"
 
 FString UIslandLocalPlayer::GetGameLoginOptions() const
 {
@@ -6,5 +7,8 @@ FString UIslandLocalPlayer::GetGameLoginOptions() const
     {
         MemberId = FGuid::NewGuid();
     }
-    return TEXT("RoomMember=") + MemberId.ToString();
+    FString Options = TEXT("RoomMember=") + MemberId.ToString();
+    if (IslandRules::IsCharacterModel(PreferredCharacter))
+        Options += FString::Printf(TEXT("?CrewModel=%d"), PreferredCharacter);
+    return Options;
 }

@@ -11,11 +11,11 @@ bash Scripts/actdemo.sh island-host
 bash Scripts/actdemo.sh island-join 192.168.1.42
 ```
 
-将示例 IP 换成房主的局域网 IP。其他 Mac 只需同一份完整 `ActDemo.app`，可在它所在的目录运行以下命令。
+将示例 IP 换成房主的局域网 IP。其他 Mac 只需同一份完整 `远征岛.app`，可在它所在的目录运行以下命令。
 
 ```sh
-open -n -a "$PWD/ActDemo.app" --args '/Game/TreasureIsland/L_TreasureIsland?listen' -windowed -ResX=1280 -ResY=720
-open -n -a "$PWD/ActDemo.app" --args '192.168.1.42:7777' -windowed -ResX=1280 -ResY=720
+open -n "$PWD/远征岛.app" --args '/Game/TreasureIsland/L_TreasureIsland?listen' -windowed -ResX=1280 -ResY=720
+open -n "$PWD/远征岛.app" --args '192.168.1.42:7777' -windowed -ResX=1280 -ResY=720
 ```
 
 WASD 移动，鼠标控制镜头，空格跳，左键凿岩，右键挖脚下，Q 回填，按住 Shift 攀爬。按住 Tab 看藏宝图，靠近已露出的箱子按 E，长按 R 两秒回本队码头。角色在岛外水面下连续三秒会溺亡，一秒后回码头，已获得的队内线索和全场地形保留。结算后由房主按 Enter 重开，重新生成宝箱并恢复原始地形。
@@ -61,7 +61,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --scenario party-timeout 
 
 派对测试通过玩家控制器注入空格键，覆盖玩法确认及返回海岛后的跳跃。需要重建默认插件的 GameFeatureData 时，先编译再运行 `bash Scripts/actdemo.sh party-feature`。
 
-默认归档在 `Builds/TreasureIsland/Mac/ActDemo.app`，自动化日志在 `ActDemo/Saved/IslandQA`。六进程回归通过真实 NetDriver 测试挖箱、开箱、结算、重开和可靠编辑复制。探针直接布置角色和压力测试的笔刷落点，以便重复跑相同情景。探针使用正常房主编辑队列、角色挖地入口和客户端开箱 RPC。队内隔离根据每个独立进程持有的线索坐标和交点验证。帧时间由一台启用 Metal 的房主进程采样，五个客户端使用 NullRHI。
+默认归档在 `Builds/TreasureIsland/Mac/远征岛.app`，自动化日志在 `ActDemo/Saved/IslandQA`。六进程回归通过真实 NetDriver 测试挖箱、开箱、结算、重开和可靠编辑复制。探针直接布置角色和压力测试的笔刷落点，以便重复跑相同情景。探针使用正常房主编辑队列、角色挖地入口和客户端开箱 RPC。队内隔离根据每个独立进程持有的线索坐标和交点验证。帧时间由一台启用 Metal 的房主进程采样，五个客户端使用 NullRHI。
 
 弱网模式为六个进程分别配置 `-PktLag=40 -PktLoss=2`，模拟约 80 ms 往返、每端 2% 出站丢包。碰撞延迟从进程收到请求或编辑指令计到该进程的碰撞生效。性能门槛为房主帧时间 P95 ≤ 33.3 ms，房主和每个来宾的碰撞延迟 P95 ≤ 150 ms。
 
@@ -94,6 +94,7 @@ UE 5.8 Mac Development，Apple Silicon arm64，最低 macOS 14.0。归档包通�
 新图为 `/Game/TreasureIsland/L_ExpeditionIsland`。它有约 160 米的陆地跨度、八个靠岸区和四块公共搜索区。岛内辐射状低地通往深岩区，沿岸的下凹环路绕过较高的开挖台地。低矮的双石堆标出外环，单根高石柱引向内圈。四区分别用断拱 A、双柱 B、采石台阶 C、斜岩 D 辨认，地标设置在搜索圈外沿。
 
 - **首次创建与验图**　编译编辑器后，执行 `bash Scripts/actdemo.sh island-map -Expedition -VerifyExpedition`。关卡已存在时只读取和验证，保留设计师摆放。命令校验八座码头、四个地标、寻宝布局，以及一次从粗地表切换到可开挖岩层的碰撞变化。测试挖痕只留在该次验证进程内。如基础地形算法更新，在上述命令中显式追加 `-RebakeExpeditionSurface`，即可只重烘这张图的基础表面与码头号码，同时保留已有笔刷、搜索圈、泊位及地标的摆放。
+- **调整日光**　主岛和港口的太阳、天空补光、海雾及全局后处理保存在各自关卡中。可在编辑器里直接调灯。修改共享参数 `ExpeditionDaylight.cpp` 后，编译编辑器，再用 `bash Scripts/actdemo.sh island-map -Expedition -RefreshLighting` 和 `bash Scripts/actdemo.sh island-front -RefreshLighting` 将参数写回对应地图。验看时可用首页吊箱的水面投影判断光向，用上岸角色的面部和林下的礁石判断暗部是否可读。
 - **编辑路线和宝藏区**　从编辑器打开新图，在 **Voxel Map → Frame Island** 观察全岛。Add Rock / Carve Rock 调坡、打通隘口或加高观察点。Search Circles 移动 A–D、调整半径。维持 A–C 与 B–D 在中央深岩内部相交，为所有候选埋箱点的上方保留可挖岩土。保存当前关卡即可写入地形笔刷与搜索圈。
 - **编辑起点与镜头**　选中 **Crew landings** 下的 Landing，沿本地 X 轴正方向面朝岛内。整体移动 Landing 会同步码头、队伍落脚位和海图图钉。在 Details 的 Expedition 中调八个局部 Berths、Preview Eye 和 Preview Target。调完从 1 人、同队多人及相对岸 1v1 三种开场检查队友入镜、镜头无遮挡与通岸坡度，最后从八处实走到最近搜索圈比较时间。
 - **编辑地标**　**Excavation landmarks** 内的四个 Actor 同时提供海图图钉和白模，调整 Actor 或其可编辑网格组件。**Trail markers** 存放转向石堆与信标。用正常第三人称对局镜头从海岸及内圈两侧识别地标。码头可以破坏，保留邻近安全岸线。

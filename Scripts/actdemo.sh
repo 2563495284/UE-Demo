@@ -5,26 +5,28 @@ UE_ROOT="${UE_ROOT:-/Users/Shared/Epic Games/UE_5.8}"
 PROJECT="$ROOT/ActDemo/ActDemo.uproject"
 EDITOR="$UE_ROOT/Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
 LOGS="$ROOT/ActDemo/Saved/Logs"
-VOXEL_ARCHIVE="$ROOT/Builds/VoxelPlayground/Mac"
 VOXEL_MAP="/Game/VoxelPlayground/L_VoxelPlayground"
 ISLAND_ARCHIVE="$ROOT/Builds/TreasureIsland/Mac"
 ISLAND_MAP="/Game/TreasureIsland/L_TreasureIsland"
 mkdir -p "$LOGS"
 case "${1:-help}" in
   build)
-    "$UE_ROOT/Engine/Build/BatchFiles/Mac/Build.sh" ActDemoEditor Mac Development "$PROJECT" -NoHotReload "-log=$LOGS/ImplementationBuild.log"
+    shift
+    "$UE_ROOT/Engine/Build/BatchFiles/Mac/Build.sh" ActDemoEditor Mac Development "$PROJECT" -NoHotReload "-log=$LOGS/ImplementationBuild.log" "$@"
     ;;
   party-feature)
-    mkdir -p "$ROOT/ActDemo/Plugins/GameFeatures/PartyButtonChallenge/Content"
-    "$EDITOR" "$PROJECT" -run=ActPartyFeature -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/PartyFeature.log"
+    shift
+    "$EDITOR" "$PROJECT" -run=ActPartyFeature -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/PartyFeature.log" "$@"
     grep -F 'PARTY_FEATURE_ASSET_READY' "$LOGS/PartyFeature.log"
     ;;
   island-front)
-    "$EDITOR" "$PROJECT" -run=ActIslandFront -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/IslandFrontMap.log"
+    shift
+    "$EDITOR" "$PROJECT" -run=ActIslandFront -unattended -nullrhi -nosound -NoSplash "-abslog=$LOGS/IslandFrontMap.log" "$@"
     test -f "$ROOT/ActDemo/Content/TreasureIsland/L_IslandFront.umap"
     ;;
   play)
-    "$EDITOR" "$PROJECT" -game -windowed -ResX=1280 -ResY=720 -NoSplash "-abslog=$LOGS/Playtest.log"
+    shift
+    "$EDITOR" "$PROJECT" -game -NoSplash "-abslog=$LOGS/Playtest.log" "$@"
     ;;
   voxel-map|island-map)
     MAP_ARGS=()
@@ -39,26 +41,20 @@ case "${1:-help}" in
     grep -F 'VOXEL_MAP_READY' "$MAP_LOG"
     ;;
   voxel-host|voxel-join|island-host|island-join)
-    ARCHIVE="$VOXEL_ARCHIVE"
     MAP="$VOXEL_MAP"
     if [[ "$1" == island-* ]]; then
-      ARCHIVE="$ISLAND_ARCHIVE"
       MAP="$ISLAND_MAP"
     fi
     if [[ "$1" == *-host ]]; then
-      ADDRESS="$MAP?listen"
+      ADDRESS="$MAP?listen?bIsLanMatch"
     else
       ADDRESS="${2:?Specify the host LAN IP, with optional :port}"
     fi
-    open -n -a "$ARCHIVE/ActDemo.app" --args "$ADDRESS" -windowed -ResX=1280 -ResY=720
+    open -n "$ISLAND_ARCHIVE/远征岛.app" --args "$ADDRESS" -IslandLAN
     ;;
   package|voxel-package|island-package)
-    ARCHIVE="$ROOT/Builds/Mac"
-    if [[ "$1" == voxel-package ]]; then ARCHIVE="$VOXEL_ARCHIVE"; fi
-    if [[ "$1" == island-package ]]; then ARCHIVE="$ISLAND_ARCHIVE"; fi
-    "$UE_ROOT/Engine/Build/BatchFiles/RunUAT.sh" BuildCookRun "-project=$PROJECT" -noP4 -platform=Mac -clientconfig=Development -build -cook -stage -pak -package -archive "-archivedirectory=$ARCHIVE" -utf8output -unattended
-    # Modern Xcode needs Package to assemble a self-contained app before Archive.
-    test -d "$ARCHIVE/ActDemo.app/Contents/UE"
+    shift
+    exec python3 "$ROOT/Scripts/package_mac.py" "$UE_ROOT" "$@"
     ;;
   *)
     printf '%s\n' 'Usage: bash Scripts/actdemo.sh {build|party-feature|play|package|voxel-map|voxel-package|voxel-host|voxel-join HOST_IP|island-front|island-map|island-package|island-host|island-join HOST_IP}' 'Optional UE_ROOT selects the installed Unreal Engine directory.'

@@ -118,15 +118,16 @@ AVoxelCharacter* AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thro
             const FVector Probe = Hit.ImpactPoint + Hit.ImpactNormal * 20.;
             if (!IslandTerrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
                 return nullptr;
-            QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal);
+            QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal, Round->HasDecoyToolBoost(Thrower.GetTeam()));
             return nullptr;
         }
-        QueueMudLanding(Hit.ImpactPoint, Hit.ImpactNormal);
+        QueueMudLanding(Hit.ImpactPoint, Hit.ImpactNormal, Round->HasDecoyToolBoost(Thrower.GetTeam()));
         return nullptr;
     }
 
     auto* Target = Cast<AIslandPlayerController>(Body->GetController());
     if (!Target || Target == &Thrower || Target->GetTeam() == Thrower.GetTeam() || !GetPlayers().Contains(Target)) return nullptr;
+    if (Round->IsDecoyEventActive(EIslandDecoyEvent::Ceasefire)) return nullptr;
     if (Body->IsMudStunned())
     {
         AddMudShellLayer(*Target);

@@ -1,14 +1,19 @@
 #include "Voxel/VoxelPlayerController.h"
 
+#include "Island/IslandMessageText.h"
+#include "ExpeditionText.h"
 #include "Camera/PlayerCameraManager.h"
 #include "AbilitySystemComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
 #include "Island/IslandState.h"
+#include "Island/IslandClientSettings.h"
+#include "PartyVoxelArena.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "TimerManager.h"
-#include "UObject/ConstructorHelpers.h"
+#include "InputMappingContext.h"
+#include "InputAction.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelGameMode.h"
 #include "Voxel/VoxelInputConfig.h"
@@ -17,12 +22,6 @@
 namespace
 {
     constexpr double RecoverHoldSeconds = 2.0;
-}
-
-AVoxelPlayerController::AVoxelPlayerController()
-{
-    static ConstructorHelpers::FObjectFinder<UActInputConfig> Config(TEXT("/Game/ActDemo/Input/DA_Input"));
-    InputConfig = Config.Object;
 }
 
 AVoxelCharacter* AVoxelPlayerController::GetHero() const
@@ -71,11 +70,15 @@ void AVoxelPlayerController::SetVoxelInputEnabled(bool bEnabled)
 void AVoxelPlayerController::SetIslandUIInput(bool bOpen)
 {
     SetVoxelInputEnabled(!bOpen);
-    if (auto* Subsystem=ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()); Subsystem && InputConfig && InputConfig->Menu)
-    {
-        if (bOpen) Subsystem->AddMappingContext(InputConfig->Menu, 10);
-        else Subsystem->RemoveMappingContext(InputConfig->Menu);
-    }
+    // The island menu receives Escape through Slate and the island controller.
+}
+
+void AVoxelPlayerController::EndPlay(const EEndPlayReason::Type Reason)
+{
+    if (InputConfig)
+        if (auto* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
+            Subsystem->RemoveMappingContext(InputConfig->Gameplay);
+    Super::EndPlay(Reason);
 }
 
 void AVoxelPlayerController::UpdateVoxelMapping()
@@ -102,32 +105,36 @@ void AVoxelPlayerController::SetupInputComponent()
         || (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")) && !FParse::Param(FCommandLine::Get(), TEXT("IslandPartyQA"))
             && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA"))
             && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMudQA"))
+            && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionGamesQA"))
             && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA"))))
     {
         return;
     }
 #endif
     UEnhancedInputComponent* Input = Cast<UEnhancedInputComponent>(InputComponent);
-    if (!Input || !InputConfig)
+    if (!Input)
     {
         return;
     }
+    if (!InputConfig) InputConfig = UVoxelInputConfig::Create(*this);
+    UpdateVoxelMapping();
+    InputComponent->BindKey(EKeys::V, IE_Pressed, this, &AVoxelPlayerController::SwitchPerspective);
     Input->BindAction(InputConfig->Move, ETriggerEvent::Triggered, this, &AVoxelPlayerController::Move);
     Input->BindAction(InputConfig->Look, ETriggerEvent::Triggered, this, &AVoxelPlayerController::Look);
-    Input->BindAction(InputConfig->Dodge, ETriggerEvent::Started, this, &AVoxelPlayerController::Jump);
-    Input->BindAction(InputConfig->Light, ETriggerEvent::Started, this, &AVoxelPlayerController::Punch);
-    Input->BindAction(InputConfig->Heavy, ETriggerEvent::Started, this, &AVoxelPlayerController::DigDown);
-    Input->BindAction(InputConfig->Light, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopDig);
-    Input->BindAction(InputConfig->Light, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopDig);
-    Input->BindAction(InputConfig->Heavy, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopThrow);
-    Input->BindAction(InputConfig->Heavy, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopThrow);
-    Input->BindAction(InputConfig->Heal, ETriggerEvent::Started, this, &AVoxelPlayerController::Fill);
-    Input->BindAction(InputConfig->Sprint, ETriggerEvent::Started, this, &AVoxelPlayerController::StartClimb);
-    Input->BindAction(InputConfig->Sprint, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopClimb);
-    Input->BindAction(InputConfig->Sprint, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopClimb);
-    Input->BindAction(InputConfig->Restart, ETriggerEvent::Started, this, &AVoxelPlayerController::StartRecover);
-    Input->BindAction(InputConfig->Restart, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopRecover);
-    Input->BindAction(InputConfig->Restart, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopRecover);
+    Input->BindAction(InputConfig->Jump, ETriggerEvent::Started, this, &AVoxelPlayerController::Jump);
+    Input->BindAction(InputConfig->Dig, ETriggerEvent::Started, this, &AVoxelPlayerController::Punch);
+    Input->BindAction(InputConfig->SecondaryTool, ETriggerEvent::Started, this, &AVoxelPlayerController::DigDown);
+    Input->BindAction(InputConfig->Dig, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopDig);
+    Input->BindAction(InputConfig->Dig, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopDig);
+    Input->BindAction(InputConfig->SecondaryTool, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopThrow);
+    Input->BindAction(InputConfig->SecondaryTool, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopThrow);
+    Input->BindAction(InputConfig->Fill, ETriggerEvent::Started, this, &AVoxelPlayerController::Fill);
+    Input->BindAction(InputConfig->Climb, ETriggerEvent::Started, this, &AVoxelPlayerController::StartClimb);
+    Input->BindAction(InputConfig->Climb, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopClimb);
+    Input->BindAction(InputConfig->Climb, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopClimb);
+    Input->BindAction(InputConfig->Recall, ETriggerEvent::Started, this, &AVoxelPlayerController::StartRecover);
+    Input->BindAction(InputConfig->Recall, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopRecover);
+    Input->BindAction(InputConfig->Recall, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopRecover);
 }
 
 void AVoxelPlayerController::PlayerTick(float DeltaTime)
@@ -137,7 +144,7 @@ void AVoxelPlayerController::PlayerTick(float DeltaTime)
     {
         return;
     }
-    if (bPlaying && bVoxelInputEnabled && (bDigHeld || bThrowHeld))
+    if (bPlaying && IsVoxelInputEnabled() && (bDigHeld || bThrowHeld))
         SendHeldExpeditionAim();
     if (!Terrain.IsValid())
     {
@@ -163,20 +170,30 @@ void AVoxelPlayerController::ApplyMove(const FVector2D& Input)
     }
 }
 
+FVector2D AVoxelPlayerController::GetLocalLookScale() const
+{
+    const auto* Settings = UIslandClientSettings::Get();
+    if (!Settings) return FVector2D(1., 1.);
+    const float Gain = Settings->GetLookSensitivity();
+    return FVector2D(Gain, Settings->IsVerticalLookInverted() ? -Gain : Gain);
+}
+
 void AVoxelPlayerController::Look(const FInputActionValue& Value)
 {
+    // Like movement, mouse look stays active while the island chart is held.
     if (!bVoxelInputEnabled)
     {
         return;
     }
     const FVector2D Input = Value.Get<FVector2D>();
-    AddYawInput(FMath::Clamp(Input.X, -30.0, 30.0) * .18f);
-    AddPitchInput(-FMath::Clamp(Input.Y, -30.0, 30.0) * .18f);
+    const FVector2D Scale = GetLocalLookScale();
+    AddYawInput(FMath::Clamp(Input.X, -30.0, 30.0) * .18f * Scale.X);
+    AddPitchInput(-FMath::Clamp(Input.Y, -30.0, 30.0) * .18f * Scale.Y);
 }
 
 void AVoxelPlayerController::Jump()
 {
-    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && bVoxelInputEnabled)
+    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && IsVoxelInputEnabled())
     {
         if (UsesExpeditionAbilities())
         {
@@ -185,6 +202,21 @@ void AVoxelPlayerController::Jump()
         }
         else Hero->Jump();
     }
+}
+
+void AVoxelPlayerController::SwitchPerspective()
+{
+    const auto* Round=GetWorld()->GetGameState<AIslandGameState>();
+    if (!IsLocalController() || !bPlaying || !Round || !Round->bRoomLobby || !GetPawn()
+        || GetViewTarget()!=GetPawn() || bShowMouseCursor || IsLookInputIgnored()) return;
+    if (auto* ArenaPawn=Cast<APartyVoxelPawn>(GetPawn()))
+    {
+        if (Round->Phase!=EIslandPhase::PartyPlaying || !ArenaPawn->HasLocalPartyInput()) return;
+        bFirstPersonView = !bFirstPersonView;
+        ArenaPawn->SetLocalFirstPersonView(bFirstPersonView);
+    }
+    else if (GetHero() && Round->Phase==EIslandPhase::Hunting && IsVoxelInputEnabled())
+        bFirstPersonView = !bFirstPersonView;
 }
 
 void AVoxelPlayerController::Punch()
@@ -203,7 +235,7 @@ void AVoxelPlayerController::StopThrow() { SetExpeditionThrowHeld(false); }
 void AVoxelPlayerController::SetExpeditionDigHeld(bool bHeld)
 {
     if (bDigHeld == bHeld) return;
-    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !bVoxelInputEnabled || !GetHero())) return;
+    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !GetHero())) return;
     bDigHeld = bHeld;
     if (bHeld) DispatchExpeditionAction(EExpeditionAction::Dig, true, GetExcavationAim(*GetHero()));
     else ServerReleaseExpeditionAction(EExpeditionAction::Dig);
@@ -212,7 +244,7 @@ void AVoxelPlayerController::SetExpeditionDigHeld(bool bHeld)
 void AVoxelPlayerController::SetExpeditionThrowHeld(bool bHeld)
 {
     if (bThrowHeld == bHeld) return;
-    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !bVoxelInputEnabled || !GetHero())) return;
+    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !GetHero())) return;
     bThrowHeld = bHeld;
     if (bHeld) DispatchExpeditionAction(EExpeditionAction::Throw, true, GetExpeditionThrowAim(*GetHero()));
     else ServerReleaseExpeditionAction(EExpeditionAction::Throw);
@@ -229,7 +261,7 @@ void AVoxelPlayerController::Fill() { if (!UsesExpeditionAbilities()) SubmitEdit
 void AVoxelPlayerController::SubmitEdit(EVoxelAction Action)
 {
     const AVoxelCharacter* Hero = GetHero();
-    if (!Hero || !bPlaying || !bVoxelInputEnabled)
+    if (!Hero || !bPlaying || !IsVoxelInputEnabled())
     {
         return;
     }
@@ -241,7 +273,7 @@ FVector AVoxelPlayerController::GetExcavationAim(const AVoxelCharacter& Hero) co
     FVector CameraLocation;
     FRotator CameraRotation;
     GetPlayerViewPoint(CameraLocation, CameraRotation);
-    if (UsesExpeditionAbilities() && FRotator::NormalizeAxis(CameraRotation.Pitch) < -72.f)
+    if (UsesExpeditionAbilities() && !Hero.IsInFirstPersonView() && FRotator::NormalizeAxis(CameraRotation.Pitch) < -72.f)
         return (FRotator(0., CameraRotation.Yaw, 0.).Vector() * .07f - FVector::UpVector).GetSafeNormal();
     const FVector End = CameraLocation + CameraRotation.Vector() * 1000.0;
     FCollisionQueryParams Params(SCENE_QUERY_STAT(VoxelCrosshair), false, &Hero);
@@ -263,7 +295,7 @@ FVector AVoxelPlayerController::GetExpeditionThrowAim(const AVoxelCharacter& Her
     GetPlayerViewPoint(Eye, View);
     // Looking straight down in a shoulder camera otherwise hits well off to the side
     // of the player's own capsule. In this limit the target is the ground at the toes.
-    if (FRotator::NormalizeAxis(View.Pitch) < -72.f)
+    if (!Hero.IsInFirstPersonView() && FRotator::NormalizeAxis(View.Pitch) < -72.f)
         return (FRotator(0., View.Yaw, 0.).Vector() * .07f - FVector::UpVector).GetSafeNormal();
 
     const FVector Far = Eye + View.Vector() * 1400.;
@@ -289,7 +321,7 @@ FVector AVoxelPlayerController::GetExpeditionActionAim(EExpeditionAction Action)
 
 void AVoxelPlayerController::DispatchExpeditionAction(EExpeditionAction Action, bool bHeld, FVector Aim)
 {
-    if (bPlaying && bVoxelInputEnabled && UsesExpeditionAbilities() && GetHero())
+    if (bPlaying && IsVoxelInputEnabled() && UsesExpeditionAbilities() && GetHero())
         ServerExpeditionAction(Action, bHeld, Aim.GetSafeNormal());
 }
 
@@ -366,7 +398,7 @@ void AVoxelPlayerController::OnMudStunChanged(bool bStunned)
 
 void AVoxelPlayerController::SubmitEdit(EVoxelAction Action, const FVector& Aim)
 {
-    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && bVoxelInputEnabled)
+    if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && IsVoxelInputEnabled())
     {
         if (UsesExpeditionAbilities())
         {
@@ -378,12 +410,12 @@ void AVoxelPlayerController::SubmitEdit(EVoxelAction Action, const FVector& Aim)
     }
 }
 
-void AVoxelPlayerController::StartClimb() { if (!UsesExpeditionAbilities() && bPlaying && bVoxelInputEnabled) { ServerSetClimb(true); } }
+void AVoxelPlayerController::StartClimb() { if (!UsesExpeditionAbilities() && bPlaying && IsVoxelInputEnabled()) { ServerSetClimb(true); } }
 void AVoxelPlayerController::StopClimb() { if (!UsesExpeditionAbilities()) ServerSetClimb(false); }
 
 void AVoxelPlayerController::StartRecover()
 {
-    if (bPlaying && bVoxelInputEnabled && GetHero() && !GetHero()->IsMudStunned() && RecoverStartedAt < 0.0)
+    if (bPlaying && IsVoxelInputEnabled() && GetHero() && !GetHero()->IsMudStunned() && RecoverStartedAt < 0.0)
     {
         RecoverStartedAt = FPlatformTime::Seconds();
         if (UsesExpeditionAbilities()) DispatchExpeditionAction(EExpeditionAction::Recall, true);
@@ -401,27 +433,16 @@ void AVoxelPlayerController::StopRecover()
     }
 }
 
-const FString& AVoxelPlayerController::GetDisplayNotice() const
+FString AVoxelPlayerController::GetDisplayNotice() const
 {
-    static const TMap<FString,FString> Messages{
-        {TEXT("Aim at rock within reach"),TEXT("请靠近并瞄准岩面")},
-        {TEXT("Cannot fill over a chest"),TEXT("宝箱周围不能回填")},
-        {TEXT("Someone is in the way"),TEXT("有玩家站在回填区域")},
-        {TEXT("Someone moved into the fill area"),TEXT("有玩家进入回填区域，本次回填已取消")},
-        {TEXT("No rock changed"),TEXT("这里没有可改变的岩面")},
-        {TEXT("Reach an exposed chest"),TEXT("请靠近已露出且无遮挡的箱子")},
-        {TEXT("Collect all four clues to open the prize"),TEXT("集齐四条线索才能打开宝藏")},
-        {TEXT("Your crew already has this clue"),TEXT("本队已经取得这条线索")}
-    };
     if (UsesExpeditionAbilities())
     {
-        static const FString Chest = TEXT("宝箱周围需要留出操作空间");
-        static const FString Occupied = TEXT("这里已有玩家，土团未能落稳");
-        if (Notice == TEXT("Cannot fill over a chest")) return Chest;
-        if (Notice == TEXT("Someone is in the way") || Notice == TEXT("Someone moved into the fill area")) return Occupied;
+        if (Notice == TEXT("Cannot fill over a chest"))
+            return EXPEDITION_TEXT("宝箱周围需要留出操作空间", "Leave room to open the chest");
+        if (Notice == TEXT("Someone is in the way") || Notice == TEXT("Someone moved into the fill area"))
+            return EXPEDITION_TEXT("这里已有玩家，土团未能落稳", "A player is blocking the mud");
     }
-    const FString* Translation=Messages.Find(Notice);
-    return Translation ? *Translation : Notice;
+    return IslandMessageText::Display(Notice);
 }
 
 bool AVoxelPlayerController::IsNoticeVisible() const

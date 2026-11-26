@@ -64,13 +64,27 @@ void AExpeditionWalk::TickTreasure(float DeltaSeconds)
     auto* Player=Cast<AIslandPlayerController>(GetWorld()->GetFirstPlayerController());
     auto* State=GetWorld()->GetGameState<AIslandGameState>();
     auto* Mode=GetWorld()->GetAuthGameMode<AIslandGameMode>();
-    if (!Player || !Mode || !State || !Player->IsLocalController() || !Player->GetHero()) return;
+    if (!Player || !Mode || !State || !Player->IsLocalController()) return;
+    if (State->Phase == EIslandPhase::PartyLoading || State->Phase == EIslandPhase::PartyPlaying || State->Phase == EIslandPhase::PartyReturning)
+    {
+        bAwaitingChestReveal = true;
+        return;
+    }
+    if (!Player->GetHero()) return;
+    if (bAwaitingChestReveal && State->Phase == EIslandPhase::Hunting)
+    {
+        // The trap may have deliberately redistributed the party during the map handoff.
+        LastPosition = Player->GetHero()->GetActorLocation();
+        StageStarted = Now;
+        bAwaitingChestReveal = false;
+    }
     if (HuntStep==EHuntStep::Done) return;
     if (State->Phase==EIslandPhase::Finished && TreasureIndex==IslandRules::PrizeIndex
         && State->Winner==Player->GetTeam() && Player->GetLocalClues().Complete())
     {
         RecordView(TEXT("10-treasure-result"));
-        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_TREASURE_WALK_DONE clues=4 opened=5 elapsed=%.2fs meters=%.1f"),Now-WalkStarted,Meters);
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_TREASURE_WALK_DONE points=%d opened=5 spent=%d elapsed=%.2fs meters=%.1f"),
+            Player->GetLocalClues().Count(), Player->GetLocalClues().bKeySpent, Now-WalkStarted,Meters);
         SetHuntStep(EHuntStep::Done);
         return; // The Slate walkthrough owns the result button and return to the original room.
     }

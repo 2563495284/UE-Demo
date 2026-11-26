@@ -140,6 +140,8 @@ class UExpeditionCharacterMovement : public UCharacterMovementComponent
 {
     GENERATED_BODY()
 public:
+    float GetIslandJumpZVelocity() const;
+    virtual bool DoJump(bool bReplayingMoves, float DeltaTime) override;
     virtual void UpdateCharacterStateBeforeMovement(float DeltaSeconds) override;
     virtual float GetMaxSpeed() const override;
 };

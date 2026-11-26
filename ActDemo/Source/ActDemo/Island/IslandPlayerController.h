@@ -6,10 +6,21 @@
 #include "IslandPlayerController.generated.h"
 
 class APartySession;
+class ULevelStreamingDynamic;
 class AIslandChest;
 class AIslandNeutralProp;
 class USoundWave;
 struct FStreamableHandle;
+
+enum class EIslandPartyVeil : uint8 { Clear, Closing, Black, Opening };
+
+struct FIslandPartyTransitionView
+{
+    EIslandPartyVeil Phase = EIslandPartyVeil::Clear;
+    float Coverage = 0.f;
+    bool bReturning = false;
+    uint32 Round = 0;
+};
 
 UCLASS()
 class AIslandPlayerController : public AVoxelPlayerController
@@ -20,11 +31,14 @@ public:
     AIslandPlayerController();
     int32 GetTeam() const;
     UFUNCTION(Server, Reliable) void ServerChooseTeam(int32 Team);
+    UFUNCTION(Server, Reliable) void ServerChooseCharacter(int32 ModelIndex);
+    UFUNCTION(Client, Reliable) void ClientCharacterChosen(int32 ModelIndex);
     UFUNCTION(Server, Reliable) void ServerSetRoomReady(bool bReady);
     UFUNCTION(Server, Reliable) void ServerStartExpedition();
     UFUNCTION(Server, Reliable) void ServerConfigureRoom(const FIslandRoomSettings& Settings);
     UFUNCTION(Server, Reliable) void ServerReturnToRoom();
     bool IsMapOpen() const { return bMapOpen; }
+    bool IsVoxelInputEnabled() const override { return !bMapOpen && Super::IsVoxelInputEnabled(); }
     const FIslandClues& GetLocalClues() const { return LocalClues; }
     FString WaterStatus() const;
     UFUNCTION(Client, Reliable) void ClientExcavationEcho(bool bStrong);
@@ -38,8 +52,14 @@ public:
     void RestartIsland();
 
     UClass* GetPartySessionClass() const;
-    UFUNCTION(Client, Reliable) void ClientPrepareParty(uint32 RoundId, FName Feature);
+    FIslandPartyTransitionView GetPartyTransitionView() const;
+    bool IsPartyTravelLocked() const { return bPartyTravelLocked; }
+    bool IsMoveInputIgnored() const override { return bPartyTravelLocked || Super::IsMoveInputIgnored(); }
+    bool IsLookInputIgnored() const override { return bPartyTravelLocked || Super::IsLookInputIgnored(); }
+    UFUNCTION(Client, Reliable) void ClientPrepareParty(uint32 RoundId, FName Feature, bool bAnimate);
+    UFUNCTION(Client, Reliable) void ClientBeginPartyReturn(uint32 RoundId);
     UFUNCTION(Client, Reliable) void ClientReturnFromParty(uint32 RoundId);
+    UFUNCTION(Client, Reliable) void ClientRevealParty(uint32 RoundId, bool bReturning);
 
     UFUNCTION(Client, Reliable) void ClientUpdateClues(const FIslandClues& Snapshot);
     UFUNCTION(Client, Reliable) void ClientWaterState(uint8 State);
@@ -58,20 +78,35 @@ private:
     UFUNCTION(Server, Reliable) void ServerInteract();
     UFUNCTION(Server, Reliable) void ServerRestartIsland();
     UFUNCTION(Server, Reliable) void ServerPartyAssetsReady(uint32 RoundId, bool bSuccess);
+    UFUNCTION(Server, Reliable) void ServerPartyScreenBlack(uint32 RoundId, bool bReturning);
+    UFUNCTION(Server, Reliable) void ServerPartyScreenClear(uint32 RoundId, bool bReturning);
     UFUNCTION(Server, Reliable) void ServerPartyPawnReady(uint32 RoundId);
     UFUNCTION(Server, Reliable) void ServerPartyUnloaded(uint32 RoundId, bool bSuccess);
 
     void LoadPartyAssets(uint32 RoundId);
     void ReportPartyAssets(uint32 RoundId);
     void UpdatePartyClient();
+    void StartPartyVeil(bool bReturning);
+    void TickPartyVeil();
+    void SetPartyTravelLocked(bool bLocked);
     void FinishPartyUnload(uint32 RoundId, bool bSuccess);
     void ReleasePartyAssets();
 
     TSoftClassPtr<APartySession> PartySessionClass;
+    UPROPERTY(Transient) TObjectPtr<ULevelStreamingDynamic> PartyVenue;
     TSharedPtr<FStreamableHandle> PartyAssets;
     FString PartyPluginURL;
     uint32 LocalPartyRound = 0;
+    EIslandPartyVeil PartyVeil = EIslandPartyVeil::Clear;
+    double VeilStart = 0.;
+    uint64 BlackAtFrame = 0;
+    bool bAnimateParty = false;
+    bool bPartyTravelLocked = false;
+    bool bBlackReported = false;
+    bool bRevealRequested = false;
+    bool bCanUnloadParty = false;
     bool bPartyActivating = false;
+    bool bWaitingForVenue = false;
     bool bPartyPawnReadySent = false;
     bool bPartyReturning = false;
     bool bPartyUnloadStarted = false;

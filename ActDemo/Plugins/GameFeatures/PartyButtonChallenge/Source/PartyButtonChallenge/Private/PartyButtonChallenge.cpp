@@ -1,7 +1,10 @@
 #include "PartyButtonChallenge.h"
+#include "ExpeditionText.h"
 
 #include "Camera/CameraComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/Engine.h"
@@ -20,7 +23,9 @@ APartyButtonPawn::APartyButtonPawn()
     bReplicates = true;
     bAlwaysRelevant = true;
     Podium = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Podium"));
-    SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Station")));
+    GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    GetCharacterMovement()->DefaultLandMovementMode = MOVE_None;
+    GetCharacterMovement()->SetMovementMode(MOVE_None);
     Podium->SetupAttachment(GetRootComponent());
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube"));
     Podium->SetStaticMesh(Cube.Object);
@@ -108,7 +113,7 @@ void APartyButtonPawn::ServerConfirm_Implementation()
     }
 }
 
-void APartyButtonPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize) const
+void APartyButtonPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, bool bAnonymous) const
 {
     if (!Session)
     {
@@ -121,13 +126,13 @@ void APartyButtonPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize) co
     switch (State.Phase)
     {
     case EPartyButtonPhase::Countdown:
-        Prompt = FString::Printf(TEXT("Get ready  %d"), Seconds);
+        Prompt = FString::Format(EXPEDITION_TEXT("准备  {0}", "Get ready  {0}"), {Seconds});
         break;
     case EPartyButtonPhase::Playing:
-        Prompt = bConfirmed ? TEXT("Confirmed") : FString::Printf(TEXT("Press Space  %d"), Seconds);
+        Prompt = bConfirmed ? EXPEDITION_TEXT("已确认", "Confirmed") : FString::Format(EXPEDITION_TEXT("按空格确认  {0}", "Press Space  {0}"), {Seconds});
         break;
     case EPartyButtonPhase::Results:
-        Prompt = FString::Printf(TEXT("%d / %d confirmed"), State.Confirmed, State.Players);
+        Prompt = FString::Format(EXPEDITION_TEXT("{0} / {1} 人已确认", "{0} / {1} confirmed"), {State.Confirmed, State.Players});
         break;
     default:
         return;

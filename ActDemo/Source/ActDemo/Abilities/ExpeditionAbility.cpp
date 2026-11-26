@@ -6,9 +6,10 @@
 #include "TimerManager.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
+#include "Island/IslandState.h"
 #include "Voxel/VoxelCharacter.h"
 
-namespace ExpeditionAbilityTags
+namespace ExpeditionTags
 {
     UE_DEFINE_GAMEPLAY_TAG_STATIC(Dig, "Expedition.Action.Dig");
     UE_DEFINE_GAMEPLAY_TAG_STATIC(Throw, "Expedition.Action.Throw");
@@ -26,18 +27,18 @@ FGameplayTag ExpeditionAbilities::ActionTag(EExpeditionAction Action)
 {
     switch (Action)
     {
-    case EExpeditionAction::Dig: return ExpeditionAbilityTags::Dig;
-    case EExpeditionAction::Throw: return ExpeditionAbilityTags::Throw;
-    case EExpeditionAction::Jump: return ExpeditionAbilityTags::Jump;
-    case EExpeditionAction::Interact: return ExpeditionAbilityTags::Interact;
-    case EExpeditionAction::Rally: return ExpeditionAbilityTags::Rally;
-    case EExpeditionAction::Recall: return ExpeditionAbilityTags::Recall;
+    case EExpeditionAction::Dig: return ExpeditionTags::Dig;
+    case EExpeditionAction::Throw: return ExpeditionTags::Throw;
+    case EExpeditionAction::Jump: return ExpeditionTags::Jump;
+    case EExpeditionAction::Interact: return ExpeditionTags::Interact;
+    case EExpeditionAction::Rally: return ExpeditionTags::Rally;
+    case EExpeditionAction::Recall: return ExpeditionTags::Recall;
     }
     return FGameplayTag();
 }
 
-FGameplayTag ExpeditionAbilities::Stunned() { return ExpeditionAbilityTags::Stun; }
-FGameplayTag ExpeditionAbilities::Immune() { return ExpeditionAbilityTags::Immunity; }
+FGameplayTag ExpeditionAbilities::Stunned() { return ExpeditionTags::Stun; }
+FGameplayTag ExpeditionAbilities::Immune() { return ExpeditionTags::Immunity; }
 
 UExpeditionTimedEffect::UExpeditionTimedEffect()
 {
@@ -58,10 +59,10 @@ bool ExpeditionAbilities::ApplyTimedTag(UAbilitySystemComponent& ASC, FGameplayT
 void ExpeditionAbilities::ClearTimedTags(UAbilitySystemComponent& ASC)
 {
     FGameplayTagContainer Tags;
-    Tags.AddTag(ExpeditionAbilityTags::Stun);
-    Tags.AddTag(ExpeditionAbilityTags::Immunity);
-    Tags.AddTag(ExpeditionAbilityTags::DigCooldown);
-    Tags.AddTag(ExpeditionAbilityTags::ThrowCooldown);
+    Tags.AddTag(ExpeditionTags::Stun);
+    Tags.AddTag(ExpeditionTags::Immunity);
+    Tags.AddTag(ExpeditionTags::DigCooldown);
+    Tags.AddTag(ExpeditionTags::ThrowCooldown);
     ASC.RemoveActiveEffects(FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(Tags));
 }
 
@@ -95,13 +96,13 @@ void UExpeditionAbility::SetAction(EExpeditionAction InAction)
 UExpeditionDigAbility::UExpeditionDigAbility()
 {
     SetAction(EExpeditionAction::Dig);
-    Cooldown = ExpeditionAbilityTags::DigCooldown;
+    Cooldown = ExpeditionTags::DigCooldown;
     Interval = .50f;
 }
 UExpeditionThrowAbility::UExpeditionThrowAbility()
 {
     SetAction(EExpeditionAction::Throw);
-    Cooldown = ExpeditionAbilityTags::ThrowCooldown;
+    Cooldown = ExpeditionTags::ThrowCooldown;
     Interval = .60f;
 }
 UExpeditionInteractAbility::UExpeditionInteractAbility() { SetAction(EExpeditionAction::Interact); }
@@ -124,7 +125,7 @@ bool UExpeditionAbility::CanActivateAbility(const FGameplayAbilitySpecHandle Han
     if (Hero->HasAuthority())
     {
         const auto* Mode = Hero->GetWorld()->GetAuthGameMode<AIslandGameMode>();
-        return Mode && Mode->CanPlayerAct(*PC);
+        return Mode && (Mode->CanPlayerAct(*PC) || (Action == EExpeditionAction::Jump && Mode->CanJumpBeforePartyBlack(*PC)));
     }
     return Action == EExpeditionAction::Jump && PC->IsPlaying() && PC->IsVoxelInputEnabled();
 }
@@ -261,6 +262,21 @@ void UExpeditionCharacterMovement::UpdateCharacterStateBeforeMovement(float Delt
         else if (Hero->IsMudCompact()) bWantsToCrouch = false;
     }
     Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
+}
+
+float UExpeditionCharacterMovement::GetIslandJumpZVelocity() const
+{
+    const auto* State = GetWorld() ? GetWorld()->GetGameState<AIslandGameState>() : nullptr;
+    return State && State->IsDecoyEventActive(EIslandDecoyEvent::SpringTide)
+        ? JumpZVelocity * IslandRules::SpringTideJumpScale : JumpZVelocity;
+}
+
+bool UExpeditionCharacterMovement::DoJump(bool bReplayingMoves, float DeltaTime)
+{
+    // Character movement uses this path for the owner's prediction, replay and server simulation.
+    // Leave the normal tuning intact for external launches such as a geyser.
+    TGuardValue<float> JumpSpeed(JumpZVelocity, GetIslandJumpZVelocity());
+    return Super::DoJump(bReplayingMoves, DeltaTime);
 }
 
 float UExpeditionCharacterMovement::GetMaxSpeed() const
