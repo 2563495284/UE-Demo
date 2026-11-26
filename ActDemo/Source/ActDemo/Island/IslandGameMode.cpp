@@ -179,9 +179,9 @@ bool AIslandGameMode::PrepareRound(FString& Error)
     {
         UE_LOG(LogTemp, Warning, TEXT("DecoyChestCount %d clamped to %d"), DecoyChestCount, Decoys);
     }
-    const AVoxelTerrain* Terrain = GetTerrain();
-    const auto& Circles = Terrain->GetSearchCircles();
-    const auto& Density = *Terrain->GetDensity();
+    const AVoxelTerrain* IslandTerrain = GetTerrain();
+    const auto& Circles = IslandTerrain->GetSearchCircles();
+    const auto& Density = *IslandTerrain->GetDensity();
     if (!IslandRules::GenerateLayout(0, Decoys, Circles, Density, HiddenLayout, &Error, true))
     {
         return false;
@@ -223,14 +223,14 @@ bool AIslandGameMode::PrepareRound(FString& Error)
 #if !UE_BUILD_SHIPPING
         if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA"))
             && FParse::Param(FCommandLine::Get(), TEXT("NeutralLayoutAudit"))
-            && !IslandNeutral::Audit(*GetWorld(), *Terrain, Decoys))
+            && !IslandNeutral::Audit(*GetWorld(), *IslandTerrain, Decoys))
         {
             Error = TEXT("中立场景物体种子复验失败");
             return false;
         }
 #endif
         TArray<FIslandNeutralPlacement> Layout;
-        IslandNeutral::Generate(*GetWorld(), *Terrain, LayoutSeed, HiddenLayout, Layout);
+        IslandNeutral::Generate(*GetWorld(), *IslandTerrain, LayoutSeed, HiddenLayout, Layout);
         for (const auto& Placement : Layout)
         {
             const FTransform Transform(FRotator(0., Placement.Yaw, 0.), FVector(Placement.Location));
@@ -240,7 +240,7 @@ bool AIslandGameMode::PrepareRound(FString& Error)
             Prop->Initialize(Placement.Kind);
             Prop->FinishSpawning(Transform);
             NeutralProps.Add(Prop);
-            if (Placement.Kind == EIslandNeutralKind::Tide) Prop->RefreshTide(*Terrain);
+            if (Placement.Kind == EIslandNeutralKind::Tide) Prop->RefreshTide(*IslandTerrain);
         }
     }
     Exposed.SetNum(HiddenLayout.Num());

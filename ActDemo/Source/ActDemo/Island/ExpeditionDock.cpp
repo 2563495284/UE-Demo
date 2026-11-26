@@ -13,16 +13,16 @@ AExpeditionDock::AExpeditionDock()
 
 void AExpeditionDock::RefreshLandingNumber()
 {
-    UTextRenderComponent* Sign = GetSign();
-    if (!IsValid(Sign)) Sign = FindComponentByClass<UTextRenderComponent>();
+    UTextRenderComponent* DockSign = GetSign();
+    if (!IsValid(DockSign)) DockSign = FindComponentByClass<UTextRenderComponent>();
     // Construction may run before the native render component is restored during map load.
-    if (!IsValid(Sign)) return;
-    Sign->SetRelativeLocation(FVector(270.,-308.,115.));
-    Sign->SetRelativeRotation(FRotator(0,180,0));
-    Sign->SetHorizontalAlignment(EHTA_Center);
-    Sign->SetWorldSize(69.f);
-    Sign->SetText(FText::FromString(FString::Printf(TEXT("%02d"),DockIndex+1)));
-    Sign->SetTextRenderColor(FColor(54,68,75));
+    if (!IsValid(DockSign)) return;
+    DockSign->SetRelativeLocation(FVector(270.,-308.,115.));
+    DockSign->SetRelativeRotation(FRotator(0,180,0));
+    DockSign->SetHorizontalAlignment(EHTA_Center);
+    DockSign->SetWorldSize(69.f);
+    DockSign->SetText(FText::FromString(FString::Printf(TEXT("%02d"),DockIndex+1)));
+    DockSign->SetTextRenderColor(FColor(54,68,75));
 }
 
 void AExpeditionDock::OnConstruction(const FTransform& Transform)

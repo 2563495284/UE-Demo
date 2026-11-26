@@ -17,7 +17,7 @@ namespace
 {
     constexpr double TreeLandingTime = .95;
     constexpr double TidePeriod = 3.6;
-    constexpr double MouthY = 150.;
+    constexpr double TideMouthOffsetY = 150.;
 }
 
 AIslandNeutralProp::AIslandNeutralProp()
@@ -174,7 +174,7 @@ void AIslandNeutralProp::TouchSail(UPrimitiveComponent* Overlap, AActor* Other, 
 
 FVector AIslandNeutralProp::GetTideMouth(int32 Index) const
 {
-    return GetActorTransform().TransformPosition(FVector(0, Index == 0 ? -MouthY : MouthY,
+    return GetActorTransform().TransformPosition(FVector(0, Index == 0 ? -TideMouthOffsetY : TideMouthOffsetY,
         6. + (Index == 0 ? State.MouthOffsetA : State.MouthOffsetB)));
 }
 

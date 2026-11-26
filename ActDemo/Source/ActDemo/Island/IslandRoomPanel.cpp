@@ -82,10 +82,10 @@ TSharedRef<SWidget> SIslandRoomPanel::FocusTarget()
 }
 
 TSharedRef<SWidget> SIslandRoomPanel::Button(TAttribute<FText> Value, TFunction<void()> Press,
-    TAttribute<bool> Enabled, bool bPrimary, FName Tag)
+    TAttribute<bool> Enabled, bool bPrimary, FName WidgetTag)
 {
     static const FButtonStyle Plain = MakeButtonStyle(false), Strong = MakeButtonStyle(true);
-    return SNew(SButton).Tag(Tag).ButtonStyle(bPrimary ? &Strong : &Plain).IsEnabled(Enabled)
+    return SNew(SButton).Tag(WidgetTag).ButtonStyle(bPrimary ? &Strong : &Plain).IsEnabled(Enabled)
         .OnClicked_Lambda([this,Action = MoveTemp(Press)] { ++Actions; Action(); return FReply::Handled(); })
         [Label(Value, 17, bPrimary ? FLinearColor(.018f,.034f,.034f) : Ink, bPrimary)];
 }
@@ -224,12 +224,12 @@ void SIslandRoomPanel::BuildForm()
     Add(Label(Txt(TEXT("房间名称")),15,Muted),2);
     Add(SAssignNew(NameField, SEditableTextBox).Tag("Island.RoomName").Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).Text(Txt(Draft.RoomName))
         .OnTextChanged_Lambda([this](const FText& Value){ Draft.RoomName = Value.ToString(); }));
-    const auto Number = [this](const TCHAR* Caption, int32 FIslandRoomSettings::* Member, FName Tag)
+    const auto Number = [this](const TCHAR* Caption, int32 FIslandRoomSettings::* Member, FName WidgetTag)
     {
         Add(SNew(SHorizontalBox)
             + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)[Label(Txt(Caption),16,Ink)]
             + SHorizontalBox::Slot().AutoWidth()[ SNew(SBox).WidthOverride(106)
-                [SNew(SSpinBox<int32>).Tag(Tag).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).MinValue(1).MaxValue(8)
+                [SNew(SSpinBox<int32>).Tag(WidgetTag).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).MinValue(1).MaxValue(8)
                  .Value_Lambda([this,Member]{return Draft.*Member;})
                  .OnValueChanged_Lambda([this,Member](int32 Value){ Draft.*Member = Value; })] ]);
     };

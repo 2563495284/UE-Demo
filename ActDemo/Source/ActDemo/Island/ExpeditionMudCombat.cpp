@@ -93,9 +93,9 @@ AVoxelCharacter* AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thro
     AVoxelCharacter* Body = Cast<AVoxelCharacter>(Hit.GetActor());
     if (!Body)
     {
-        AVoxelTerrain* Terrain = GetTerrain();
-        if (!Terrain || Hit.GetActor() == nullptr) return nullptr;
-        if (Hit.GetActor() == Terrain)
+        AVoxelTerrain* IslandTerrain = GetTerrain();
+        if (!IslandTerrain || Hit.GetActor() == nullptr) return nullptr;
+        if (Hit.GetActor() == IslandTerrain)
         {
             for (AVoxelPlayerController* Other : GetPlayers())
             {
@@ -116,7 +116,7 @@ AVoxelCharacter* AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thro
             // Static walls may support a foothold at the soil line; upper decks and props cannot grow floating mud.
             FHitResult Ground;
             const FVector Probe = Hit.ImpactPoint + Hit.ImpactNormal * 20.;
-            if (!Terrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
+            if (!IslandTerrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
                 return nullptr;
             QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal);
             return nullptr;

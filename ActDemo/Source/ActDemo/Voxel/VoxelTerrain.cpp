@@ -122,7 +122,7 @@ namespace
                     int32 Mask = 0;
                     for (int32 C = 0; C < 8; ++C) Mask |= int32(Cell[CornerOffsets[C]] < 0) << C;
                     const FIntVector Origin(X,Y,Z);
-                    const auto GetVertex = [&](int32 Edge) -> int32
+                    const auto GetVertex = [&](int32 Edge) -> uint32
                     {
                         const int32 A = FChunkTopology::EdgeIndices[Edge][0], B = FChunkTopology::EdgeIndices[Edge][1];
                         const FIntVector Delta = Corners[B] - Corners[A];
@@ -150,9 +150,9 @@ namespace
                     };
                     for (uint64 Triangles = FChunkTopology::TriTable[Mask]; Triangles; Triangles >>= 12)
                     {
-                        const int32 A = GetVertex(Triangles & 15);
-                        const int32 B = GetVertex((Triangles >> 4) & 15);
-                        const int32 C = GetVertex((Triangles >> 8) & 15);
+                        const uint32 A = GetVertex(Triangles & 15);
+                        const uint32 B = GetVertex((Triangles >> 4) & 15);
+                        const uint32 C = GetVertex((Triangles >> 8) & 15);
                         const auto& VA = Section.ProcVertexBuffer[A];
                         const auto& VB = Section.ProcVertexBuffer[B];
                         const auto& VC = Section.ProcVertexBuffer[C];

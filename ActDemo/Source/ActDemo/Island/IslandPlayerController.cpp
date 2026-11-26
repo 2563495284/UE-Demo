@@ -380,9 +380,9 @@ void AIslandPlayerController::ClientReturnFromParty_Implementation(uint32 RoundI
         return;
     }
     bPartyReturning = true;
-    if (APartyPawn* Pawn = Cast<APartyPawn>(GetPawn()))
+    if (APartyPawn* PartyPawn = Cast<APartyPawn>(GetPawn()))
     {
-        Pawn->ReleaseLocalPartyInput();
+        PartyPawn->ReleaseLocalPartyInput();
     }
     ReleasePartyAssets();
     if (bPartyActivating)
@@ -396,8 +396,8 @@ void AIslandPlayerController::UpdatePartyClient()
 {
     if (!bPartyReturning)
     {
-        const APartyPawn* Pawn = Cast<APartyPawn>(GetPawn());
-        if (!bPartyPawnReadySent && Pawn && Pawn->HasLocalPartyInput())
+        const APartyPawn* PartyPawn = Cast<APartyPawn>(GetPawn());
+        if (!bPartyPawnReadySent && PartyPawn && PartyPawn->HasLocalPartyInput())
         {
             bPartyPawnReadySent = true;
             UE_LOG(LogTemp, Display, TEXT("PARTY_PAWN_READY round=%u"), LocalPartyRound);

@@ -43,7 +43,7 @@ private:
     void AddTitle(const FString& Title);
     void AddMessage(TAttribute<FText> Value, bool bWarning = false);
     TSharedRef<SWidget> Button(TAttribute<FText> Label, TFunction<void()> Press,
-        TAttribute<bool> Enabled = true, bool bPrimary = false, FName Tag = NAME_None);
+        TAttribute<bool> Enabled = true, bool bPrimary = false, FName WidgetTag = NAME_None);
     FString TeamMembers(int32 Team) const;
     int32 CrewSize(int32 Team) const;
     FString RoomStatus() const;
