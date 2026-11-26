@@ -1,12 +1,15 @@
 #pragma once
 
 #include "PartyMinigame.h"
+#include "PartyCrewMotion.h"
 #include "Net/Serialization/FastArraySerializer.h"
 #include "PartyVoxelArena.generated.h"
 
 class APartyVoxelSession;
 class UCameraComponent;
+class UPartyCarvableMesh;
 class UPartyDensityTerrain;
+class UPartyCrewRig;
 class ULevel;
 class UMaterialInterface;
 class USpringArmComponent;
@@ -38,6 +41,10 @@ struct FPartyVoxelChange : public FFastArraySerializerItem
     UPROPERTY() FIntVector Center = FIntVector::ZeroValue;
     UPROPERTY() FIntVector Normal = FIntVector(0,0,1000);
     UPROPERTY() bool bFill = false;
+    UPROPERTY() uint8 Power = 0;
+    // INDEX_NONE selects the arena density field. Other ids address a stable
+    // building group or, in the maze, an authored wall of the seeded layout.
+    UPROPERTY() int32 SurfaceId = INDEX_NONE;
     UPROPERTY() TArray<FIntVector> ProtectedMin;
     UPROPERTY() TArray<FIntVector> ProtectedMax;
 };
@@ -78,6 +85,8 @@ public:
     virtual bool HasLocalPartyInput() const override;
     virtual void ReleaseLocalPartyInput() override;
     void SetCrewTint(FLinearColor Color) override;
+    void SetPunchCharge(bool bHeld,float HeldSeconds=0.f);
+    void PlayPunch(float Strength);
     void DrawPartyHUD(AHUD& HUD,const FVector2D& ViewportSize, bool bAnonymous) const override;
     APartyVoxelSession* GetSession() const { return Arena; }
     int32 GetSeat() const { return Seat; }
@@ -89,15 +98,26 @@ public:
     FVector GetToolAimDirection() const;
     bool AimTerrain(FHitResult& Hit) const;
     void UseTool(bool bPlace);
+    void BeginPunchInput();
+    void ReleasePunchInput();
+    void CancelPunchInput();
+    float GetPunchChargeAlpha() const;
 protected:
     virtual void SetupPlayerInputComponent(UInputComponent* Input) override;
     virtual void Tick(float DeltaSeconds) override;
 private:
     friend class APartyVoxelSession;
-    void UpdatePaws();
+    void UpdatePaws(float DeltaSeconds);
     void UpdateCrewModel();
     void FollowSurvivingTeammate(APlayerController& Player);
     UFUNCTION(Server,Reliable) void ServerSetChaseView(bool bFirstPerson);
+    UFUNCTION(Server,Reliable) void ServerBeginPunch();
+    UFUNCTION(Server,Reliable) void ServerEndPunch(bool bCancel,FVector_NetQuantizeNormal Direction,float ReportedHoldSeconds);
+    UFUNCTION(NetMulticast,Reliable) void MulticastPunch(uint8 Power);
+    UFUNCTION() void OnRep_PunchStart();
+    UPROPERTY(ReplicatedUsing=OnRep_PunchStart) double ServerPunchStart=-1.;
+    double LocalPunchStart=-1., ServerPunchRealStart=0.;
+    bool CanPunch() const;
     UFUNCTION(Server,Reliable) void ServerTool(bool bPlace,FVector_NetQuantizeNormal Direction);
     UPROPERTY(Replicated) TObjectPtr<APartyVoxelSession> Arena;
     UPROPERTY(Replicated) int32 Seat = INDEX_NONE;
@@ -110,6 +130,11 @@ private:
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> EyePaws;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> Body;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> CrewSculpture;
+    UPROPERTY() TObjectPtr<UPartyCrewRig> CrewRig;
+    UPROPERTY() TObjectPtr<UStaticMesh> UnpaintedFist;
+    UPROPERTY() TObjectPtr<USceneComponent> OutfitRoot;
+    FPartyCrewMotion CrewMotion;
+    double LastRenderedThrow=-1.;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> CrewBadge;
     UPROPERTY() TObjectPtr<UMaterialInterface> BaseMaterial;
     UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> SuitPaint;
@@ -127,7 +152,7 @@ private:
     bool bWaitDigRelease = false;
     bool bWaitPlaceRelease = false;
     bool bWaitJumpRelease = false;
-    double NextLocalDig = 0.;
+
     double NextLocalPlace = 0.;
     double NextServerDig = 0.;
     double NextServerPlace = 0.;
@@ -139,7 +164,7 @@ class PARTYFRAMEWORK_API APartyVoxelSession : public APartySession
     GENERATED_BODY()
 public:
     APartyVoxelSession();
-    static constexpr double StructureReach = 12500.;
+    static constexpr double StructureReach = 235., FillReach = 435.;
     static constexpr float ChaseRunnerSpeed = 570.f;
     static constexpr float ChaseHunterSpeed = 615.f;
     static constexpr double ChaseToolRecovery(bool bPlace) { return bPlace ? .85 : .55; }
@@ -163,6 +188,9 @@ public:
     bool HasGrid() const { return bBuilt; }
 #if !UE_BUILD_SHIPPING
     uint32 GridDigest() const;
+    uint32 VenueDamageDigest(int32 Group) const;
+    int32 ReachableVenuePads(int32 Seat) const;
+    bool VenueApproach(int32 Group,const APartyVoxelPawn& Pawn,FVector& Stand,FVector& Target) const;
 #endif
     float SecondsLeft() const;
     const TArray<FPartyVoxelStanding>& GetStandings() const { return Standings; }
@@ -179,7 +207,8 @@ public:
     void BindVenueLevel(ULevel& Level);
     int32 GetVenueStructureCount() const { return VenueStructures.Num(); }
     void GetVenueStructureParts(int32 Id, TArray<UStaticMeshComponent*>& Out) const;
-    bool IsVenueStructureDestroyed(int32 Id) const { return DestroyedVenueStructures.Contains(Id); }
+    bool IsVenueStructureDestroyed(int32 Id) const { return IsVenueFullyCarved(Id); }
+    bool IsVenueFullyCarved(int32 Id) const;
     int32 TraceVenueStructure(FVector From, FVector Direction, const AActor* Ignore) const;
     UPROPERTY(EditDefaultsOnly) FString Title;
     UPROPERTY(EditDefaultsOnly) FString Objective;
@@ -194,13 +223,15 @@ protected:
     virtual float PreparationSeconds() const { return 0.f; }
     virtual void OnArenaStarted() {}
     virtual void CheckParticipantBounds(APartyVoxelPawn& Pawn);
-    virtual bool UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVector Direction);
+    virtual bool UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVector Direction,uint8 Power=0);
     APartyVoxelPawn* Participant(int32 Seat) const { return Participants.FindRef(Seat).Get(); }
     double Clock() const;
     void Results();
     virtual void OnArenaStep(float DeltaSeconds) {}
     virtual void OnTerrainEdited(int32 Seat, const FBox& WorldBounds, bool bPlaced) {}
 
+    bool CommitBrush(FPartyVoxelChange& Brush);
+    virtual bool ApplyStructureBrush(const FPartyVoxelChange& Brush);
     void Block(FIntVector Cell,EPartyBlock Kind);
     void Box(FIntVector Min,FIntVector Max,EPartyBlock Kind);
     void Marker(FIntVector Cell,FColor Color);
@@ -215,16 +246,22 @@ private:
     friend class FPartyArenaSupportTest;
     void EnsureGrid();
     void ReplayBrushes(TArrayView<const int32> Indices);
-    bool CommitBrush(FPartyVoxelChange& Brush);
+    bool ApplyBrushLocally(const FPartyVoxelChange& Brush);
     void ProtectParticipants(FPartyVoxelChange& Brush, TMap<APartyVoxelPawn*,FVector>& Lifts) const;
     void ApplyBeacon(FIntVector Cell,FColor Color);
     UFUNCTION() void OnRep_Beacons();
-    UFUNCTION() void OnRep_VenueStructures();
-    void ApplyVenueDestruction(bool bShowDebris);
+
+    void BuildVenuePaths();
+    void PlaceVenueBuildings();
+    bool EnsureVenueFields(int32 Group,TArray<UPartyCarvableMesh*>& Out);
+    void CheckVenueFoundations(const FBox& Cut);
+    TArray<FIntVector> VenuePads;
+    TArray<TArray<TWeakObjectPtr<UPartyCarvableMesh>>> VenueFields;
+    bool bVenuePlaced=false;
     TWeakObjectPtr<ULevel> BoundVenue;
     TArray<TArray<TWeakObjectPtr<UStaticMeshComponent>>> VenueStructures;
     TMap<TWeakObjectPtr<UStaticMeshComponent>, int32> VenuePartIds;
-    UPROPERTY(ReplicatedUsing=OnRep_VenueStructures) TArray<int32> DestroyedVenueStructures;
+
     void Respawn(APartyVoxelPawn& Pawn);
     UPROPERTY(Replicated) int32 Seed = 1;
     UPROPERTY(Replicated) EPartyVoxelPhase Phase = EPartyVoxelPhase::Waiting;

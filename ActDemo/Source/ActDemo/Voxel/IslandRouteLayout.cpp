@@ -156,8 +156,10 @@ namespace
         TArray<FBox2D> Blockers, Reserved = Trail.Reserved;
         for (const auto& Prop : Neutrals)
         {
-            Blockers.Add(IslandNeutral::Footprint(Prop));
-            Reserved.Add(Blockers.Last().ExpandBy(320.)); // Leave the fallen tree, sail controls and ship approaches usable.
+            IslandNeutral::AppendFootprints(Prop,Blockers);
+            TArray<FBox2D> Corridor;
+            IslandNeutral::AppendFootprints(Prop,Corridor,true);
+            for (const auto& Section : Corridor) Reserved.Add(Section.ExpandBy(120.));
         }
 
         const auto TryPlace = [&](FVector2D XY, EShape Kind, int32 Variation, double Heading, int32 PalmAnchor=INDEX_NONE)
@@ -262,7 +264,7 @@ TArray<FIslandRouteSite> IslandRouteLayout::Build(UWorld& World,const AVoxelTerr
     const FTrail Trail = ReadTrail(World,Terrain);
     TArray<FIslandRouteSite> Sites = Place(Trail,Terrain,Surface,Treasure,Neutrals);
     TArray<FBox2D> Footprints;
-    for (const auto& Prop : Neutrals) Footprints.Add(IslandNeutral::Footprint(Prop));
+    for (const auto& Prop : Neutrals) IslandNeutral::AppendFootprints(Prop,Footprints);
     int32 Kinds[4] = {};
     for (const auto& Site : Sites)
     {
@@ -295,7 +297,7 @@ TArray<FIslandRouteSite> IslandRouteLayout::Build(UWorld& World,const AVoxelTerr
             IslandNeutral::Generate(Surface,Seed,Dig,Features);
             const auto Batch = Place(Trail,Terrain,Surface,Dig,Features);
             TArray<FBox2D> All;
-            for (const auto& Prop : Features) All.Add(IslandNeutral::Footprint(Prop));
+            for (const auto& Prop : Features) IslandNeutral::AppendFootprints(Prop,All);
             bool bClear = !Batch.IsEmpty();
             for (const auto& Site : Batch)
             {

@@ -1,4 +1,5 @@
 #include "Island/IslandHUD.h"
+#include "PartyPunchHUD.h"
 
 #include "ExpeditionText.h"
 #include "Camera/CameraActor.h"
@@ -41,8 +42,8 @@ namespace
         switch (Event)
         {
         case EIslandDecoyEvent::WideTools:
-            return bWon ? EXPEDITION_TEXT("本队的宽铲已就绪", "Your crew has wide tools")
-                : EXPEDITION_TEXT("胜队的挖掘与堆土半径翻倍", "Winning crews can dig and build twice as wide");
+            return bWon ? EXPEDITION_TEXT("本队出拳和堆土的范围已扩大", "Your crew punches and builds over a wider area")
+                : EXPEDITION_TEXT("胜队的出拳与堆土范围扩大", "Winning crews punch and build over a wider area");
         case EIslandDecoyEvent::Scatter:
             return bWon ? EXPEDITION_TEXT("败队队员已被冲散", "The tide scattered the losing crews")
                 : EXPEDITION_TEXT("你被冲到了新的落点 · 按住 Tab 辨认方向", "You washed up elsewhere · Hold Tab to get your bearings");
@@ -59,7 +60,7 @@ namespace
         case EIslandDecoyEvent::SandRamp:
             return EXPEDITION_TEXT("假箱旁拱起了砂坡，可以踩上去，也可以挖开", "A sand ramp rose by the decoy. Walk up it or dig it away.");
         case EIslandDecoyEvent::SailGust:
-            return EXPEDITION_TEXT("岛上的帆布收放对调了 · 在绳尾按 E 可再调", "The wind flipped the sails. Press E at a rope to change one.");
+            return EXPEDITION_TEXT("栈桥站的遮视帆受风翻转了", "Wind flipped the screens at the bridge stations.");
         default:
             return TEXT("");
         }
@@ -390,7 +391,7 @@ void AIslandHUD::Tick(float DeltaSeconds)
 FString AIslandHUD::ControlsText() const
 {
     if (const auto* State = GetWorld()->GetGameState<AIslandGameState>(); State && State->bRoomLobby)
-        return EXPEDITION_TEXT("左键 挖地    右键 丢土    空格 跳跃    E 交互    V 切换视角    按住 Tab 看海图    按住 R 回码头", "LMB dig   RMB throw   Space jump   E use   V view   Hold Tab for chart   Hold R for dock");
+        return EXPEDITION_TEXT("左键 挖地或开箱    右键 丢土    空格 跳跃    V 切换视角    按住 Tab 看海图    按住 R 回码头", "LMB dig / open chest   RMB throw   Space jump   V view   Hold Tab for chart   Hold R for dock");
     return EXPEDITION_TEXT("左键 凿岩    右键 挖脚下    Q 回填    Shift 攀爬    按住 Tab 看海图    按住 R 回码头", "LMB break rock   RMB dig down   Q fill   Shift climb   Hold Tab for chart   Hold R for dock");
 }
 
@@ -500,7 +501,7 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
         const bool bWideTools = Round->ActiveDecoyEvent == EIslandDecoyEvent::WideTools;
         if (!bWideTools || Round->HasDecoyToolBoost(Team))
         {
-            const TCHAR* Effect = bWideTools ? EXPEDITION_TEXT("挖掘与堆土范围 ×2", "Dig & fill radius ×2")
+            const TCHAR* Effect = bWideTools ? EXPEDITION_TEXT("拳击范围 ×2–3 · 土台范围 ×2", "Punch radius ×2–3 · Fill radius ×2")
                 : DecoyEventName(Round->ActiveDecoyEvent);
             const FString Status = FString::Format(EXPEDITION_TEXT("{0} · 至下一场小游戏开赛","{0} · Until the next minigame starts"), {Effect});
             Box(Status,22*S,84*S,IslandHudColors::Amber);
@@ -548,7 +549,7 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
         else if (bTrue && (Clues.Mask & (1u << Round->PartySite)))
             Result=EXPEDITION_TEXT("本队已记录这个真箱点位并领取过碎片","Your crew already charted this chest and claimed its fragment.");
         else if (bTrue)
-            Result=EXPEDITION_TEXT("到这只真箱旁按 E 领取钥匙碎片","Press E at this chest to claim your crew’s key fragment.");
+            Result=EXPEDITION_TEXT("靠近真箱，瞄准箱盖点左键领取钥匙碎片","Aim at this chest and click LMB to claim your crew’s key fragment.");
         else
             Result=DecoyResult(Round->PartyDecoyEvent, Round->IsPartyWinner(Team), bHasMate);
         Box(Result,X,H*.20f+31*S,IslandHudColors::Ink,true);
@@ -557,8 +558,8 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     {
         if (!bAnonymous) DrawNearbyCrews(PC,S);
         const auto* Hero = PC.GetHero();
-        if (Hero && Hero->IsMudStunned()) Box(EXPEDITION_TEXT("晕啦！醒来后按住左键挖", "Stunned! Hold LMB to dig once you recover"),X,Y+75*S,IslandHudColors::Amber,true);
-        else if (Hero && Hero->IsMudCompact()) Box(EXPEDITION_TEXT("瞄准土壁或脚下，按住左键开路", "Aim at dirt or your feet and hold LMB to dig out"),X,Y+75*S,IslandHudColors::Ally,true);
+        if (Hero && Hero->IsMudStunned()) Box(EXPEDITION_TEXT("晕啦！醒来后重新按左键出拳", "Stunned! Press LMB again after recovering"),X,Y+75*S,IslandHudColors::Amber,true);
+        else if (Hero && Hero->IsMudCompact()) Box(EXPEDITION_TEXT("瞄准土壁或脚下，松开左键出拳开路", "Aim at dirt or your feet and release LMB to punch out"),X,Y+75*S,IslandHudColors::Ally,true);
     }
     FVector Rally;
     bool bAtChest;
@@ -576,7 +577,35 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     }
     DrawRect(IslandHudColors::Panel,X-3*S,Y-3*S,6*S,6*S);
     DrawRect(IslandHudColors::Ink,X-S,Y-S,2*S,2*S);
-    const auto* Chest = PC.GetReachableChest();
+    if (bExpedition && PC.IsHoldingExpeditionDig()) PartyPunch::DrawChargeRing(*this,X,Y,S,PC.GetPunchChargeAlpha());
+    const AIslandChest* Chest = PC.GetAimedChest();
+    const auto* Nearby = PC.GetReachableChest();
+    if (Nearby && Nearby->HasDiscoveryTarget() && PC.GetHero())
+    {
+        const FVector Point = Nearby->GetDiscoveryPoint();
+        FVector2D Mark;
+        const FVector Eye = PC.GetHero()->GetAimOrigin();
+        const FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandDiscoveryMarker),false,PC.GetHero());
+        FHitResult Hit;
+        if (FVector::DistSquared(Point,Eye) <= FMath::Square(IslandRules::OpenReach)
+            && (!GetWorld()->LineTraceSingleByChannel(Hit,Eye,Point,ECC_Visibility,Query) || Hit.GetActor() == Nearby)
+            && PC.ProjectWorldLocationToScreen(Point,Mark))
+        {
+            const float R = 5*S;
+            for (int32 I=0; I<4; ++I)
+            {
+                const FVector2D A = Mark + FVector2D(FMath::Cos(I*UE_HALF_PI),FMath::Sin(I*UE_HALF_PI))*R;
+                const FVector2D B = Mark + FVector2D(FMath::Cos((I+1)*UE_HALF_PI),FMath::Sin((I+1)*UE_HALF_PI))*R;
+                DrawLine(A.X,A.Y,B.X,B.Y,IslandHudColors::Amber,1.5*S);
+            }
+        }
+    }
+    const auto* LocalMember = PC.GetPlayerState<AIslandPlayerState>();
+    if (bExpedition && !Chest && LocalMember && LocalMember->LockView.Role != EIslandLockRole::Observer && PC.GetHero())
+    {
+        const auto* WorkingChest = LocalMember->LockView.Chest.Get();
+        if (WorkingChest && WorkingChest->IsReachableFrom(*PC.GetHero())) Chest = WorkingChest;
+    }
     if (bExpedition && Chest)
     {
         DrawLockPrompt(PC,*Chest,S);
@@ -594,7 +623,7 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     {
         FVector2D Screen;
         if (PC.ProjectWorldLocationToScreen(Chest->GetActorLocation()+FVector(0,0,50),Screen))
-            Box(Chest->IsPrize() && !PC.GetLocalClues().Complete() ? EXPEDITION_TEXT("宝藏 · 需要四条线索", "Treasure · Four clues needed") : EXPEDITION_TEXT("E  打开", "E  Open"),Screen.X,Screen.Y,IslandHudColors::Ink,true);
+            Box(Chest->IsPrize() && !PC.GetLocalClues().Complete() ? EXPEDITION_TEXT("宝藏 · 需要四条线索", "Treasure · Four clues needed") : EXPEDITION_TEXT("左键  打开", "LMB  Open"),Screen.X,Screen.Y,IslandHudColors::Ink,true);
     }
     const FString Water=PC.WaterStatus();
     if (!Water.IsEmpty()) Box(Water,X,H*.30f,IslandHudColors::Alert,true);
@@ -613,8 +642,8 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
             Box(EXPEDITION_TEXT("凿岩时空响越清，埋箱越近", "A louder echo means a buried chest is closer"),X,H-182*S,IslandHudColors::Amber,true);
             Box(EXPEDITION_TEXT("大奖箱可双人合撬；独自撬锁时，对手可抢一次", "Two teammates secure the treasure lock. A rival can steal a solo lock once."),X,H-148*S,IslandHudColors::Ally,true);
         }
-        Box(bExpedition ? EXPEDITION_TEXT("左键 连续挖    右键 连续丢    向脚边丢土可垫高", "Hold LMB to dig    Hold RMB to throw    Throw at your feet to climb") : EXPEDITION_TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下", "WASD move    Space jump    LMB break rock    RMB dig down"),X,H-115*S,IslandHudColors::Ink,true);
-        Box(bExpedition ? EXPEDITION_TEXT("WASD 移动    空格 跳跃    E 开箱或拉帆    按住 R 回码头", "WASD move    Space jump    E open chest / use sail    Hold R for dock") : EXPEDITION_TEXT("Q 回填    按住 Shift 攀爬    E 开箱    按住 R 回码头", "Q fill    Hold Shift to climb    E open chest    Hold R for dock"),X,H-81*S,IslandHudColors::Ink,true);
+        Box(bExpedition ? EXPEDITION_TEXT("左键 点按出拳，长按蓄力后松开    右键 连续丢    向脚边丢土可垫高", "Tap LMB to punch · Hold to charge, release to strike    Hold RMB to throw    Throw at your feet to climb") : EXPEDITION_TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下", "WASD move    Space jump    LMB break rock    RMB dig down"),X,H-115*S,IslandHudColors::Ink,true);
+        Box(bExpedition ? EXPEDITION_TEXT("WASD 移动    空格 跳跃    瞄准箱盖点左键开箱    按住 R 回码头", "WASD move    Space jump    Aim at chest + click LMB to open    Hold R for dock") : EXPEDITION_TEXT("Q 回填    按住 Shift 攀爬    瞄准箱盖点左键开箱    按住 R 回码头", "Q fill    Hold Shift to climb    Aim at chest + click LMB to open    Hold R for dock"),X,H-81*S,IslandHudColors::Ink,true);
     }
     FString Shortcuts = bExpedition ? EXPEDITION_TEXT("V 切换视角    ", "V view    ") : TEXT("");
     if (bHasMate) Shortcuts += EXPEDITION_TEXT("G 呼叫队友    ", "G rally    ");
@@ -717,18 +746,18 @@ void AIslandHUD::DrawLockPrompt(const AIslandPlayerController& PC, const AIsland
     if (!bEligible) Hint = Chest.IsPrize() ? EXPEDITION_TEXT("大奖已锁 · 需要四个真箱点位和钥匙", "Treasure locked · Chart four true chests and bring the key") : EXPEDITION_TEXT("本队已取得这只箱子的碎片", "Your crew has this fragment");
     else if (!bActive)
     {
-        if (Chest.IsPrize()) Hint = EXPEDITION_TEXT("E   撬开宝藏", "E   Unlock treasure");
-        else if (Chest.IsChallengeResolved()) Hint = EXPEDITION_TEXT("E   领取钥匙碎片", "E   Claim key fragment");
-        else Hint = EXPEDITION_TEXT("E   开箱 · 全房进入小游戏", "E   Open chest · Everyone enters the minigame");
+        if (Chest.IsPrize()) Hint = EXPEDITION_TEXT("左键   撬开宝藏", "LMB   Unlock treasure");
+        else if (Chest.IsChallengeResolved()) Hint = EXPEDITION_TEXT("左键   领取钥匙碎片", "LMB   Claim key fragment");
+        else Hint = EXPEDITION_TEXT("左键   开箱 · 全房进入小游戏", "LMB   Open chest · Everyone enters the minigame");
     }
     else if (GS->IsIdentityDisguised())
-        Hint = Lock.Role == EIslandLockRole::Observer ? EXPEDITION_TEXT("E   介入撬锁","E   Work the lock")
+        Hint = Lock.Role == EIslandLockRole::Observer ? EXPEDITION_TEXT("左键   介入撬锁","LMB   Work the lock")
             : EXPEDITION_TEXT("撬锁中 · 留在箱边","Unlocking · Stay by the chest");
     else if (bOurs)
     {
         Color = IslandHudColors::Ally;
         if (Lock.bAssisted) Hint = EXPEDITION_TEXT("双人合撬 · 箱盖已稳住", "Two teammates have secured the lock");
-        else if (Lock.Role == EIslandLockRole::Observer) Hint = EXPEDITION_TEXT("E   帮队友合撬", "E   Help secure the lock");
+        else if (Lock.Role == EIslandLockRole::Observer) Hint = EXPEDITION_TEXT("左键   帮队友合撬", "LMB   Help secure the lock");
         else Hint = Lock.bSeized ? EXPEDITION_TEXT("已夺锁 · 留在箱边", "Lock stolen · Stay by the chest") : EXPEDITION_TEXT("撬锁中 · 留在箱边", "Unlocking · Stay by the chest");
     }
     else
@@ -736,7 +765,7 @@ void AIslandHUD::DrawLockPrompt(const AIslandPlayerController& PC, const AIsland
         Color = IslandHudColors::Alert;
         if (Lock.bAssisted) Hint = EXPEDITION_TEXT("对手合撬 · 无法夺锁", "Two rivals have secured the lock");
         else if (Lock.bSeized) Hint = EXPEDITION_TEXT("对手已夺锁 · 等待开箱", "Rival took the lock · Wait for the chest to open");
-        else Hint = EXPEDITION_TEXT("E   夺走对手的锁", "E   Steal the lock");
+        else Hint = EXPEDITION_TEXT("左键   夺走对手的锁", "LMB   Steal the lock");
     }
     const float X = Canvas->ClipX*.5f, Y = Canvas->ClipY*.60f;
     float LabelW,H;

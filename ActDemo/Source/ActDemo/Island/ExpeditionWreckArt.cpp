@@ -1,7 +1,7 @@
 #include "Island/ExpeditionWreckArt.h"
 
 #include "GameFramework/Actor.h"
-#include "Island/IslandBreakable.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandNeutralLayout.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ProceduralMeshComponent.h"
@@ -444,19 +444,14 @@ namespace
     }
 }
 
-void ExpeditionWreckArt::PlayChips(UPrimitiveComponent& Part, int32 Finish, FVector Point, FVector Normal,
-    UStaticMesh* Splinter, UStaticMesh* Cloth)
+EIslandChipSurface ExpeditionWreckArt::GetChipFinish(FName PartName, int32 Finish, FColor& Paint, FColor& Alternate)
 {
-    const FName Name=Part.GetFName();
-    const bool IsCloth=Name==TEXT("Wreck_Canvas");
-    const bool IsRope=Name==TEXT("Wreck_Forestay") || Name==TEXT("Wreck_Backstays");
-    UMaterialInterface* Paint=Finish>=0 ? Part.GetMaterial(Finish) : nullptr;
-    if (!Paint)
-        for (int32 Slot=0; Slot<Part.GetNumMaterials() && !Paint; ++Slot) Paint=Part.GetMaterial(Slot);
-    UMaterialInterface* Grain=IsCloth || IsRope ? nullptr : Part.GetMaterial(Endgrain);
-    if (!Paint || !Splinter || (IsCloth && !Cloth)) return;
-    const FVector Scale=IsCloth ? FVector(.018,.065,.14) : IsRope ? FVector(.025,.024,.16) : FVector(.068,.026,.24);
-    AIslandSceneryDamage::PlayDebris(*Part.GetWorld(),Point,Normal,Paint,IsCloth ? Cloth : Splinter,Scale,Grain);
+    Paint = Finishes[Finish >= 0 && Finish < FinishCount ? Finish : Walnut].Color;
+    if (Finish == Brass) return EIslandChipSurface::Metal;
+    if (PartName == TEXT("Wreck_Canvas") || PartName == TEXT("Wreck_Forestay") || PartName == TEXT("Wreck_Backstays"))
+        return EIslandChipSurface::Canvas;
+    Alternate = Finishes[Endgrain].Color;
+    return EIslandChipSurface::Timber;
 }
 
 void ExpeditionWreckArt::Build(AActor& Owner, UMaterialInterface* PaintBase)

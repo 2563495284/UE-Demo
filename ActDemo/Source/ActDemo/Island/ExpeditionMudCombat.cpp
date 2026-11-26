@@ -5,6 +5,8 @@
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Island/ExpeditionMudBall.h"
+#include "Island/IslandAttachedMud.h"
+#include "Island/IslandNeutralProp.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
 #include "Island/IslandWorld.h"
@@ -113,12 +115,35 @@ AVoxelCharacter* AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thro
         }
         else
         {
-            // Static walls may support a foothold at the soil line; upper decks and props cannot grow floating mud.
-            FHitResult Ground;
-            const FVector Probe = Hit.ImpactPoint + Hit.ImpactNormal * 20.;
-            if (!Terrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
-                return nullptr;
-            QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal, Round->HasDecoyToolBoost(Thrower.GetTeam()));
+            FHitResult MechanismHit = Hit;
+            if (const auto* Mud = Cast<AIslandAttachedMud>(Hit.GetActor()))
+            {
+                // All courses use the underlying physical beam as their attachment
+                // parent. A coat of clay must not mask the station on later throws.
+                if (auto* Beam = Cast<UPrimitiveComponent>(Mud->GetRootComponent()->GetAttachParent()))
+                    MechanismHit = FHitResult(Beam->GetOwner(), Beam, Hit.ImpactPoint, Hit.ImpactNormal);
+            }
+            if (AIslandAttachedMud::CanReceive(Hit.GetComponent()))
+            {
+                FVoxelEdit Stamp;
+                Stamp.Action = EVoxelAction::Fill;
+                Stamp.BrushId = VoxelPlayground::MudPad;
+                Stamp.Center = VoxelPlayground::QuantizeCenter(Hit.ImpactPoint);
+                Stamp.SurfaceNormal = VoxelPlayground::QuantizeNormal(Hit.ImpactNormal);
+                Stamp.bWideFootprint = Round->HasDecoyToolBoost(Thrower.GetTeam());
+                ClipProtectedMud(Stamp);
+                TMap<AVoxelCharacter*, FVector> Lifts;
+                if (CheckMudOccupants(Stamp, &Lifts) && AIslandAttachedMud::Place(Hit, Stamp))
+                    LiftMudOccupants(Lifts);
+            }
+            else
+            {
+                FHitResult Ground;
+                const FVector Probe = Hit.ImpactPoint + Hit.ImpactNormal * 20.;
+                if (Terrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
+                    QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal, Round->HasDecoyToolBoost(Thrower.GetTeam()));
+            }
+            if (auto* Prop = Cast<AIslandNeutralProp>(MechanismHit.GetActor())) Prop->ReceiveMudImpact(MechanismHit);
             return nullptr;
         }
         QueueMudLanding(Hit.ImpactPoint, Hit.ImpactNormal, Round->HasDecoyToolBoost(Thrower.GetTeam()));

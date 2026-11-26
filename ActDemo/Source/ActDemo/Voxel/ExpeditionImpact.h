@@ -18,6 +18,7 @@ class AExpeditionImpactCamera : public APlayerCameraManager
 public:
     AExpeditionImpactCamera();
     static void Play(AActor& Terrain, const FVoxelEdit& Edit);
+    static void PlayAt(UWorld& World, FVector Point, float Volume, float Pitch, float Shake);
     void UpdateCamera(float DeltaTime) override;
     bool HasPaintedPassageBlack(uint32 Round, bool bReturning) const;
 

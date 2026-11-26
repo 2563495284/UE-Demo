@@ -79,6 +79,41 @@ bool FExpeditionBridgeSupportTest::RunTest(const FString& Parameters)
     return !HasAnyErrors();
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FExpeditionFistRadiusTest, "ActDemo.Voxel.ChargedPunch.RadiusAndDepth",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FExpeditionFistRadiusTest::RunTest(const FString&)
+{
+    using namespace VoxelPlayground;
+    FVoxelEdit Punch;
+    Punch.BrushId=ShallowCut;
+    const uint8 Half=PartyPunch::Quantize(.6f);
+    TestEqual(TEXT("Overcharging clamps on the server"), PartyPunch::Quantize(4.f), PartyPunch::Quantize(1.2f));
+    TestEqual(TEXT("Reliable delivery jitter can restore a real half charge"),PartyPunch::ResolvePower(.49,.6f,80.f),Half);
+    TestEqual(TEXT("A local host uses its own elapsed clock"),PartyPunch::ResolvePower(.6,12.f,-1.f),Half);
+    TestEqual(TEXT("Even a very slow connection cannot turn a tap into a full charge"),
+        PartyPunch::ResolvePower(.02,50.f,900.f),PartyPunch::Quantize(.22f));
+    TestEqual(TEXT("The full charge ceiling also applies after compensation"),
+        PartyPunch::ResolvePower(1.12,2.1f,80.f),uint8(255));
+    for (bool bBoost : {false,true})
+    {
+        Punch.bWideFootprint=bBoost;
+        for (uint8 Power : {uint8(0),Half,uint8(255)})
+        {
+            Punch.PunchPower=Power;
+            const int32 Radius=(bBoost ? 124 : 62) + (Power==0 ? 0 : Power==Half ? 31 : 62);
+            TestEqual(TEXT("Light / half / full use linear radii"),Punch.PunchRadius(),Radius);
+            Punch.SurfaceNormal={0,0,1000};
+            TestEqual(TEXT("Floor edge matches the recorded radius"),PartyBrushDistance(Punch,{0,Radius,0}),0);
+            TestTrue(TEXT("A full footprint never cuts deeper than a light fist"),PartyBrushDistance(Punch,{0,0,-41})>0);
+            Punch.SurfaceNormal={1000,0,0};
+            TestTrue(TEXT("Sideways punch carves same footprint on wall"),PartyBrushDistance(Punch,{-15,0,Radius-3})<0);
+            TestTrue(TEXT("Material just outside wall footprint remains"),PartyBrushDistance(Punch,{-15,0,Radius+3})>0);
+        }
+    }
+    return !HasAnyErrors();
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FExpeditionDecoyToolFootprintTest, "ActDemo.Voxel.DecoyToolFootprint",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

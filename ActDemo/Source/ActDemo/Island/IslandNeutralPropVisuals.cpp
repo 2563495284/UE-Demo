@@ -6,7 +6,6 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "ProceduralMeshComponent.h"
 
 namespace NeutralPropColors
 {
@@ -174,14 +173,6 @@ void AIslandNeutralProp::BuildShip()
     ExpeditionWreckArt::Build(*this, WreckFinish ? WreckFinish : PaintBase);
 }
 
-void AIslandNeutralProp::MulticastWreckChips_Implementation(FName SourceName,int32 Finish,
-    FVector_NetQuantize Point,FVector_NetQuantizeNormal Normal)
-{
-    if (GetNetMode()==NM_DedicatedServer) return;
-    if (auto* Part=FindObjectFast<UProceduralMeshComponent>(this,SourceName))
-        ExpeditionWreckArt::PlayChips(*Part,Finish,Point,Normal,SprayDrop,WindCanvas);
-}
-
 void AIslandNeutralProp::BuildHopper()
 {
     using namespace NeutralPropColors;
@@ -283,9 +274,9 @@ void AIslandNeutralProp::BuildSail()
 void AIslandNeutralProp::AnimateSail(double Now)
 {
     if (Cloth.IsEmpty()) return;
-    const double Age = FMath::Max(0.,Now-State.ChangedAt);
+    const double Age = FMath::Max(0.,Now-(State.Kind == EIslandNeutralKind::Bridge ? State.SailChangedAt : State.ChangedAt));
     const double Travel = FMath::Clamp(Age/.36,0.,1.);
-    const double Open = State.Phase == 1 ? Travel : 1.-Travel;
+    const double Open = IsSailLowered() ? Travel : 1.-Travel;
     const double Life = FMath::Clamp((Now-State.RippleAt)/.68,0.,1.);
     const double Length = 19.+232.*Open;
     SailRoll->SetRelativeScale3D({.35-.17*Open,4.33,.50-.26*Open});

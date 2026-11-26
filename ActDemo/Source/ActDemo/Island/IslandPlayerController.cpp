@@ -48,7 +48,6 @@ void AIslandPlayerController::SetupInputComponent()
 #endif
     if (InputComponent)
     {
-        InputComponent->BindKey(EKeys::E, IE_Pressed, this, &AIslandPlayerController::Interact);
         InputComponent->BindKey(EKeys::G, IE_Pressed, this, &AIslandPlayerController::Rally);
         InputComponent->BindKey(EKeys::Tab, IE_Pressed, this, &AIslandPlayerController::OpenMap);
         InputComponent->BindKey(EKeys::Tab, IE_Released, this, &AIslandPlayerController::CloseMap);
@@ -76,7 +75,12 @@ void AIslandPlayerController::ToggleMenu()
     if (auto* HUD=GetHUD<AIslandHUD>()) HUD->ToggleMenu();
 }
 
-void AIslandPlayerController::OpenHelp() { bHelpOpen=CanUseIslandWorld() && !bMapOpen; }
+void AIslandPlayerController::OpenHelp()
+{
+    if (!CanUseIslandWorld() || bMapOpen) return;
+    CancelPunchCharge();
+    bHelpOpen=true;
+}
 void AIslandPlayerController::CloseHelp() { bHelpOpen=false; }
 
 void AIslandPlayerController::OpenMap()
@@ -103,11 +107,14 @@ void AIslandPlayerController::ClearHeldIslandActions()
     if (GetHero()) StopClimb();
 }
 
-void AIslandPlayerController::Interact()
+void AIslandPlayerController::Punch()
 {
-    if (!CanUseIslandWorld() || !IsVoxelInputEnabled() || WaterState >= 2) return;
-    if (UsesExpeditionAbilities()) DispatchExpeditionAction(EExpeditionAction::Interact);
-    else ServerInteract();
+    if (!CanUseIslandWorld() || !IsVoxelInputEnabled() || bHelpOpen || WaterState >= 2) return;
+    FVector Aim;
+    if (AIslandChest* Chest = GetAimedChest(&Aim))
+        ServerClickChest(Chest, Aim);
+    else
+        Super::Punch();
 }
 
 void AIslandPlayerController::RestartIsland()
@@ -169,49 +176,98 @@ AIslandChest* AIslandPlayerController::GetReachableChest() const
     return Target;
 }
 
-void AIslandPlayerController::ServerInteract_Implementation()
+AIslandChest* AIslandPlayerController::TraceChest(const FVector& Start, const FVector& End, FVector& Impact) const
 {
-    if (UsesExpeditionAbilities()) return;
-    if (AIslandGameMode* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+    const auto* Hero = GetHero();
+    if (!Hero) return nullptr;
+    const FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandChestAim), false, Hero);
+    FHitResult Hit;
+    const bool bHit = AIslandNeutralProp::TraceShovel(*GetWorld(), Hit, Start, End, Query);
+    Impact = bHit ? Hit.ImpactPoint : End;
+    AIslandChest* Result = bHit ? Cast<AIslandChest>(Hit.GetActor()) : nullptr;
+    if (Result && !Result->IsReachableFrom(*Hero)) Result = nullptr;
+
+    // An exposed chest can settle below its discovery point, or lose both wooden panels.
+    // Keep a small target there, clipped by the same first occluder as the visible chest.
+    const FVector Direction = (End - Start).GetSafeNormal();
+    double Closest = FVector::Dist(Start, Impact);
+    for (TActorIterator<AIslandChest> It(GetWorld()); It; ++It)
     {
-        Mode->TryOpen(*this);
+        const FVector Center = It->GetDiscoveryPoint();
+        if (FVector::DistSquared(Hero->GetAimOrigin(), Center) > FMath::Square(IslandRules::OpenReach)
+            || !It->HasDiscoveryTarget()) continue;
+        constexpr double Radius = 24.;
+        const FVector ToCenter = Center - Start;
+        const double Along = ToCenter.Dot(Direction);
+        const double AcrossSq = (ToCenter - Direction * Along).SizeSquared();
+        if (Along < 0. || AcrossSq > Radius * Radius) continue;
+        const double Entry = FMath::Max(0., Along - FMath::Sqrt(Radius * Radius - AcrossSq));
+        if (Entry >= Closest) continue;
+        FHitResult Obstruction;
+        if (GetWorld()->LineTraceSingleByChannel(Obstruction, Hero->GetAimOrigin(), Center, ECC_Visibility, Query)
+            && Obstruction.GetActor() != *It) continue;
+        Result = *It;
+        Closest = Entry;
+        Impact = Start + Direction * FMath::Max(1., Entry);
     }
+    return Result;
 }
 
-AIslandNeutralProp* AIslandPlayerController::GetReachableSail() const
+AIslandChest* AIslandPlayerController::GetAimedChest(FVector* OutAim) const
 {
-    for (TActorIterator<AIslandNeutralProp> It(GetWorld()); It; ++It)
-        if (It->GetKind() == EIslandNeutralKind::Sail && It->CanUseRope(*this)) return *It;
-    return nullptr;
+    const AVoxelCharacter* Hero = GetHero();
+    if (!Hero) return nullptr;
+    const FVector Eye = Hero->GetAimOrigin();
+    FVector Camera, Point;
+    FRotator View;
+    GetPlayerViewPoint(Camera, View);
+    AIslandChest* Chest = TraceChest(Camera, Camera + View.Vector() * 1000., Point);
+    if (!Chest) return nullptr;
+    const FVector Aim = (Point - Eye).GetSafeNormal();
+    if (GetChestAlongAim(Aim) != Chest) return nullptr;
+    if (OutAim) *OutAim = Aim;
+    return Chest;
+}
+
+AIslandChest* AIslandPlayerController::GetChestAlongAim(const FVector& Aim) const
+{
+    const AVoxelCharacter* Hero = GetHero();
+    if (!Hero || Aim.ContainsNaN() || !Aim.IsUnit(.05)) return nullptr;
+    FVector Impact;
+    const FVector Eye = Hero->GetAimOrigin();
+    return TraceChest(Eye, Eye + Aim * (IslandRules::OpenReach + IslandRules::ChestExtent.Size()), Impact);
+}
+
+void AIslandPlayerController::ServerClickChest_Implementation(AIslandChest* Chest, FVector_NetQuantizeNormal Aim)
+{
+    if (IsHoldingExpeditionDig() || !IsValid(Chest) || GetChestAlongAim(Aim) != Chest) return;
+    if (UsesExpeditionAbilities()) TriggerExpeditionEvent(EExpeditionAction::Interact, false, Chest);
+    else if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>()) Mode->TryOpen(*this, *Chest);
 }
 
 FString AIslandPlayerController::GetNeutralHint() const
 {
-    if (const auto* Sail = GetReachableSail())
-        return Sail->GetPhase() == 0 ? EXPEDITION_TEXT("E  放下帆布", "E  Lower sail") : EXPEDITION_TEXT("E  收起帆布", "E  Raise sail");
     const auto* Hero = GetHero();
     if (!Hero) return {};
+    FHitResult Hit;
     const FVector Eye = Hero->GetAimOrigin();
-    const FVector Forward = GetControlRotation().Vector();
-    for (TActorIterator<AIslandNeutralProp> It(GetWorld()); It; ++It)
+    const FVector Aim = GetExcavationAim(*Hero);
+    const FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandNeutralHint), false, Hero);
+    if (!AIslandNeutralProp::TraceShovel(*GetWorld(), Hit, Eye, Eye + Aim * 1000., Query)) return {};
+    const auto* Prop = Cast<AIslandNeutralProp>(Hit.GetActor());
+    if (!Prop || Prop->IsDemolished() || Prop->GetTriggerHits() >= 3) return {};
+    const TCHAR* Action = nullptr;
+    switch (Prop->GetKind())
     {
-        if (It->IsDemolished()) continue;
-        const FVector Offset = It->GetInteractionPoint() - Eye;
-        if (Offset.SizeSquared() > FMath::Square(480.) || FVector::DotProduct(Forward, Offset.GetSafeNormal()) < .72) continue;
-        switch (It->GetKind())
-        {
-        case EIslandNeutralKind::Tree:
-            if (It->GetPhase() < 2) return EXPEDITION_TEXT("左键敲树根", "LMB  Strike the tree roots");
-            break;
-        case EIslandNeutralKind::Ship: return EXPEDITION_TEXT("挖通船舱  ·  右键丢土搭上甲板", "Dig into the hold · RMB to build up to the deck");
-        case EIslandNeutralKind::Hopper:
-            if (It->GetPhase() == 0) return EXPEDITION_TEXT("左键敲木销放砂", "LMB  Knock out the pin to release sand");
-            break;
-        case EIslandNeutralKind::Tide: return EXPEDITION_TEXT("右键丢土堵一孔  ·  白泡冒起时跳入另一孔", "RMB to plug one vent · Jump into the other when it bubbles");
-        default: break;
-        }
+    case EIslandNeutralKind::Bridge: Action = EXPEDITION_TEXT("左键断索放桥", "LMB  Release the bridge"); break;
+    case EIslandNeutralKind::Dam: Action = EXPEDITION_TEXT("左键拆坝放水", "LMB  Breach the dam"); break;
+    case EIslandNeutralKind::SandDepot: Action = EXPEDITION_TEXT("右键填仓放砂", "RMB  Fill the sand counterweight"); break;
+    case EIslandNeutralKind::WindTower: Action = EXPEDITION_TEXT("右键封住风塔", "RMB  Seal the wind tower"); break;
+    default: return {};
     }
-    return {};
+    if ((Prop->GetKind() == EIslandNeutralKind::Bridge || Prop->GetKind() == EIslandNeutralKind::Dam)
+        && Hit.Distance > AVoxelGameMode::AimReach) return {};
+    return FString::Printf(TEXT("%s · %d/3"), Action, int32(Prop->GetTriggerHits()));
 }
 
 void AIslandPlayerController::ServerRestartIsland_Implementation()

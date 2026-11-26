@@ -4,6 +4,9 @@
 #include "Camera/CameraComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/SkeletalMesh.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "PartyCrewRig.h"
 #include "Island/IslandState.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
@@ -19,7 +22,17 @@ UExpeditionAnimalComponent::UExpeditionAnimalComponent()
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Monkey(TEXT("/Game/TreasureIsland/Art/Crew/SM_Monkey"));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Fox(TEXT("/Game/TreasureIsland/Art/Crew/SM_Fox"));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Calf(TEXT("/Game/TreasureIsland/Art/Crew/SM_Calf"));
+    static ConstructorHelpers::FObjectFinderOptional<USkeletalMesh> PigRig(TEXT("/Game/TreasureIsland/Art/Crew/Pig/SK_ExpeditionPig"));
+    static ConstructorHelpers::FObjectFinderOptional<USkeletalMesh> MonkeyRig(TEXT("/Game/TreasureIsland/Art/Crew/Monkey/SK_ExpeditionMonkey"));
+    static ConstructorHelpers::FObjectFinderOptional<USkeletalMesh> FoxRig(TEXT("/Game/TreasureIsland/Art/Crew/Fox/SK_ExpeditionFox"));
+    static ConstructorHelpers::FObjectFinderOptional<USkeletalMesh> CalfRig(TEXT("/Game/TreasureIsland/Art/Crew/Calf/SK_ExpeditionCalf"));
+    static ConstructorHelpers::FObjectFinderOptional<UStaticMesh> PigHand(TEXT("/Game/TreasureIsland/Art/Crew/Pig/SM_PigFist"));
+    static ConstructorHelpers::FObjectFinderOptional<UStaticMesh> MonkeyHand(TEXT("/Game/TreasureIsland/Art/Crew/Monkey/SM_MonkeyFist"));
+    static ConstructorHelpers::FObjectFinderOptional<UStaticMesh> FoxHand(TEXT("/Game/TreasureIsland/Art/Crew/Fox/SM_FoxFist"));
+    static ConstructorHelpers::FObjectFinderOptional<UStaticMesh> CalfHand(TEXT("/Game/TreasureIsland/Art/Crew/Calf/SM_CalfFist"));
     Animals = {Pig.Object, Monkey.Object, Fox.Object, Calf.Object};
+    Rigs = {PigRig.Get(), MonkeyRig.Get(), FoxRig.Get(), CalfRig.Get()};
+    Fists = {PigHand.Get(), MonkeyHand.Get(), FoxHand.Get(), CalfHand.Get()};
     Mitten = Paw.Object;
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Pointed(TEXT("/Engine/BasicShapes/Cone"));
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Material(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
@@ -69,6 +82,10 @@ UStaticMesh* UExpeditionAnimalComponent::GetCharacterMesh(int32 ModelIndex) cons
     return Animals.IsValidIndex(ModelIndex) ? Animals[ModelIndex].Get() : nullptr;
 }
 
+USkeletalMesh* UExpeditionAnimalComponent::GetCharacterRig(int32 ModelIndex) const { return Rigs.IsValidIndex(ModelIndex) ? Rigs[ModelIndex].Get() : nullptr; }
+
+UStaticMesh* UExpeditionAnimalComponent::GetFirstPersonFist(int32 ModelIndex) const { return Fists.IsValidIndex(ModelIndex) ? Fists[ModelIndex].Get() : nullptr; }
+
 void UExpeditionAnimalComponent::Build()
 {
     auto* Hero = CastChecked<AVoxelCharacter>(GetOwner());
@@ -107,6 +124,10 @@ void UExpeditionAnimalComponent::Build()
     // The sculpture is authored in centimetres from the sole; its skin, costume and face share one draw.
     Sculpture = Shape(AnimalFeatures, FVector::ZeroVector, FVector(100.), FColor::White, GetCharacterMesh(DisplayedModel));
     Sculpture->SetMaterial(0, nullptr); // use the sculpture's own painted material when switching mesh
+    Rig=NewObject<UPartyCrewRig>(Hero);
+    Rig->SetupAttachment(AnimalFeatures);
+    Hero->AddInstanceComponent(Rig);
+    Rig->RegisterComponent();
     CheekMud=Shape(Body,{37,24,111},{9,25,15},FColor(149,95,60));
     CheekMud->SetRelativeRotation(FRotator(0.,29.,-12.));
     CheekMud->SetVisibility(false);
@@ -128,12 +149,18 @@ void UExpeditionAnimalComponent::Build()
         Mark->SetVisibility(false,true);
         Marks.Add(Mark);
     }
-    Shape(AnimalFeatures,{-31,0,62},{11,51,38},FColor(91,61,48));
-    Badge = Shape(AnimalFeatures,{-36,0,62},{6,43,30},FColor::White);
+    auto* PatchRoot=NewObject<USceneComponent>(Hero);
+    PatchRoot->SetupAttachment(AnimalFeatures);
+    PatchRoot->SetRelativeLocation({-31.,0.,62.});
+    Hero->AddInstanceComponent(PatchRoot);
+    PatchRoot->RegisterComponent();
+    Shape(PatchRoot,FVector::ZeroVector,{11,51,38},FColor(91,61,48));
+    Badge = Shape(PatchRoot,{-5,0,0},{6,43,30},FColor::White);
 }
 
-void UExpeditionAnimalComponent::PlayDig() { bThrow=false; Swing=1.f; }
-void UExpeditionAnimalComponent::PlayThrow() { bThrow=true; Swing=1.f; }
+void UExpeditionAnimalComponent::SetPunchCharge(bool bHeld,float Elapsed) { Motion.Charge(GetWorld()->GetTimeSeconds(),bHeld,Elapsed); }
+void UExpeditionAnimalComponent::PlayPunch(float Strength) { Motion.Strike(GetWorld()->GetTimeSeconds(),Strength); }
+void UExpeditionAnimalComponent::PlayThrow() { Motion.Throw(GetWorld()->GetTimeSeconds()); }
 void UExpeditionAnimalComponent::SetMarks(int32 Count) { MudSpots=Count; MarkSeconds=1.5f; }
 
 void UExpeditionAnimalComponent::TickComponent(float Delta,ELevelTick TickType,FActorComponentTickFunction* Tick)
@@ -148,13 +175,14 @@ void UExpeditionAnimalComponent::TickComponent(float Delta,ELevelTick TickType,F
         Badge->SetMaterial(0,Paint(IslandRules::TeamColor(Team).ToFColorSRGB()));
     }
     const float Speed = FMath::Clamp(float(Hero->GetVelocity().Size2D()) / 370.f,0.f,1.f);
-    Stride += Delta * 12.f * Speed;
-    Swing=FMath::Max(0.f,Swing-Delta*3.2f);
     MarkSeconds=FMath::Max(0.f,MarkSeconds-Delta);
     const bool Compact=Hero->IsMudCompact(), Stun=Hero->IsMudStunned();
-    Body->SetRelativeLocation(FVector(0,0,-Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()+FMath::Abs(FMath::Sin(Stride))*4.f*Speed));
+    LastPose=Motion.Sample(GetWorld()->GetTimeSeconds(),Delta,Speed,Hero->GetVelocity().Z,
+        Hero->GetCharacterMovement()->IsFalling(),Stun,Compact,PS && PS->bPrying);
+    const FPartyCrewPose& Pose=LastPose;
+    Body->SetRelativeLocation(Pose.BodyOffset+FVector(0,0,-Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()));
     Body->SetRelativeScale3D(Compact ? FVector(.86,.88,.46) : FVector::OneVector);
-    Body->SetRelativeRotation(FRotator(Stun ? -9.f : 0.f,0,Stun ? 9.f : 0.f));
+    Body->SetRelativeRotation(Pose.BodyRot);
     const bool FirstPerson = Hero->IsInFirstPersonView();
     const bool Visible = !FirstPerson && !(Compact && Hero->IsLocallyControlled());
     if (Body->IsVisible()!=Visible) Body->SetVisibility(Visible,true);
@@ -172,6 +200,20 @@ void UExpeditionAnimalComponent::TickComponent(float Delta,ELevelTick TickType,F
         for (int32 I = 0; I < Hands.Num(); ++I)
             Hands[I]->SetRelativeScale3D(FVector(.24, I ? .22 : -.22, LongPaws ? .46 : .33));
     }
+    USkeletalMesh* Skin=GetCharacterRig(Model);
+    const bool Rigged=Skin && !Fogged;
+    if (Rig->GetSkinnedAsset()!=Skin)
+    {
+        Rig->SetSkinnedAssetAndUpdate(Skin);
+        // Keep the crew patch on the upper back above belts and tails.
+        auto* PatchRoot=Badge->GetAttachParent();
+        PatchRoot->SetRelativeLocationAndRotation(Skin && PS ? PS->GetCrewBadgeAnchor() : FVector(-31.,0.,62.),
+            Skin ? FRotator(-10.,0.,0.) : FRotator::ZeroRotator);
+        PatchRoot->SetRelativeScale3D(Skin ? FVector(4./11.,24./51.,15./38.) : FVector::OneVector);
+    }
+    Rig->SetVisibility(Visible && Rigged);
+    Sculpture->SetVisibility(Visible && !Fogged && !Rigged);
+    if (Visible && Rigged) Rig->Apply(Pose);
     const bool ShowMud=Visible && !Stun && MarkSeconds>0 && MudSpots>=1;
     CheekMud->SetVisibility(ShowMud);
     // Only the player looking through these eyes needs a pair of near-camera paws.
@@ -188,19 +230,26 @@ void UExpeditionAnimalComponent::TickComponent(float Delta,ELevelTick TickType,F
     }
     for (int32 I=0; I<Hands.Num(); ++I)
     {
-        const float Side=I ? 1.f : -1.f, Gait=Side*FMath::Sin(Stride)*Speed;
-        const float Reach=I==1 ? FMath::Sin(Swing*PI) : 0.f;
-        Hands[I]->SetRelativeLocation(FVector(8.+Gait*9.+Reach*31.,Side*35.,61.+Reach*(bThrow?20.:-20.)));
-        Feet[I]->SetRelativeLocation(FVector(8.-Gait*12.,Side*18.,13.+FMath::Max(0.f,Gait)*8.));
+        Hands[I]->SetVisibility(Visible && !Rigged);
+        Feet[I]->SetVisibility(Visible && !Rigged);
+        Hands[I]->SetRelativeLocationAndRotation(Pose.Hands[I],Pose.HandRot[I]);
+        Feet[I]->SetRelativeLocation(Pose.Feet[I]);
         Marks[I]->SetVisibility(ShowMud && !Compact && MudSpots>=2,true);
         if (EyePaws.IsValidIndex(I))
         {
             auto* Paw=EyePaws[I].Get();
+            UStaticMesh* PaintedFist=Fogged ? nullptr : GetFirstPersonFist(Model);
+            UStaticMesh* ShapeAsset=PaintedFist ? PaintedFist : Mitten.Get();
+            if (Paw->GetStaticMesh()!=ShapeAsset)
+            {
+                Paw->SetStaticMesh(ShapeAsset);
+                Paw->SetMaterial(0,PaintedFist ? nullptr : Paint(FColor(98,65,49)));
+                Paw->SetRelativeScale3D(PaintedFist ? FVector(.20,I ? .20 : -.20,.20) : FVector(.23,I ? .14 : -.14,.16));
+            }
             Paw->SetVisibility(FirstPerson && !Stun);
             if (FirstPerson)
             {
-                Paw->SetRelativeLocation({38.+Gait*1.5+Reach*14.,Side*(21.-Reach*8.),-18.+Gait+Reach*(bThrow?11.:6.)});
-                Paw->SetRelativeRotation(FRotator(14.+Reach*12.,-Side*12.,0.));
+                Paw->SetRelativeLocationAndRotation(Pose.EyeHands[I],Pose.EyeRot[I]);
             }
         }
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "PartyPunch.h"
 #include "VoxelDensity.generated.h"
 
 UENUM()
@@ -39,6 +40,8 @@ struct FVoxelEdit
     // The server records the footprint with the edit, so replay does not need the current crew buff.
     UPROPERTY() bool bWideFootprint = false;
     int32 FootprintScale() const { return bWideFootprint ? 2 : 1; }
+    UPROPERTY() uint8 PunchPower = 0;
+    int32 PunchRadius() const { return FMath::RoundToInt(62.f*PartyPunch::RadiusScale(PunchPower,bWideFootprint)); }
     // Surface direction as fixed-point thousandths; all peers evaluate the same cut.
     UPROPERTY() FIntVector SurfaceNormal = FIntVector(0, 0, 1000);
     UPROPERTY() TArray<FVoxelProtectedBox> ProtectedBoxes;

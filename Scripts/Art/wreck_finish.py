@@ -9,6 +9,7 @@ from island_crew import material
 
 
 def wreck_finish(asset, edit):
+    asset.set_editor_property("used_with_instanced_static_meshes", True)
     base = ue.MaterialProperty.MP_BASE_COLOR
     mix = edit.get_material_property_input_node(asset, base)
     if mix:

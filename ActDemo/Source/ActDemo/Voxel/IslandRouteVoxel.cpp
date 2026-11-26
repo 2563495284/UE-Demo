@@ -1,5 +1,10 @@
 #include "Voxel/IslandRouteVoxel.h"
 #include "Island/IslandSceneryVoxels.h"
+#include "Island/IslandFallingScenery.h"
+#include "Island/IslandAttachedMud.h"
+#include "Misc/Compression.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/MemoryWriter.h"
 
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
@@ -105,17 +110,22 @@ bool UIslandRouteVoxelComponent::InitializeField(const FBox& LocalBounds, double
 
 bool UIslandRouteVoxelComponent::IsSolidLocal(FVector Local) const
 {
-    if (Step <= 0.) return false;
+    return SignedDistanceLocal(Local) < 0.;
+}
+
+double UIslandRouteVoxelComponent::SignedDistanceLocal(FVector Local) const
+{
+    if (Step <= 0.) return BIG_NUMBER;
     const FVector P = (Local - GridStart) / Step;
     const FIntVector Low(FMath::FloorToInt(P.X), FMath::FloorToInt(P.Y), FMath::FloorToInt(P.Z));
-    if (!Inside(Low)) return false;
+    if (!Inside(Low)) return double(Band)*Step/VoxelSurfaceKernel::Spacing;
     const FVector T = P - FVector(Low);
     const auto Plane = [&](int32 Z)
     {
         return FMath::Lerp(FMath::Lerp<double>(At({Low.X, Low.Y, Z}), At({Low.X+1, Low.Y, Z}), T.X),
             FMath::Lerp<double>(At({Low.X, Low.Y+1, Z}), At({Low.X+1, Low.Y+1, Z}), T.X), T.Y);
     };
-    return FMath::Lerp(Plane(Low.Z), Plane(Low.Z+1), T.Z) < 0.;
+    return FMath::Lerp(Plane(Low.Z), Plane(Low.Z+1), T.Z) * Step / VoxelSurfaceKernel::Spacing;
 }
 
 bool UIslandRouteVoxelComponent::IsSolidWorld(FVector World) const
@@ -142,10 +152,17 @@ void UIslandRouteVoxelComponent::UpdateSurface()
         return;
     }
     FProcMeshSection Combined;
+    BuildSurface(FIntVector(0), Size - FIntVector(1), [&](FIntVector P){return At(P);}, Combined);
+    SetProcMeshSection(0, Combined);
+}
+
+void UIslandRouteVoxelComponent::BuildSurface(FIntVector Low, FIntVector High,
+    TFunctionRef<int8(FIntVector)> SampleAt, FProcMeshSection& Combined) const
+{
     const double Scale = Step / VoxelSurfaceKernel::Spacing;
-    for (int32 Z = 0; Z < Size.Z - 1; Z += ChunkSide)
-    for (int32 Y = 0; Y < Size.Y - 1; Y += ChunkSide)
-    for (int32 X = 0; X < Size.X - 1; X += ChunkSide)
+    for (int32 Z = Low.Z; Z < High.Z; Z += ChunkSide)
+    for (int32 Y = Low.Y; Y < High.Y; Y += ChunkSide)
+    for (int32 X = Low.X; X < High.X; X += ChunkSide)
     {
         const FIntVector Origin(X, Y, Z);
         VoxelSurfaceKernel::FChunkSamples Chunk;
@@ -153,7 +170,7 @@ void UIslandRouteVoxelComponent::UpdateSurface()
         for (int32 K = 0; K < Width; ++K)
         for (int32 J = 0; J < Width; ++J)
         for (int32 I = 0; I < Width; ++I)
-            Chunk.Values[I + Width * (J + Width * K)] = At(Origin + FIntVector(I-2, J-2, K-2));
+            Chunk.Values[I + Width * (J + Width * K)] = SampleAt(Origin + FIntVector(I-2, J-2, K-2));
         auto Part = VoxelSurfaceKernel::BuildChunk(Chunk, FVector(Origin) * VoxelSurfaceKernel::Spacing);
         if (!Part.bEnableCollision) continue;
         const int32 Offset = Combined.ProcVertexBuffer.Num();
@@ -167,7 +184,6 @@ void UIslandRouteVoxelComponent::UpdateSurface()
         for (uint32 Id : Part.ProcIndexBuffer) Combined.ProcIndexBuffer.Add(Offset + Id);
     }
     Combined.bEnableCollision = !Combined.ProcIndexBuffer.IsEmpty();
-    SetProcMeshSection(0, Combined);
 }
 
 bool UIslandRouteVoxelComponent::ApplyWorldCut(FVector Point, FVector OutwardNormal, double Radius)
@@ -176,7 +192,7 @@ bool UIslandRouteVoxelComponent::ApplyWorldCut(FVector Point, FVector OutwardNor
     const FTransform& Transform = GetComponentTransform();
     const FVector N = OutwardNormal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
     const FVector Center = Point - N * 12.;
-    const double Depth = .69 * Radius;
+    const double Depth = .69 * FMath::Min(Radius,62.);
     const FBox Bounds = FBox::BuildAABB(Center, FVector(Radius + Depth + Step * 2.)).TransformBy(Transform.Inverse());
     const FIntVector Low = Rounded((Bounds.Min - GridStart)/Step).ComponentMax(FIntVector(0));
     const FIntVector High = Rounded((Bounds.Max - GridStart)/Step).ComponentMin(Size - FIntVector(1));
@@ -201,34 +217,93 @@ bool UIslandRouteVoxelComponent::ApplyWorldCut(FVector Point, FVector OutwardNor
     return bChanged;
 }
 
-bool UIslandRouteVoxelComponent::CullUnsupported(TFunctionRef<bool(FVector)> IsLocalAnchor)
+void UIslandRouteVoxelComponent::CaptureLoose(TConstArrayView<int32> Cells, FIslandLooseSamples& Out) const
+{
+    FIntVector Lo = Size, Hi(0);
+    for (int32 I : Cells)
+    {
+        const FIntVector P = Coordinates(I);
+        Lo = Lo.ComponentMin(P);
+        Hi = Hi.ComponentMax(P);
+        Out.Feet.Add(GetComponentTransform().TransformPosition(GridStart + FVector(P)*Step) - FVector::UpVector*Step*.5);
+    }
+    Lo = (Lo-FIntVector(3)).ComponentMax(FIntVector(0));
+    Hi = (Hi+FIntVector(3)).ComponentMin(Size-FIntVector(1));
+    FIntVector Span = Hi-Lo+FIntVector(1);
+    const auto Offset = [&](FIntVector P){ P-=Lo; return P.X+Span.X*(P.Y+Span.Y*P.Z); };
+    TArray<int8> Patch;
+    Patch.Reserve(Span.X*Span.Y*Span.Z);
+    for (int32 Z=Lo.Z; Z<=Hi.Z; ++Z)
+        for (int32 Y=Lo.Y; Y<=Hi.Y; ++Y)
+            for (int32 X=Lo.X; X<=Hi.X; ++X)
+            {
+                const int8 Sample=At({X,Y,Z});
+                Patch.Add(Sample>=0 ? Sample : int8(Band));
+            }
+    for (int32 I : Cells) Patch[Offset(Coordinates(I))] = Samples[I];
+
+    FMemoryWriter Writer(Out.Shape);
+    Writer << Lo << Span;
+    int64 CompressedSize = 0;
+    if (!FCompression::CompressMemoryBound(NAME_Zlib, CompressedSize, int64(Patch.Num()))) { Out.Shape.Reset(); return; }
+    TArray<uint8> Compressed;
+    Compressed.SetNumUninitialized(CompressedSize);
+    if (FCompression::CompressMemory(NAME_Zlib, Compressed.GetData(), CompressedSize, Patch.GetData(), Patch.Num()))
+        Writer.Serialize(Compressed.GetData(), CompressedSize);
+    else Out.Shape.Reset();
+}
+
+bool UIslandRouteVoxelComponent::FallingSection(const TArray<uint8>& Shape, FProcMeshSection& Out) const
+{
+    if (Shape.Num() <= 6*int32(sizeof(int32)) || !Original.Num()) return false;
+    FMemoryReader Reader(Shape);
+    FIntVector Lo, Span;
+    Reader << Lo << Span;
+    if (Lo.GetMin()<0 || Span.GetMin()<=0 || Span.X>Size.X-Lo.X || Span.Y>Size.Y-Lo.Y || Span.Z>Size.Z-Lo.Z) return false;
+    TArray<int8> Patch;
+    Patch.SetNumUninitialized(Span.X*Span.Y*Span.Z);
+    if (!FCompression::UncompressMemory(NAME_Zlib, Patch.GetData(), Patch.Num(),
+        Shape.GetData()+Reader.Tell(), Shape.Num()-Reader.Tell())) return false;
+    BuildSurface(Lo, Lo+Span-FIntVector(1), [&](FIntVector P) -> int8
+    {
+        P-=Lo;
+        return P.GetMin()>=0 && P.X<Span.X && P.Y<Span.Y && P.Z<Span.Z ? Patch[P.X+Span.X*(P.Y+Span.Y*P.Z)] : int8(Band);
+    }, Out);
+    Out.bEnableCollision = false;
+    return !Out.ProcIndexBuffer.IsEmpty();
+}
+
+bool UIslandRouteVoxelComponent::CullUnsupported(TFunctionRef<bool(FVector)> IsLocalAnchor, TArray<FIslandLooseSamples>* Loose)
 {
     if (!SolidCount) return false;
-    TBitArray<> Grounded(false, Samples.Num());
-    TArray<int32> Reachable;
-    for (int32 I = 0; I < Samples.Num(); ++I)
+    TBitArray<> Visited(false, Samples.Num());
+    TArray<int32> Group;
+    const int32 Before = SolidCount;
+    for (int32 Seed=0; Seed<Samples.Num(); ++Seed)
     {
-        if (Samples[I] >= 0 || !IsLocalAnchor(GridStart + FVector(Coordinates(I)) * Step)) continue;
-        Reachable.Add(I);
-        Grounded[I] = true;
-    }
-    for (int32 Head = 0; Head < Reachable.Num(); ++Head)
-    {
-        const FIntVector P = Coordinates(Reachable[Head]);
-        for (FIntVector Direction : VoxelSurfaceKernel::FaceNeighbors)
+        if (Visited[Seed] || Samples[Seed]>=0) continue;
+        Group.Reset();
+        Group.Add(Seed);
+        Visited[Seed]=true;
+        bool bAnchored=false;
+        for (int32 Head=0; Head<Group.Num(); ++Head)
         {
-            const FIntVector Next = P + Direction;
-            if (!Inside(Next)) continue;
-            const int32 I = Index(Next);
-            if (Samples[I] >= 0 || Grounded[I]) continue;
-            Grounded[I] = true;
-            Reachable.Add(I);
+            const FIntVector P=Coordinates(Group[Head]);
+            if (!bAnchored) bAnchored=IsLocalAnchor(GridStart+FVector(P)*Step);
+            for (const auto Direction : VoxelSurfaceKernel::FaceNeighbors)
+            {
+                const FIntVector Next=P+Direction;
+                if (!Inside(Next)) continue;
+                const int32 N=Index(Next);
+                if (Samples[N]<0 && !Visited[N]) { Visited[N]=true; Group.Add(N); }
+            }
         }
+        if (bAnchored) continue;
+        if (Loose) CaptureLoose(Group, Loose->AddDefaulted_GetRef());
+        for (int32 I : Group) Samples[I]=Band;
+        SolidCount-=Group.Num();
     }
-    if (Reachable.Num() == SolidCount) return false;
-    for (int32 I = 0; I < Samples.Num(); ++I)
-        if (Samples[I] < 0 && !Grounded[I]) Samples[I] = Band;
-    SolidCount = Reachable.Num();
+    if (Before==SolidCount) return false;
     UpdateSurface();
     return true;
 }
@@ -328,11 +403,15 @@ void AIslandRouteVoxel::Publish()
     ForceNetUpdate();
 }
 
-bool AIslandRouteVoxel::Strike(const FHitResult& Hit, bool bWide)
+bool AIslandRouteVoxel::Strike(const FHitResult& Hit, float RadiusScale)
 {
-    if (!HasAuthority() || Hit.GetComponent() != Voxels || !Voxels->ApplyWorldCut(Hit.ImpactPoint, Hit.ImpactNormal, bWide ? 124. : 62.)) return false;
+    if (!HasAuthority() || Hit.GetComponent() != Voxels || !Voxels->ApplyWorldCut(Hit.ImpactPoint, Hit.ImpactNormal, 62.*RadiusScale)) return false;
     const auto* Terrain = AVoxelTerrain::Find(GetWorld());
-    if (!Terrain || !RefreshGrounding(*Terrain)) Publish();
+    if (!Terrain || !RefreshGrounding(*Terrain))
+    {
+        Publish();
+        AIslandAttachedMud::RefreshFor(*this);
+    }
     const auto Kind=GetKind();
     const FVector Local=Voxels->GetComponentTransform().InverseTransformPosition(Hit.ImpactPoint-Hit.ImpactNormal);
     const uint8 Pigment=IslandRouteFlora::Sample(Kind,Local,State.Variant).Pigment;
@@ -349,11 +428,16 @@ bool AIslandRouteVoxel::RefreshGrounding(const AVoxelTerrain& Terrain)
     if (!HasAuthority() || !Ground || !Voxels->RemainingCount()) return false;
     const FTransform& Transform = Voxels->GetComponentTransform();
     const double Contact = Voxels->CellSpacing() * 1.1;
+    TArray<FIslandLooseSamples> Loose;
     if (!Voxels->CullUnsupported([&](FVector Local)
     {
         const FVector World = Transform.TransformPosition(Local) - FVector(0., 0., Contact);
         return Ground->SignedDistanceAt(World) <= 0.;
-    })) return false;
+    }, &Loose)) return false;
+    const auto Kind = GetKind();
+    const bool bRock = Kind==IslandRouteFlora::EShape::SplitReef || Kind==IslandRouteFlora::EShape::CoralSpur;
+    AIslandFallingScenery::Release(*Voxels, Loose, bRock ? EIslandChipSurface::Rock : EIslandChipSurface::Leaf);
     Publish();
+    AIslandAttachedMud::RefreshFor(*this);
     return true;
 }

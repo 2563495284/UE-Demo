@@ -95,6 +95,10 @@ public:
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     UPROPERTY(Replicated) int32 Team = INDEX_NONE;
     int32 GetCharacterModel() const;
+    UStaticMesh* GetPartyFirstPersonFist() const override;
+    FVector GetCrewBadgeAnchor() const override;
+    USkeletalMesh* GetPartyCharacterRig() const override;
+    UPROPERTY(Replicated) bool bPrying = false;
     UStaticMesh* GetPartyCharacterMesh(bool& bLongPaws) const override;
     void SetCharacterModel(int32 ModelIndex);
     UPROPERTY(Replicated) bool bHost = false;

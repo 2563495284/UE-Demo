@@ -265,14 +265,15 @@ void AIslandProbe::TickMudCheck(double Now)
         if (!Floor || Terrain.IsBusy() || Age<.65) return;
         if (MudShaft.Z-Floor->Z<145.)
         {
-            if (!bIssued)
+            if (Now-LastAction > (bIssued ? 1.32 : .18))
             {
-                Peers[0]->ClientMudHold(false,true,FRotator(-89.,0.,0.));
-                bIssued=true;
+                bIssued = !bIssued;
+                Peers[0]->ClientMudHold(false,bIssued,FRotator(-89.,0.,0.));
+                LastAction = Now;
             }
             return;
         }
-        Peers[0]->ClientMudHold(false,false,FRotator(-89.,0.,0.));
+        if (bIssued) Peers[0]->ClientMudHold(false,false,FRotator(-89.,0.,0.));
         UE_LOG(LogTemp,Display,TEXT("MUD_QA_SHAFT dig_depth_cm=%.1f"),MudShaft.Z-Floor->Z);
         MudBase=Floor->Z;
         Place(1,*Floor+FVector(0,0,96));

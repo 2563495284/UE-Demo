@@ -53,7 +53,7 @@ def recording_encoder(override=None):
     raise RuntimeError("No working ffmpeg video encoder. Supply --ffmpeg /path/to/ffmpeg or set FFMPEG_BINARY.")
 
 
-def encode_replay(directory, role, destination, encoder=None):
+def encode_replay(directory, role, destination, encoder=None, audio=None):
     binary, codec_options = encoder or recording_encoder()
     frames = sorted((directory / (role + "_frames")).glob("*.png"))
     if len(frames) < 5:
@@ -65,8 +65,14 @@ def encode_replay(directory, role, destination, encoder=None):
     manifest = frames[0].parent / "timing.ffconcat"
     manifest.write_text("\n".join(lines) + "\n")
     movie = destination / (role + ".mp4")
+    audio_input = []
+    audio_output = []
+    if audio is not None and audio.is_file():
+        # The mixer starts with the camera change. The first captured frame may arrive later.
+        audio_input = ["-ss", f"{int(frames[0].stem) / 1000:.3f}", "-i", str(audio)]
+        audio_output = ["-map", "0:v", "-map", "1:a", "-af", "apad", "-c:a", "aac", "-shortest"]
     subprocess.run([binary, "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "1",
-                    "-i", str(manifest), "-vf", "fps=24,format=yuv420p", *codec_options,
+                    "-i", str(manifest), *audio_input, "-vf", "fps=24,format=yuv420p", *codec_options, *audio_output,
                     "-movflags", "+faststart", str(movie)], check=True)
     return movie.name
 
@@ -379,7 +385,8 @@ def main():
                             raise RuntimeError(f"Missing {view} chart proof")
                 if args.scenario == "character":
                     for index, name in enumerate(("Pig", "Monkey", "Fox", "Calf")):
-                        if f"ISLAND_UI_CHARACTER mesh=SM_{name} selected={index}" not in logs["Character"]:
+                        mesh = f"SK_Expedition{name}"
+                        if f"ISLAND_UI_CHARACTER mesh={mesh} selected={index}" not in logs["Character"]:
                             raise RuntimeError(f"Character picker failed to show or mark {name}")
                         if args.shots and not (directory / f"Character_{name}.png").is_file():
                             raise RuntimeError(f"Missing {name} character portrait")

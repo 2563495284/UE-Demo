@@ -9,6 +9,7 @@
 #include "Island/IslandState.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
+#include "PartyCrewRig.h"
 #include "Camera/CameraComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/GameInstance.h"
@@ -27,6 +28,9 @@
 #include "Widgets/Input/SSpinBox.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
+#if WITH_EDITOR
+#include "ShaderCompiler.h"
+#endif
 
 namespace
 {
@@ -306,6 +310,7 @@ namespace
             return false;
         }
         int32 Body=0, Paws=0, Others=0;
+        bool bOwnBodyComplete=false;
         for (TActorIterator<AVoxelCharacter> It(PC.GetWorld()); It; ++It)
         {
             if (!It->GetPlayerState()) continue;
@@ -317,8 +322,11 @@ namespace
                     if (Part->GetAttachParent()==It->GetEyeCamera()) ++EyeParts;
                     else ++BodyParts;
                 }
-            if (*It==Hero) { Body=BodyParts; Paws=EyeParts; }
-            else if (BodyParts>=6 && EyeParts==0) ++Others;
+            const auto* Rig=It->FindComponentByClass<UPartyCrewRig>();
+            const bool HasRig=Rig && Rig->IsVisible() && Rig->GetSkinnedAsset();
+            const bool HasBody=HasRig || BodyParts>=6;
+            if (*It==Hero) { Body=BodyParts+int32(HasRig); bOwnBodyComplete=HasBody; Paws=EyeParts; }
+            else if (HasBody && EyeParts==0) ++Others;
         }
         if (Others<Seats-1) return false;
 
@@ -332,7 +340,7 @@ namespace
         const TCHAR* Mode=Stage==0?TEXT("third"):Stage==1?TEXT("first"):Stage==2?TEXT("steep"):TEXT("restored");
         const bool Valid=Hero->IsInFirstPersonView()==First && (First
             ? Gap<3. && Dig>.998 && Throw>.998 && Paws==2 && Body==0
-            : Gap>80. && Body>=6 && Paws==0);
+            : Gap>80. && bOwnBodyComplete && Paws==0);
         if (!Valid || (Stage==2 && !FMath::IsNearlyEqual(FRotator::NormalizeAxis(View.Pitch),-78.,1.))
             || (Stage==3 && FMath::Abs(Gap-InitialGap)>12.))
         {
@@ -455,7 +463,7 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     }
     if (Role == TEXT("Character"))
     {
-        static const TCHAR* MeshNames[] = {TEXT("SM_Pig"), TEXT("SM_Monkey"), TEXT("SM_Fox"), TEXT("SM_Calf")};
+        static const TCHAR* MeshNames[] = {TEXT("SK_ExpeditionPig"), TEXT("SK_ExpeditionMonkey"), TEXT("SK_ExpeditionFox"), TEXT("SK_ExpeditionCalf")};
         static const TCHAR* Views[] = {TEXT("Pig"), TEXT("Monkey"), TEXT("Fox"), TEXT("Calf")};
         if (Step == 0 && Page == EIslandPanel::Home && Press(Panel, "Island.Create", false)) Advance();
         else if (Step == 1 && Page == EIslandPanel::Create && Press(Panel, "Island.SubmitRoom", false)) Advance();
@@ -473,9 +481,18 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
                 const auto* Self = PC.GetPlayerState<AIslandPlayerState>();
                 const auto* Hero = PC.GetHero();
                 if (!Self || Self->GetCharacterModel() != Model || !Hero || PC.GetViewTarget() == Hero) return;
-                TInlineComponentArray<UStaticMeshComponent*> Meshes(Hero);
-                if (!Meshes.ContainsByPredicate([Model](const UStaticMeshComponent* Part)
-                    { return Part->IsVisible() && Part->GetStaticMesh() && Part->GetStaticMesh()->GetFName() == MeshNames[Model]; })) return;
+                const auto* Rig=Hero->FindComponentByClass<UPartyCrewRig>();
+                if (!Rig || !Rig->IsVisible() || !Rig->GetSkinnedAsset() || Rig->GetSkinnedAsset()->GetFName()!=MeshNames[Model]) return;
+                if (bShots)
+                {
+#if WITH_EDITOR
+                    if (GShaderCompilingManager && GShaderCompilingManager->IsCompiling()) { LastChange=Now; return; }
+#endif
+                    if (Rig->GetSkinnedAsset()->HasPendingInitOrStreaming() || !Rig->IsRenderStateCreated() || !Rig->WasRecentlyRendered())
+                        return;
+                    // Give the newly selected outfit time to render after the model change.
+                    if (Now-LastChange<.45) return;
+                }
                 for (int32 I = 0; I < UE_ARRAY_COUNT(Views); ++I)
                     if (FindButton(Panel, FName(*FString::Printf(TEXT("Island.Character.Current.%d"), I))).IsValid() != (I == Model)) return;
                 if (Shot(Views[Model])) return;

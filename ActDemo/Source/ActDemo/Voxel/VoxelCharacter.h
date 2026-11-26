@@ -24,9 +24,12 @@ public:
     bool IsMudStunned() const;
     bool IsMudImmune() const;
     bool IsMudCompact() const { return bIsCrouched; }
-    UFUNCTION(NetMulticast, Unreliable) void MulticastExpeditionDig();
+    void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Props) const override;
+    void SetPunchChargePresentation(bool bHeld);
+    UFUNCTION(NetMulticast, Reliable) void MulticastExpeditionDig(uint8 Power=0);
 
     FVector GetAimOrigin() const;
+    FRotator GetViewRotationForTarget(FVector Target, FVector Stand) const;
     bool IsInFirstPersonView() const;
     UCameraComponent* GetEyeCamera() const { return EyeCamera; }
     void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
@@ -45,6 +48,8 @@ protected:
     void OnJumped_Implementation() override;
 
 private:
+    UFUNCTION() void OnRep_PunchHeldAt();
+    UPROPERTY(ReplicatedUsing=OnRep_PunchHeldAt) double PunchHeldAt=-1.;
     void MudStunChanged(FGameplayTag Tag, int32 Count);
     UPROPERTY(VisibleAnywhere) TObjectPtr<UAbilitySystemComponent> AbilitySystem;
     UPROPERTY(VisibleAnywhere) TObjectPtr<UExpeditionAnimalComponent> ExpeditionAnimal;

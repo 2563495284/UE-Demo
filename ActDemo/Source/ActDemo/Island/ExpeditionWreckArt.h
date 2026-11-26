@@ -4,12 +4,13 @@
 
 class AActor;
 class UMaterialInterface;
-class UPrimitiveComponent;
-class UStaticMesh;
+class FName;
+struct FColor;
+enum class EIslandChipSurface : uint8;
 
 namespace ExpeditionWreckArt
 {
     // The coloured planks, deck and rigging are also the physical sources for local voxel removal.
     void Build(AActor& Owner, UMaterialInterface* PaintBase);
-    void PlayChips(UPrimitiveComponent& Part, int32 Finish, FVector Point, FVector Normal, UStaticMesh* Splinter, UStaticMesh* Cloth);
+    EIslandChipSurface GetChipFinish(FName PartName, int32 Finish, FColor& Paint, FColor& Alternate);
 }

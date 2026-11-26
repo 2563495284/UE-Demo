@@ -8,6 +8,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "Island/IslandGameMode.h"
+#include "Island/IslandAttachedMud.h"
 #include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandPlayerController.h"
 #include "Materials/MaterialInterface.h"
@@ -121,6 +122,17 @@ void AIslandNeutralProp::Initialize(EIslandNeutralKind Kind)
     ForceNetUpdate();
 }
 
+void AIslandNeutralProp::Initialize(const FIslandNeutralPlacement& Placement)
+{
+    if (!HasAuthority() || State.bInitialized) return;
+    // A bit for each completed route section travels with the one-shot trigger state.
+    if (!ensure(Placement.RouteNodes.Num() <= 33 && Placement.RouteNodes.Num() != 1)) return;
+    State.RouteNodes.Reserve(Placement.RouteNodes.Num());
+    for (const FVector& P : Placement.RouteNodes)
+        State.RouteNodes.Emplace(FMath::RoundToInt(P.X),FMath::RoundToInt(P.Y),FMath::RoundToInt(P.Z));
+    Initialize(Placement.Kind);
+}
+
 void AIslandNeutralProp::OnRep_State()
 {
     if (!State.bInitialized || !GetWorld()) return;
@@ -129,11 +141,19 @@ void AIslandNeutralProp::OnRep_State()
         SetActorHiddenInGame(true);
         SetActorEnableCollision(false);
         SetActorTickEnabled(false);
+        if (HasAuthority()) AIslandAttachedMud::RefreshFor(*this);
         return;
     }
     const bool bFirstBuild = !bBuilt;
     if (bFirstBuild)
     {
+        if (State.RouteNodes.Num() >= 2)
+        {
+            // The net spawn transform is quantized independently from level generation.
+            // Reconstruct the same frame before binding local render and collision pieces.
+            const double Yaw = FMath::RoundToInt((State.RouteNodes[1]-State.RouteNodes[0]).Rotation().Yaw);
+            SetActorLocationAndRotation(State.RouteNodes[0],FRotator(0,Yaw,0),false,nullptr,ETeleportType::TeleportPhysics);
+        }
         SetActorScale3D(IslandNeutral::SiteScale(State.Kind));
         switch (State.Kind)
         {
@@ -142,17 +162,21 @@ void AIslandNeutralProp::OnRep_State()
             case EIslandNeutralKind::Hopper: BuildHopper(); break;
             case EIslandNeutralKind::Sail: BuildSail(); break;
             case EIslandNeutralKind::Tide: BuildTide(); break;
+            default: BuildRoute(); break;
         }
         bBuilt = true;
     }
     // Bind at the authored size. A joining peer can receive an already unfurled sail.
     if (bFirstBuild) IslandSceneryVoxels::Register(*this);
     UpdateVisuals(ServerNow());
-    SetActorTickEnabled(State.Kind == EIslandNeutralKind::Tide || State.Kind == EIslandNeutralKind::Sail
+    SetActorTickEnabled((!State.RouteNodes.IsEmpty() && (State.Phase == 3 || State.Kind == EIslandNeutralKind::Bridge))
+        || State.Kind == EIslandNeutralKind::Tide || State.Kind == EIslandNeutralKind::Sail
         || (State.Kind == EIslandNeutralKind::Tree && (State.Phase == 1 || State.Phase == 2))
         || (State.Kind == EIslandNeutralKind::Hopper && State.Phase == 1));
     if (ClothVolume && HasAuthority())
-        ClothVolume->SetCollisionEnabled(State.Phase == 1 ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+        ClothVolume->SetCollisionEnabled(IsSailLowered() ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+    if (HasAuthority() && !bFirstBuild && State.Kind != EIslandNeutralKind::Tide)
+        AIslandAttachedMud::RefreshFor(*this);
 }
 
 void AIslandNeutralProp::SetPhase(uint8 Next)
@@ -171,7 +195,7 @@ FVector AIslandNeutralProp::GetInteractionPoint() const
         case EIslandNeutralKind::Hopper: return GetActorTransform().TransformPosition(FVector(-95,-157,108));
         case EIslandNeutralKind::Sail: return GetActorTransform().TransformPosition(FVector(-30,-169,82));
         case EIslandNeutralKind::Tide: return GetTideMouth(0);
-        default: return GetActorLocation();
+        default: return HitTarget ? HitTarget->GetComponentLocation() : GetActorLocation();
     }
 }
 
@@ -197,16 +221,25 @@ bool AIslandNeutralProp::Strike(AIslandPlayerController& Player, const FHitResul
 {
     if (!HasAuthority() || !bBuilt || IsDemolished() || !Player.GetHero() || !Hit.GetComponent()) return false;
     auto* Source = IslandSceneryVoxels::SourceFor(Hit.GetComponent());
+    if ((State.Kind == EIslandNeutralKind::Bridge || State.Kind == EIslandNeutralKind::Dam) && State.Phase < 3
+        && Source && Source->GetOwner() == this && Source->ComponentHasTag(TEXT("IslandVoxelPart")))
+    {
+        IslandSceneryVoxels::PlayMechanismStrike(Hit);
+        SetPhase(State.Phase + 1);
+        return true;
+    }
     if (Source && (Source == HitTarget || Source->ComponentHasTag(TEXT("TreeNotch")))
         && !IslandSceneryVoxels::IsExhausted(HitTarget))
     {
         if (State.Kind == EIslandNeutralKind::Tree && State.Phase < 2)
         {
+            IslandSceneryVoxels::PlayMechanismStrike(Hit);
             SetPhase(State.Phase + 1);
             return true;
         }
         if (State.Kind == EIslandNeutralKind::Hopper && State.Phase == 0)
         {
+            IslandSceneryVoxels::PlayMechanismStrike(Hit);
             bSandQueued = false;
             SetPhase(IslandSceneryVoxels::IsExhausted(SandLoad) ? 2 : 1);
             return true;
@@ -218,6 +251,7 @@ bool AIslandNeutralProp::Strike(AIslandPlayerController& Player, const FHitResul
 void AIslandNeutralProp::RefreshVoxelMechanism()
 {
     if (!HasAuthority() || !bBuilt || State.bDemolished) return;
+    if (!State.RouteNodes.IsEmpty() && State.Phase == 3) return;
     if (State.Kind == EIslandNeutralKind::Tide)
     {
         uint8 Intact = 0;
@@ -246,7 +280,8 @@ void AIslandNeutralProp::RefreshVoxelMechanism()
 
 bool AIslandNeutralProp::CanToggleSail() const
 {
-    if (!State.bInitialized || !bBuilt || IsDemolished() || State.Kind != EIslandNeutralKind::Sail
+    if (!State.bInitialized || !bBuilt || IsDemolished() ||
+        (State.Kind != EIslandNeutralKind::Sail && State.Kind != EIslandNeutralKind::Bridge)
         || IslandSceneryVoxels::IsExhausted(HitTarget)) return false;
     // Canvas and its hem alternate in Cloth; a remaining trim alone cannot obscure sight.
     for (int32 Index = 0; Index < Cloth.Num(); Index += 2)
@@ -254,28 +289,17 @@ bool AIslandNeutralProp::CanToggleSail() const
     return false;
 }
 
-bool AIslandNeutralProp::CanUseRope(const AIslandPlayerController& Player) const
-{
-    const AVoxelCharacter* Hero = Player.GetHero();
-    if (!Hero || !CanToggleSail()) return false;
-    const FVector Aim = Hero->GetAimOrigin();
-    const FVector Knot = GetInteractionPoint();
-    if (FVector::DistSquared(Aim, Knot) > FMath::Square(200.)) return false;
-    FHitResult Hit;
-    FCollisionQueryParams Params(SCENE_QUERY_STAT(NeutralRope), false, Hero);
-    return !GetWorld()->LineTraceSingleByChannel(Hit, Aim, Knot, ECC_Visibility, Params)
-        || IslandSceneryVoxels::SourceFor(Hit.GetComponent()) == HitTarget;
-}
-
-bool AIslandNeutralProp::UseRope(AIslandPlayerController& Player)
-{
-    if (!CanUseRope(Player) || ServerNow() - State.ChangedAt < .38) return false;
-    return ToggleSail();
-}
-
 bool AIslandNeutralProp::ToggleSail()
 {
     if (!HasAuthority() || !CanToggleSail()) return false;
+    if (State.Kind == EIslandNeutralKind::Bridge)
+    {
+        State.bBridgeSailLowered = !State.bBridgeSailLowered;
+        State.SailChangedAt = ServerNow();
+        OnRep_State();
+        ForceNetUpdate();
+        return true;
+    }
     SetPhase(State.Phase == 0 ? 1 : 0);
     return true;
 }
@@ -295,14 +319,14 @@ bool AIslandNeutralProp::IntersectsSail(FVector Start, FVector End) const
 bool AIslandNeutralProp::AnySailObscures(UWorld& World, const FVector& Start, const FVector& End)
 {
     for (TActorIterator<AIslandNeutralProp> It(&World); It; ++It)
-        if (!It->IsDemolished() && It->GetKind() == EIslandNeutralKind::Sail && It->IntersectsSail(Start, End)) return true;
+        if (!It->IsDemolished() && !It->Cloth.IsEmpty() && It->IntersectsSail(Start, End)) return true;
     return false;
 }
 
 void AIslandNeutralProp::TouchSail(UPrimitiveComponent* Overlap, AActor* Other, UPrimitiveComponent* OtherComponent,
     int32 BodyIndex, bool bSwept, const FHitResult& Sweep)
 {
-    if (!HasAuthority() || State.Phase != 1 || !Cast<AVoxelCharacter>(Other)) return;
+    if (!HasAuthority() || !IsSailLowered() || !Cast<AVoxelCharacter>(Other)) return;
     const FVector Origin = Other->GetActorLocation();
     const FVector Across = GetActorForwardVector() * 130.;
     if (!IntersectsSail(Origin - Across, Origin + Across)) return;
@@ -326,6 +350,11 @@ void AIslandNeutralProp::RefreshTide(const AVoxelTerrain& Terrain)
     uint8 Mask = 0;
     constexpr double D = 40.;
     const FVector2D Offsets[] = {{0,0},{D,0},{-D,0},{0,D},{0,-D}};
+    FBox Mouths(ForceInit);
+    Mouths += GetTideMouth(0);
+    Mouths += GetTideMouth(1);
+    TArray<AIslandAttachedMud*> Nearby;
+    AIslandAttachedMud::GatherNearby(*GetWorld(), Mouths.ExpandBy(65.), Nearby);
     for (int32 Mouth = 0; Mouth < 2; ++Mouth)
     {
         int32 SolidSamples = 0;
@@ -334,7 +363,8 @@ void AIslandNeutralProp::RefreshTide(const AVoxelTerrain& Terrain)
             const FVector LocalOffset = GetActorQuat().RotateVector(FVector(Offset, 20.));
             const FVector GridPos = (GetTideMouth(Mouth) + LocalOffset - FVector(Density->Grid.Origin)) / VoxelPlayground::Spacing;
             const FIntVector Cell(FMath::RoundToInt(GridPos.X), FMath::RoundToInt(GridPos.Y), FMath::RoundToInt(GridPos.Z));
-            if (Density->Grid.Contains(Cell) && Density->Sample(Cell) <= 0) ++SolidSamples;
+            if ((Density->Grid.Contains(Cell) && Density->Sample(Cell) <= 0)
+                || AIslandAttachedMud::ContainsMud(Nearby, GetTideMouth(Mouth) + LocalOffset)) ++SolidSamples;
         }
         if (SolidSamples >= 3) Mask |= 1u << Mouth;
     }
@@ -406,6 +436,24 @@ TArray<FVector> AIslandNeutralProp::MakeSandRamp(const FTransform& Frame, const 
 
 void AIslandNeutralProp::CompleteSandRelease(bool bCommitted)
 {
+    if (HasAuthority() && State.Kind == EIslandNeutralKind::SandDepot && SandSections.IsValidIndex(PendingSandSection))
+    {
+        const int32 Section = PendingSandSection;
+        PendingSandSection = INDEX_NONE;
+        if (!bCommitted)
+        {
+            // A player may have already filled this stretch while the other sections were pouring.
+            const auto* Terrain = AVoxelTerrain::Find(GetWorld());
+            const auto* Density = Terrain ? Terrain->GetDensity() : nullptr;
+            bCommitted = Density && !SandSections[Section].ContainsByPredicate([&](const FVector& Center)
+            {
+                return Density->SignedDistanceAt(Center + FVector(0,0,40.)) > 0.;
+            });
+        }
+        if (bCommitted) SetSectionComplete(Section);
+        NextSectionAt = ServerNow() + (bCommitted ? .09 : .25);
+        return;
+    }
     if (!HasAuthority() || IsDemolished() || State.Kind != EIslandNeutralKind::Hopper || State.Phase != 1) return;
     bSandQueued = false;
     SetPhase(bCommitted ? 2 : 0);
@@ -432,9 +480,21 @@ void AIslandNeutralProp::Tick(float DeltaSeconds)
     const double Now = ServerNow();
     UpdateVisuals(Now);
     const double Age = Now - State.ChangedAt;
+    if (!State.RouteNodes.IsEmpty())
+    {
+        if (HasAuthority() && State.Phase == 3) AdvanceRoute(Now);
+        if ((State.Phase < 3 || GetCompletedRouteSections() == GetRouteSectionCount()) &&
+            State.Kind != EIslandNeutralKind::Dam && State.Kind != EIslandNeutralKind::WindTower &&
+            Now - State.SailChangedAt >= .4 && Now - State.RippleAt >= .68)
+            SetActorTickEnabled(false);
+        return;
+    }
     if ((State.Kind == EIslandNeutralKind::Tree && State.Phase == 1 && Age >= 2.5)
         || (State.Kind == EIslandNeutralKind::Sail && Age >= .36 && Now - State.RippleAt >= .68))
+    {
         SetActorTickEnabled(false);
+        if (HasAuthority()) AIslandAttachedMud::RefreshFor(*this);
+    }
     if (!HasAuthority()) return;
     if (State.Kind == EIslandNeutralKind::Tree && State.Phase == 2 && Age >= TreeLandingTime)
     {
@@ -461,6 +521,10 @@ void AIslandNeutralProp::UpdateVisuals(double Now)
         case EIslandNeutralKind::Hopper: AnimateHopper(Age); break;
         case EIslandNeutralKind::Sail: AnimateSail(Now); break;
         case EIslandNeutralKind::Tide: AnimateTide(Now); break;
+        case EIslandNeutralKind::Bridge:
+        case EIslandNeutralKind::Dam:
+        case EIslandNeutralKind::SandDepot:
+        case EIslandNeutralKind::WindTower: UpdateRouteVisuals(Now); break;
         default: break;
     }
 }

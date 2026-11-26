@@ -182,12 +182,12 @@ void AVoxelGameMode::UpdateEnvironment()
     }
 }
 
-void AVoxelGameMode::RequestEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim)
+void AVoxelGameMode::RequestEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, uint8 Power, bool bProtectChest)
 {
-    EnqueueEdit(Player, Action, Aim, {});
+    EnqueueEdit(Player, Action, Aim, {},Power,bProtectChest);
 }
 
-void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, TOptional<FIntVector> ProbeCenter)
+void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, TOptional<FIntVector> ProbeCenter, uint8 Power, bool bProtectChest)
 {
     const AVoxelCharacter* Hero = Player.GetHero();
     if (!Hero || !CanPlayerAct(Player) || Action > EVoxelAction::Fill || Aim.ContainsNaN())
@@ -206,7 +206,7 @@ void AVoxelGameMode::EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Ac
     // A sliding capsule can leave the lip of a shaft while another edit is cooking.
     // Use the pose the server observed at input time and recheck reach on resolution.
     const FVector Origin = Action == EVoxelAction::DigDown ? Hero->GetActorLocation() : Hero->GetAimOrigin();
-    Requests.Add({&Player, Action, Origin, Aim.GetSafeNormal(), Now, ProbeCenter, {}, {}});
+    Requests.Add({&Player, Action, Origin, Aim.GetSafeNormal(), Now, ProbeCenter, {}, {}, Power, bProtectChest});
     StartNextEdit();
 }
 
@@ -299,15 +299,21 @@ void AVoxelGameMode::EnqueueMud(FVoxelEdit Edit, TFunction<void(bool)> Completio
 bool AVoxelGameMode::CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts) const
 {
     const FVector Center(Edit.Center);
-    const bool bPad = Edit.BrushId == VoxelPlayground::MudPad;
-    const FBox Bounds = VoxelPlayground::PartyBrushBounds(Edit).ExpandBy(4.);
-    if (bPad)
+    if (Edit.BrushId == VoxelPlayground::MudPad)
     {
         // A queued impact can lose its support if another player digs before this edit commits.
         const FVector Normal = FVector(Edit.SurfaceNormal) * .001;
         FHitResult Support;
         if (!Terrain->TraceRock(Center + Normal * 14., Center - Normal * 28., nullptr, Support)) return false;
     }
+    return CheckMudOccupants(Edit, Lifts);
+}
+
+bool AVoxelGameMode::CheckMudOccupants(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts) const
+{
+    const FVector Center(Edit.Center);
+    const bool bPad = Edit.BrushId == VoxelPlayground::MudPad;
+    const FBox Bounds = VoxelPlayground::PartyBrushBounds(Edit).ExpandBy(4.);
     for (const AVoxelPlayerController* Player : Players)
     {
         AVoxelCharacter* Hero = Player->GetHero();
@@ -346,6 +352,31 @@ bool AVoxelGameMode::CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharac
     return true;
 }
 
+void AVoxelGameMode::ClipProtectedMud(FVoxelEdit& Edit) const
+{
+    const FBox Bounds = VoxelPlayground::PartyBrushBounds(Edit).ExpandBy(VoxelPlayground::Spacing);
+    TArray<FBox> Protected;
+    GetProtectedMudVolumes(Protected);
+    for (const FBox& Box : Protected)
+    {
+        if (!Bounds.Intersect(Box)) continue;
+        FVoxelProtectedBox& Clip = Edit.ProtectedBoxes.AddDefaulted_GetRef();
+        Clip.Low = FIntVector(Box.Min) - FIntVector(2);
+        Clip.High = FIntVector(Box.Max) + FIntVector(2);
+    }
+}
+
+void AVoxelGameMode::LiftMudOccupants(const TMap<AVoxelCharacter*, FVector>& Lifts)
+{
+    for (const auto& Lift : Lifts)
+    {
+        Lift.Key->SetActorLocation(Lift.Value, false, nullptr, ETeleportType::TeleportPhysics);
+        Lift.Key->GetCharacterMovement()->bForceNextFloorCheck = true;
+        Lift.Key->GetCharacterMovement()->ForceClientAdjustment();
+        Lift.Key->ForceNetUpdate();
+    }
+}
+
 bool AVoxelGameMode::IsFillAreaFree(const FVoxelEdit& Edit) const
 {
     if (Edit.BrushId >= VoxelPlayground::MudPad) return CheckMudPlacement(Edit);
@@ -372,7 +403,7 @@ void AVoxelGameMode::StartNextEdit()
     }
 }
 
-bool AVoxelGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim)
+bool AVoxelGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim, uint8 PunchPower, bool bProtectChest)
 {
     const FVector From = Hero.GetAimOrigin();
     FHitResult Hit;
@@ -393,7 +424,7 @@ void AVoxelGameMode::StartFrontRequest()
         return;
     }
 
-    if (Hero && !Request.ProbeCenter.IsSet() && Request.Action == EVoxelAction::Punch && TryStrikeProp(*Hero, Request.Aim))
+    if (Hero && !Request.ProbeCenter.IsSet() && Request.Action == EVoxelAction::Punch && TryStrikeProp(*Hero, Request.Aim, Request.PunchPower, Request.bProtectChest))
     {
         return;
     }
@@ -403,19 +434,7 @@ void AVoxelGameMode::StartFrontRequest()
     {
         Edit = Request.EnvironmentFill.GetValue();
         Edit.Sequence = Terrain->GetAppliedSequence() + 1;
-        if (Edit.BrushId >= VoxelPlayground::MudPad)
-        {
-            const FBox Bounds = VoxelPlayground::PartyBrushBounds(Edit).ExpandBy(VoxelPlayground::Spacing);
-            TArray<FBox> Protected;
-            GetProtectedMudVolumes(Protected);
-            for (const FBox& Box : Protected)
-            {
-                if (!Bounds.Intersect(Box)) continue;
-                FVoxelProtectedBox& Clip = Edit.ProtectedBoxes.AddDefaulted_GetRef();
-                Clip.Low = FIntVector(Box.Min) - FIntVector(2);
-                Clip.High = FIntVector(Box.Max) + FIntVector(2);
-            }
-        }
+        if (Edit.BrushId >= VoxelPlayground::MudPad) ClipProtectedMud(Edit);
     }
     else if (!ResolveEdit(Request, *Hero, Edit))
     {
@@ -446,13 +465,7 @@ void AVoxelGameMode::StartFrontRequest()
         // Validate everyone first, then lift on the game thread immediately before swapping all collision meshes.
         TMap<AVoxelCharacter*, FVector> Lifts;
         if (!Mode->CheckMudPlacement(Edit, &Lifts)) return false;
-        for (const auto& Lift : Lifts)
-        {
-            Lift.Key->SetActorLocation(Lift.Value, false, nullptr, ETeleportType::TeleportPhysics);
-            Lift.Key->GetCharacterMovement()->bForceNextFloorCheck = true;
-            Lift.Key->GetCharacterMovement()->ForceClientAdjustment();
-            Lift.Key->ForceNetUpdate();
-        }
+        LiftMudOccupants(Lifts);
         return true;
     }, [WeakMode, Edit, Request](bool bCommitted)
     {
@@ -523,6 +536,7 @@ bool AVoxelGameMode::ResolveEdit(const FRequest& Request, AVoxelCharacter& Hero,
     if (Terrain->Layout == EVoxelLayout::Expedition && Request.Action == EVoxelAction::Punch)
     {
         Edit.BrushId = VoxelPlayground::ShallowCut;
+        Edit.PunchPower = Request.PunchPower;
         const auto* Round = GetGameState<AIslandGameState>();
         const auto* Member = Hero.GetPlayerState<AIslandPlayerState>();
         Edit.bWideFootprint = Round && Member && Round->HasDecoyToolBoost(Member->Team);

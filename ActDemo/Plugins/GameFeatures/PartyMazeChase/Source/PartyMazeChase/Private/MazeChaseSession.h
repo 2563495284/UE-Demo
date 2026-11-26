@@ -29,16 +29,18 @@ private:
     void OnArenaStarted() override;
     void OnArenaStep(float DeltaSeconds) override;
     void CheckParticipantBounds(APartyVoxelPawn& Pawn) override;
-    bool UseTerrainTool(APartyVoxelPawn& Pawn, bool bPlace, FVector Direction) override;
+    bool UseTerrainTool(APartyVoxelPawn& Pawn, bool bPlace, FVector Direction, uint8 Power) override;
 
     void AssignSides(const TArray<int32>& Seats);
     void DefineBerths(const TArray<int32>& Seats, bool bMove);
     void CheckOutcome();
     UStaticMeshComponent* MakeBlock(FName Tag, const FBox& LocalBounds, UMaterialInterface* Paint, bool bSolid=true);
     void BuildWall(FIntPoint Room, bool bBetweenColumns);
-    bool WallIsOccupied(int32 WallIndex) const;
-    EPartyChaseAim FindTarget(const APartyVoxelPawn& Pawn, FVector From, FVector Direction, int32& WallIndex, int32& TargetSeat, bool bCheckGaps=true) const;
-    UFUNCTION() void OnRep_OpenWalls();
+    bool ApplyStructureBrush(const FPartyVoxelChange& Brush) override;
+    UPartyCarvableMesh* EnsureWallField(int32 Wall);
+    bool RepairIsOccupied(const UPartyCarvableMesh& Field,const TArray<int32>& Cells) const;
+    EPartyChaseAim FindTarget(const APartyVoxelPawn& Pawn, FVector From, FVector Direction, int32& WallIndex, int32& TargetSeat, bool bCheckGaps=true,FVector* AimPoint=nullptr,FVector* AimNormal=nullptr) const;
+
 
     UPROPERTY() TObjectPtr<UStaticMesh> Cube;
     UPROPERTY() TObjectPtr<UStaticMesh> HewnWall;
@@ -50,7 +52,7 @@ private:
     TMap<int32,int32> SeatTeams;
     TMap<int32,FVector> Berths;
     TMap<int32,FVector> LastGround;
-    TMap<int32,double> NextToolTime;
+    TMap<FIntPoint,double> NextToolTime;
     TMap<int32,double> RefillAfter;
     UPROPERTY(Replicated) int32 RunnerTeam = INDEX_NONE;
     UPROPERTY(Replicated) int32 RunnerSeats = 0;
@@ -58,6 +60,6 @@ private:
     UPROPERTY(Replicated) int32 CaughtSeats = 0;
     UPROPERTY(Replicated) int32 WinningTeams = 0;
     UPROPERTY(Replicated) double HuntersReleasedAt = 0.;
-    UPROPERTY(ReplicatedUsing=OnRep_OpenWalls) TArray<uint8> OpenWalls;
+    UPROPERTY() TArray<TObjectPtr<UPartyCarvableMesh>> WallFields;
     bool bReleasedHunters = false;
 };

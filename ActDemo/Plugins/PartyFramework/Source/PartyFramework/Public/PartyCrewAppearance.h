@@ -4,6 +4,7 @@
 #include "PartyCrewAppearance.generated.h"
 
 class UStaticMesh;
+class USkeletalMesh;
 
 UINTERFACE(MinimalAPI)
 class UPartyCrewAppearance : public UInterface
@@ -17,5 +18,8 @@ class PARTYFRAMEWORK_API IPartyCrewAppearance
 {
     GENERATED_BODY()
 public:
+    virtual UStaticMesh* GetPartyFirstPersonFist() const = 0;
+    virtual FVector GetCrewBadgeAnchor() const = 0;
+    virtual USkeletalMesh* GetPartyCharacterRig() const = 0;
     virtual UStaticMesh* GetPartyCharacterMesh(bool& bLongPaws) const = 0;
 };

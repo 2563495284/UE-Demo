@@ -1,4 +1,5 @@
 #include "Island/IslandBreakable.h"
+#include "Island/IslandChipBurst.h"
 #include "Island/IslandSceneryVoxels.h"
 
 #include "Components/StaticMeshComponent.h"
@@ -8,8 +9,11 @@
 #include "EngineUtils.h"
 #include "Island/ExpeditionDock.h"
 #include "GameFramework/GameStateBase.h"
+#include "GameFramework/PlayerController.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Misc/App.h"
 #include "Net/UnrealNetwork.h"
+#include "RHIGlobals.h"
 #include "UObject/ConstructorHelpers.h"
 
 namespace
@@ -245,39 +249,18 @@ void AIslandSceneryDamage::OnRep_Removed()
 }
 
 void AIslandSceneryDamage::PlayDebris(UWorld& World, FVector Point, FVector Normal, UMaterialInterface* Material,
-    UStaticMesh* FragmentShape, FVector FragmentScale, UMaterialInterface* AlternateFinish)
+    UStaticMesh* FragmentShape, FVector FragmentScale, UMaterialInterface* AlternateFinish, bool bLightScraps)
 {
-    if (World.GetNetMode() == NM_DedicatedServer || !FApp::CanEverRender()) return;
-    // Short-lived local chips have no pawn or terrain collision.
+    if (World.GetNetMode() == NM_DedicatedServer || !FApp::CanEverRender() || GUsingNullRHI) return;
+    const auto* Local = World.GetFirstPlayerController();
+    if (Local && Local->PlayerCameraManager &&
+        FVector::DistSquared(Local->PlayerCameraManager->GetCameraLocation(), Point) > FMath::Square(4500.)) return;
     UStaticMesh* Shape = FragmentShape ? FragmentShape : LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
     if (!Shape) return;
     FActorSpawnParameters Params;
     Params.ObjectFlags |= RF_Transient;
-    AActor* FX = World.SpawnActor<AActor>(AActor::StaticClass(), Point, FRotator::ZeroRotator, Params);
-    if (!FX) return;
-    for (int32 I=0; I<6; ++I)
-    {
-        auto* Chip = NewObject<UStaticMeshComponent>(FX);
-        FX->AddInstanceComponent(Chip);
-        const double Angle = I * UE_TWO_PI / 6.;
-        const FVector Out(FMath::Cos(Angle), FMath::Sin(Angle), 0.);
-        Chip->SetMobility(EComponentMobility::Movable);
-        Chip->SetStaticMesh(Shape);
-        auto* Finish = AlternateFinish && I%3==1 ? AlternateFinish : Material;
-        if (Finish) Chip->SetMaterial(0, Finish);
-        Chip->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
-        Chip->SetCollisionResponseToAllChannels(ECR_Ignore);
-        Chip->SetCanEverAffectNavigation(false);
-        const FRotator Orientation=FragmentShape ? FRotator(-61.+I*29.,I*57.,I*33.) : FRotator(I*12.,I*39.,0.);
-        Chip->SetWorldLocationAndRotation(Point + Normal * 8. + Out * 9., Orientation);
-        Chip->SetWorldScale3D(FragmentShape ? FragmentScale*FVector(.80+.16*(I%3),1.,.75+.13*(I%4)) :
-            FVector(.06 + .025 * (I % 3), .075, .13));
-        Chip->RegisterComponent();
-        Chip->SetSimulatePhysics(true);
-        Chip->SetPhysicsLinearVelocity(Normal * 160. + Out * 90. + FVector(0,0,235.));
-        Chip->SetPhysicsAngularVelocityInDegrees(Out * 270.);
-    }
-    FX->SetLifeSpan(.65f);
+    if (auto* Burst = World.SpawnActor<AIslandChipBurst>(AIslandChipBurst::StaticClass(), Point, FRotator::ZeroRotator, Params))
+        Burst->Launch(Normal, *Shape, FragmentScale, Material, AlternateFinish, bLightScraps);
 }
 
 void AIslandSceneryDamage::MulticastDebris_Implementation(FVector_NetQuantize Point, FVector_NetQuantizeNormal Normal)

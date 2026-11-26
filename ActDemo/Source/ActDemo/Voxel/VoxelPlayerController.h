@@ -24,6 +24,11 @@ public:
     void SubmitExpeditionThrow(const FVector& Aim);
     void OnMudStunChanged(bool bStunned);
     void SetExpeditionDigHeld(bool bHeld);
+    float GetPunchChargeAlpha() const;
+    uint8 GetReleasedPunchPower() const { return ReleasedPunchPower; }
+    bool IsPunchRelease() const { return bResolvingPunchRelease; }
+    void CancelPunchCharge();
+    bool IsHoldingExpeditionDig() const { return HasAuthority() ? bServerDigHeld : bDigHeld; }
     void SetExpeditionThrowHeld(bool bHeld);
     bool IsPlaying() const { return bPlaying; }
     virtual bool IsVoxelInputEnabled() const { return bVoxelInputEnabled; }
@@ -56,6 +61,8 @@ public:
     double LastRequestAt = -1e9;
 
 protected:
+    virtual void Punch();
+    void TriggerExpeditionEvent(EExpeditionAction Action, bool bHeld, AActor* Target = nullptr);
     FVector2D GetLocalLookScale() const;
     void BeginPlay() override;
     void EndPlay(const EEndPlayReason::Type Reason) override;
@@ -63,6 +70,8 @@ protected:
     void ReleaseHeldExpeditionInputs();
     void SetupInputComponent() override;
     void PlayerTick(float DeltaTime) override;
+    void FlushPressedKeys() override;
+    void SetPawn(APawn* InPawn) override;
 
 private:
     struct FIncomingEdit
@@ -75,15 +84,19 @@ private:
     void Look(const FInputActionValue& Value);
     void Jump();
     void SwitchPerspective();
-    void Punch();
     void DigDown();
     void StopDig();
     void StopThrow();
     void SendHeldExpeditionAim();
-    void TriggerExpeditionEvent(EExpeditionAction Action, bool bHeld);
     UFUNCTION(Server, Reliable) void ServerExpeditionAction(EExpeditionAction Action, bool bHeld, FVector_NetQuantizeNormal Aim);
     UFUNCTION(Server, Reliable) void ServerReleaseExpeditionAction(EExpeditionAction Action);
     UFUNCTION(Server, Unreliable) void ServerUpdateExpeditionAim(EExpeditionAction Action, FVector_NetQuantizeNormal Aim);
+    UFUNCTION(Server, Reliable) void ServerFinishPunch(bool bStrike, FVector_NetQuantizeNormal Aim,float ReportedHoldSeconds);
+    void ClearServerPunch();
+    double LocalPunchStarted = 0.;
+    double ServerPunchStarted = 0.;
+    uint8 ReleasedPunchPower = 0;
+    bool bResolvingPunchRelease = false;
     bool bDigHeld = false;
     bool bThrowHeld = false;
     bool bServerDigHeld = false;

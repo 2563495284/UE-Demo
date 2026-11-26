@@ -3,6 +3,7 @@
 #include "Island/IslandRules.h"
 #include "Island/IslandRoomSettings.h"
 #include "Voxel/VoxelPlayerController.h"
+#include "Island/IslandFallEvent.h"
 #include "IslandPlayerController.generated.h"
 
 class APartySession;
@@ -11,6 +12,7 @@ class AIslandChest;
 class AIslandNeutralProp;
 class USoundWave;
 struct FStreamableHandle;
+enum class EIslandChipSurface : uint8;
 
 enum class EIslandPartyVeil : uint8 { Clear, Closing, Black, Opening };
 
@@ -29,6 +31,9 @@ class AIslandPlayerController : public AVoxelPlayerController
 
 public:
     AIslandPlayerController();
+    static void ForSceneryViewers(UWorld& World, TFunctionRef<void(AIslandPlayerController&)> Visit);
+    UFUNCTION(Client,Reliable) void ClientSceneryChips(FVector_NetQuantize Point, FVector_NetQuantizeNormal Normal,
+        EIslandChipSurface Surface, FColor Color, FColor Alternate);
     int32 GetTeam() const;
     UFUNCTION(Server, Reliable) void ServerChooseTeam(int32 Team);
     UFUNCTION(Server, Reliable) void ServerChooseCharacter(int32 ModelIndex);
@@ -48,7 +53,6 @@ public:
     bool HasStrongEcho() const { return bStrongEcho; }
     bool HasChestClue(const AIslandChest& Chest) const;
 
-    void Interact();
     void RestartIsland();
 
     UClass* GetPartySessionClass() const;
@@ -63,8 +67,11 @@ public:
 
     UFUNCTION(Client, Reliable) void ClientUpdateClues(const FIslandClues& Snapshot);
     UFUNCTION(Client, Reliable) void ClientWaterState(uint8 State);
+    UFUNCTION(Client, Reliable) void ClientSceneryFallStart(const FIslandSceneryFall& Fall, const FIslandFallContact& InitialContact);
+    UFUNCTION(Client, Reliable) void ClientSceneryFallContact(uint32 Id, const FIslandFallContact& Contact);
 
 protected:
+    void Punch() override;
     void SetupInputComponent() override;
     void PlayerTick(float DeltaTime) override;
     void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -75,7 +82,8 @@ private:
     void Rally();
     UFUNCTION(Server, Reliable) void ServerRally();
     void CloseMap();
-    UFUNCTION(Server, Reliable) void ServerInteract();
+    UFUNCTION(Server, Reliable) void ServerClickChest(AIslandChest* Chest, FVector_NetQuantizeNormal Aim);
+    AIslandChest* TraceChest(const FVector& Start, const FVector& End, FVector& Impact) const;
     UFUNCTION(Server, Reliable) void ServerRestartIsland();
     UFUNCTION(Server, Reliable) void ServerPartyAssetsReady(uint32 RoundId, bool bSuccess);
     UFUNCTION(Server, Reliable) void ServerPartyScreenBlack(uint32 RoundId, bool bReturning);
@@ -128,7 +136,8 @@ private:
     bool CanUseIslandWorld() const;
 public:
     AIslandChest* GetReachableChest() const;
-    AIslandNeutralProp* GetReachableSail() const;
+    AIslandChest* GetAimedChest(FVector* OutAim = nullptr) const;
+    AIslandChest* GetChestAlongAim(const FVector& Aim) const;
     FString GetNeutralHint() const;
     void ClearHeldIslandActions();
     bool ShowControlHelp() const { return bHelpOpen; }

@@ -30,6 +30,12 @@ struct FIslandNeutralState
     UPROPERTY() int8 RippleSide = 0;
     UPROPERTY() int16 MouthOffsetA = 0;
     UPROPERTY() int16 MouthOffsetB = 0;
+    UPROPERTY() TArray<FVector> RouteNodes;
+    // Side fixtures keep the elevation surveyed when the station was built, including for late arrivals.
+    UPROPERTY() TArray<int16> FootingHeights;
+    UPROPERTY() uint32 CompletedSections = 0;
+    UPROPERTY() bool bBridgeSailLowered = false;
+    UPROPERTY() double SailChangedAt = -10.;
 };
 
 UCLASS(NotPlaceable)
@@ -40,9 +46,19 @@ class ACTDEMO_API AIslandNeutralProp : public AActor
 public:
     AIslandNeutralProp();
     void Initialize(EIslandNeutralKind Kind);
+    void Initialize(const FIslandNeutralPlacement& Placement);
     EIslandNeutralKind GetKind() const { return State.Kind; }
     bool IsDemolished() const { return State.bDemolished; }
     uint8 GetPhase() const { return State.Phase; }
+    uint8 GetTriggerHits() const { return State.Phase; }
+    bool IsSailLowered() const { return State.Kind == EIslandNeutralKind::Sail ? State.Phase == 1 : State.bBridgeSailLowered; }
+    const TArray<FVector>& GetRouteNodes() const { return State.RouteNodes; }
+    int32 GetRouteSectionCount() const { return FMath::Max(0, State.RouteNodes.Num()-1); }
+    int32 GetCompletedRouteSections() const { return FPlatformMath::CountBits(State.CompletedSections); }
+    FVector GetBridgeDeckPoint(int32 Node) const;
+    FVector GetWindJumpStart(int32 Index) const;
+    FVector GetWindJumpLanding(int32 Index) const;
+    static float CurrentWalkSpeed(const AVoxelCharacter& Hero, FVector Intent, float BaseSpeed);
     uint8 GetPlugMask() const { return State.PlugMask; }
     FVector GetInteractionPoint() const;
     FVector GetTideMouth(int32 Index) const;
@@ -53,13 +69,11 @@ public:
 
     static bool TraceShovel(UWorld& World, FHitResult& Hit, const FVector& Start, const FVector& End, const FCollisionQueryParams& Query);
     bool Strike(AIslandPlayerController& Player, const FHitResult& Hit);
-    UFUNCTION(NetMulticast,Unreliable) void MulticastWreckChips(FName SourceName,int32 Finish,
-        FVector_NetQuantize Point,FVector_NetQuantizeNormal Normal);
+    bool ReceiveMudImpact(const FHitResult& Hit);
+    TOptional<FVector> WindJumpVelocity(const AVoxelCharacter& Hero) const;
     void RefreshVoxelMechanism();
-    bool CanUseRope(const AIslandPlayerController& Player) const;
     bool CanToggleSail() const;
     bool ToggleSail();
-    bool UseRope(AIslandPlayerController& Player);
     void RefreshTide(const AVoxelTerrain& Terrain);
     bool TryTideJump(AVoxelCharacter& Hero);
     void CompleteSandRelease(bool bCommitted);
@@ -90,6 +104,14 @@ private:
     void BuildHopper();
     void BuildSail();
     void BuildTide();
+    void BuildRoute();
+    void BuildRouteStation();
+    void UpdateRouteVisuals(double Now);
+    void AdvanceRoute(double Now);
+    void SetSectionComplete(int32 Section);
+    bool IsSectionComplete(int32 Section) const;
+    void PrepareSandSections();
+    FTransform BridgePanelPose(int32 Section, double Unfold) const;
     void UpdateVisuals(double Now);
     void AnimateTree(double Age);
     void AnimateHopper(double Age);
@@ -143,6 +165,15 @@ private:
     UPROPERTY(Transient) TArray<TObjectPtr<UStaticMeshComponent>> Foam;
     UPROPERTY(Transient) TArray<TObjectPtr<UStaticMeshComponent>> Spray;
     UPROPERTY(Transient) TObjectPtr<UStaticMeshComponent> Spillway;
+    UPROPERTY(Transient) TArray<TObjectPtr<UStaticMeshComponent>> RoutePanels;
+    UPROPERTY(Transient) TArray<TObjectPtr<UStaticMeshComponent>> RouteCrests;
+    UPROPERTY(Transient) TArray<TObjectPtr<UStaticMeshComponent>> StationMarkers;
+    UPROPERTY(Transient) TArray<TObjectPtr<UBoxComponent>> ChannelVolumes;
+    TArray<TArray<FVector>> SandSections;
+    int32 PendingSandSection = INDEX_NONE;
+    int32 NextSandSection = 0;
+    double NextSectionAt = 0.;
+    uint32 CollisionSections = 0;
     TArray<FPaint> Paints;
     int32 NextPieceIndex = 0;
     bool bBuilt = false;

@@ -8,6 +8,7 @@
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
 #include "PartyVoxelArena.h"
+#include "PartyCrewRig.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
 
@@ -18,7 +19,8 @@ namespace
         Initial, BothFox, GuestReady, ReadyStillSet, InvalidAndTeamChange, BeforeCountdown,
         GuestCancelled, PickAfterCancel, Island, Arena, IslandAgain, NewLobby, PickInNewLobby, Disguised, Revealed
     };
-    const FName Meshes[] = {TEXT("SM_Pig"), TEXT("SM_Monkey"), TEXT("SM_Fox"), TEXT("SM_Calf")};
+    const FName StaticBodies[] = {TEXT("SM_Pig"), TEXT("SM_Monkey"), TEXT("SM_Fox"), TEXT("SM_Calf")};
+    const FName Skins[] = {TEXT("SK_ExpeditionPig"), TEXT("SK_ExpeditionMonkey"), TEXT("SK_ExpeditionFox"), TEXT("SK_ExpeditionCalf")};
 
     bool OnOtherShore(const AIslandGameState& Round, const AIslandPlayerState* Observer, const AIslandPlayerState& Member)
     {
@@ -46,20 +48,19 @@ namespace
         }
 #endif
         TInlineComponentArray<UStaticMeshComponent*> Components(Pawn);
-        int32 Found = INDEX_NONE;
         for (const auto* Part : Components)
         {
-            if (!Part->GetStaticMesh()) continue;
-            for (int32 Model = 0; Model < UE_ARRAY_COUNT(Meshes); ++Model)
-            {
-                if (Part->GetStaticMesh()->GetFName() != Meshes[Model]) continue;
-                if (bDisguised && Part->IsVisible()) return INDEX_NONE;
-                if (!bDisguised && !bLocal && (!Part->IsVisible() || Part->bHiddenInGame || Part->bOnlyOwnerSee)) continue;
-                if (Found != INDEX_NONE) return INDEX_NONE;
-                Found = Model;
-            }
+            if (!Part->GetStaticMesh() || !Part->IsVisible()) continue;
+            for (FName Legacy : StaticBodies)
+                if (Part->GetStaticMesh()->GetFName()==Legacy) return INDEX_NONE;
         }
-        return Found;
+        const auto* Rig=Pawn->FindComponentByClass<UPartyCrewRig>();
+        const int32 Selected=Member.GetCharacterModel();
+        if (!Rig || Selected<0 || Selected>=UE_ARRAY_COUNT(Skins)) return INDEX_NONE;
+        if (bDisguised && !Rig->IsVisible() && bParty && !Rig->GetSkinnedAsset()) return Selected;
+        if (!Rig->GetSkinnedAsset() || Rig->GetSkinnedAsset()->GetFName()!=Skins[Selected]) return INDEX_NONE;
+        if (bDisguised ? Rig->IsVisible() : (!bLocal && !Rig->IsVisible())) return INDEX_NONE;
+        return Selected;
     }
 }
 

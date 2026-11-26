@@ -1,6 +1,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
 #include "Voxel/IslandRouteVoxel.h"
+#include "Island/IslandFallingScenery.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FIslandRouteObjectVolumeTest, "ActDemo.Voxel.RouteScenery.PartialCutAndReplay",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -25,7 +26,16 @@ bool FIslandRouteObjectVolumeTest::RunTest(const FString&)
     TestTrue(TEXT("The far side stays solid"), Field->IsSolidLocal({-21.,0.,133.}));
     TestTrue(TEXT("Connected head survives"), Field->IsSolidLocal({0.,0.,160.}));
     TestTrue(TEXT("Sever base with the ordinary shovel footprint"), Field->ApplyWorldCut({0.,0.,75.}, FVector::UpVector));
-    TestTrue(TEXT("Disconnected head clears after losing its roots"), Field->CullUnsupported(Root));
+    TArray<FIslandLooseSamples> Loose;
+    TestTrue(TEXT("Disconnected head clears after losing its roots"), Field->CullUnsupported(Root, &Loose));
+    TestEqual(TEXT("The severed head falls as a single connected piece"), Loose.Num(), 1);
+    if (Loose.Num() == 1)
+    {
+        FProcMeshSection Head;
+        TestTrue(TEXT("A peer can reconstruct the painted head after the server clears it"), Replica->FallingSection(Loose[0].Shape, Head));
+        TestTrue(TEXT("The falling body has a closed head shape and leaves the anchored stump behind"),
+            Head.ProcIndexBuffer.Num()>0 && Head.SectionLocalBox.Min.Z>75. && Head.SectionLocalBox.Max.Z>160. && !Head.bEnableCollision);
+    }
     TestFalse(TEXT("No floating head"), Field->IsSolidLocal({0.,0.,160.}));
     TestTrue(TEXT("Still grounded below the cut"), Field->IsSolidLocal({0.,0.,0.}));
     TArray<uint8> Snapshot;
@@ -44,6 +54,8 @@ bool FIslandRouteObjectVolumeTest::RunTest(const FString&)
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Components/StaticMeshComponent.h"
+#include "Components/BoxComponent.h"
+#include "EngineUtils.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/GameStateBase.h"
@@ -321,9 +333,53 @@ bool FIslandCrossPartSupportTest::RunTest(const FString&)
     IslandScenerySupport::FindUnsupported(Ground, Parts, Loss);
     TestTrue(TEXT("Far pier still supports the entire lintel"),Loss.IsEmpty());
     RemoveAll(*East);
-    IslandScenerySupport::FindUnsupported(Ground, Parts, Loss);
+    Parts.Add(Floating);
+    TArray<IslandScenerySupport::FCellGroup> LooseGroups;
+    IslandScenerySupport::FindUnsupported(Ground, Parts, Loss, &LooseGroups);
+    TestEqual(TEXT("Two disconnected slabs become two independently falling bodies"), LooseGroups.Num(), 2);
     TestTrue(TEXT("Removing both supports releases every lintel voxel"),
         Loss.Contains(Beam) && Loss[Beam].Num()==Beam->RemainingCount());
+    if (const auto* Cells=Loss.Find(Beam))
+    {
+        TArray<uint8> Packed;
+        AIslandFallingScenery::PackCells(*Cells, Packed);
+        Beam->RemoveCells(*Cells);
+        TArray<FProcMeshSection> Rebuilt;
+        TestTrue(TEXT("Late journal application cannot erase the falling shape"), Beam->FallingSections(Packed, Rebuilt));
+        TestTrue(TEXT("An entirely detached lintel keeps the original cube silhouette"),
+            !Rebuilt.IsEmpty() && Rebuilt[0].ProcIndexBuffer.Num()==36 && Beam->RemainingCount()==0);
+
+        auto Landing=[&](double Top)
+        {
+            auto* Floor=NewObject<UBoxComponent>(World->SpawnActor<AActor>());
+            Floor->SetBoxExtent({400.,400.,8.});
+            Floor->SetWorldLocation({0.,0.,Base+Top-8.});
+            Floor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+            Floor->SetCollisionResponseToAllChannels(ECR_Block);
+            Floor->RegisterComponent();
+            return Floor;
+        };
+        Landing(0.);
+        auto* Shelf=Landing(82.);
+        TArray<IslandScenerySupport::FCellGroup> FallingBeam;
+        FallingBeam.AddDefaulted_GetRef().Add(Beam,*Cells);
+        AIslandFallingScenery::Release(*Actor,FallingBeam);
+        TActorIterator<AIslandFallingScenery> Effects(World);
+        if (TestTrue(TEXT("A disconnected slab starts an authority fall"),bool(Effects)))
+        {
+            auto* FX=*Effects;
+            TestTrue(TEXT("It initially falls towards the closest surviving shelf"),
+                FX->Contact.bHasContact && FMath::Abs(FX->Contact.Point.Z-Base-82.)<2.);
+            Shelf->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+            World->TimeSeconds=.20;
+            FX->Tick(.20f);
+            TestTrue(TEXT("Removing the predicted landing while the slab is airborne uncovers the lower floor"),
+                FX->Contact.bHasContact && !FX->Contact.bConfirmed && FMath::Abs(FX->Contact.Point.Z-Base)<2.);
+            World->TimeSeconds=1.1;
+            FX->Tick(.9f);
+            TestTrue(TEXT("Impact is confirmed at the remaining floor"),FX->Contact.bConfirmed && FMath::Abs(FX->Contact.Point.Z-Base)<2.);
+        }
+    }
     World->DestroyWorld(false);
     return !HasAnyErrors();
 }

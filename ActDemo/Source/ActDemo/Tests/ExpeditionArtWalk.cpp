@@ -20,8 +20,8 @@
 // A photo pass through a normally seeded match. Only the observer camera moves.
 void AExpeditionWalk::TickArtTour()
 {
-    static const TCHAR* Shots[] = {TEXT("Island"),TEXT("CrewAtDock"),TEXT("Tree"),TEXT("Ship"),
-        TEXT("Hopper"),TEXT("Sail"),TEXT("Tide"),TEXT("LandmarkA"),TEXT("LandmarkB"),TEXT("LandmarkC"),TEXT("LandmarkD"),
+    static const TCHAR* Shots[] = {TEXT("Island"),TEXT("CrewAtDock"),TEXT("Bridge"),TEXT("Dam"),
+        TEXT("SandDepot"),TEXT("WindTower"),TEXT("FarRoute"),TEXT("LandmarkA"),TEXT("LandmarkB"),TEXT("LandmarkC"),TEXT("LandmarkD"),
         TEXT("TrailCanopy"),TEXT("TrailReef"),TEXT("TrailAtEyeLevel"),TEXT("TrailCenter"),
         TEXT("ReefBeforeCut"),TEXT("ReefAfterCut"),TEXT("ArchBeforeCut"),TEXT("ArchAfterCut")};
     if (FScreenshotRequest::IsScreenshotRequested()) return;
@@ -307,7 +307,7 @@ void AExpeditionWalk::TickArtTour()
         if (ArtShot < 7)
         {
             for (TActorIterator<AIslandNeutralProp> It(GetWorld()); It; ++It)
-                if (int32(It->GetKind()) == ArtShot-2 && (!Subject || It->GetActorLocation().X<Subject->GetActorLocation().X)) Subject = *It;
+                if (int32(It->GetKind()) == int32(EIslandNeutralKind::Bridge)+(ArtShot==6 ? 0 : ArtShot-2) && (!Subject || It->GetActorLocation().X<Subject->GetActorLocation().X)) Subject = *It;
         }
         else
         {
@@ -326,6 +326,12 @@ void AExpeditionWalk::TickArtTour()
         FVector Direction = Sun;
         if (ArtShot == 3)
             Direction = (Across * (FVector::DotProduct(Across,Sun)<0.?-1.:1.) - Subject->GetActorRightVector()*.48).GetSafeNormal2D();
+        if (const auto* Facility = Cast<AIslandNeutralProp>(Subject); Facility && Facility->GetRouteNodes().Num()>1)
+        {
+            const auto& Nodes = Facility->GetRouteNodes();
+            Focus = ArtShot==6 ? Nodes.Last()+FVector(0,0,130.) : Nodes[0]+FVector(0,0,150.);
+            Extent = FVector(620.,440.,280.);
+        }
         const double Size = FMath::Max3(Extent.Size2D(),Extent.Z*1.65,240.);
         Eye = Focus + Direction*Size*2.2 + FVector(0,0,Size*.68);
         Eye.Z = FMath::Max(Eye.Z, Terrain->GetDensity()->SurfaceAt(FVector2D(Eye)).Get(Eye.Z-140.)+140.);

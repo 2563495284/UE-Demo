@@ -12,7 +12,6 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "GameFramework/SpringArmComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/InputSettings.h"
 #include "HAL/FileManager.h"
@@ -23,21 +22,6 @@
 
 namespace
 {
-    FRotator ViewOfWreckPlank(AVoxelCharacter& Hero, FVector Stand, FVector Eye, FVector Plank)
-    {
-        const auto* Arm = Hero.FindComponentByClass<USpringArmComponent>();
-        if (Hero.IsInFirstPersonView() || !Arm) return (Plank - Eye).Rotation();
-        // The third-person reticle follows a ray from the shoulder camera. Moving
-        // the camera along its boom cannot change that ray, but rotating its
-        // lateral socket offset does. Aim the offset ray at the actual plank.
-        const FVector Pivot = Stand + (Arm->GetComponentLocation() - Hero.GetActorLocation()) + Arm->TargetOffset;
-        const FVector ToPlank = Plank - Pivot;
-        FRotator View = ToPlank.Rotation();
-        for (int32 I = 0; I < 6; ++I)
-            View = (ToPlank - View.RotateVector(Arm->SocketOffset)).Rotation();
-        return View;
-    }
-
     void VerifyWreckPreviewInput(AIslandPlayerController& Player, AIslandNeutralProp& Ship)
     {
         auto* Hero = Player.GetHero();
@@ -70,6 +54,8 @@ namespace
 AExpeditionWalk::AExpeditionWalk()
 {
     PrimaryActorTick.bCanEverTick = true;
+    bCrewFilm=FParse::Param(FCommandLine::Get(),TEXT("CrewPunchFilm")) || FParse::Param(FCommandLine::Get(),TEXT("CrewPunchFilmPair")) || FParse::Param(FCommandLine::Get(),TEXT("CrewShapeFilm"));
+    if (bCrewFilm) { bReplicates=true; bAlwaysRelevant=true; }
     bSlopePitRun = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionSlopePitQA"));
     bTreasureRun = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionTreasureWalkQA"));
     bArtTour = FParse::Param(FCommandLine::Get(),TEXT("ExpeditionArtTour"));
@@ -187,6 +173,7 @@ void AExpeditionWalk::TickWreckPreview()
     if (!Player || !Player->GetHero() || !State || !Mode || !Terrain || !Terrain->IsReady()) return;
     if (!bStarted && State->Phase == EIslandPhase::Waiting && State->CanLaunch())
     {
+        if (FParse::Param(FCommandLine::Get(),TEXT("PigPunchPreview"))) Player->ServerChooseCharacter(0);
         Player->ServerStartExpedition();
         bStarted = true;
     }
@@ -230,7 +217,7 @@ void AExpeditionWalk::TickWreckPreview()
                 if (!Stand || bWithinReach)
                 {
                     Stand = Floor;
-                    View = bWithinReach ? ViewOfWreckPlank(*Hero,*Floor,Eye,Hit.ImpactPoint) : Look.Rotation();
+                    View = bWithinReach ? Hero->GetViewRotationForTarget(Hit.ImpactPoint,*Floor) : Look.Rotation();
                 }
                 if (bWithinReach) break;
             }
@@ -261,6 +248,7 @@ void AExpeditionWalk::TickWreckPreview()
 void AExpeditionWalk::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+    if (bCrewFilm) { TickCrewFilm(); return; }
     if (bWreckPreview && GetNetMode() == NM_Standalone) { TickWreckPreview(); return; }
     if (bArtTour) { TickArtTour(); return; }
     const double Now = GetWorld()->GetTimeSeconds();

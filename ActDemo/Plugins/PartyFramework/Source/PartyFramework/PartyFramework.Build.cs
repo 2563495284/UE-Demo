@@ -5,7 +5,7 @@ public class PartyFramework : ModuleRules
     public PartyFramework(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-        PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "GameFeatures", "NetCore", "InputCore" });
-        PrivateDependencyModuleNames.AddRange(new[] { "GeometryCore", "ProceduralMeshComponent" });
+        PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "GameFeatures", "NetCore", "InputCore", "ProceduralMeshComponent" });
+        PrivateDependencyModuleNames.AddRange(new[] { "GeometryCore", "RenderCore", "RHI", "Slate", "SlateCore" });
     }
 }

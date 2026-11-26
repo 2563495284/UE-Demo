@@ -54,6 +54,7 @@ void AIslandPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
     DOREPLIFETIME(AIslandPlayerState, SelectedCharacter);
     DOREPLIFETIME(AIslandPlayerState, bHost);
     DOREPLIFETIME(AIslandPlayerState, bRoomReady);
+    DOREPLIFETIME(AIslandPlayerState, bPrying);
     DOREPLIFETIME(AIslandPlayerState, bMapReady);
     DOREPLIFETIME_CONDITION(AIslandPlayerState, LockView, COND_OwnerOnly);
 }
@@ -72,6 +73,29 @@ UStaticMesh* AIslandPlayerState::GetPartyCharacterMesh(bool& bLongPaws) const
     return GetDefault<UExpeditionAnimalComponent>()->GetCharacterMesh(Model);
 }
 
+FVector AIslandPlayerState::GetCrewBadgeAnchor() const
+{
+    // Back surface of each garment, in centimetres above the sole.
+    // The fox's patch sits beside her diagonal chart case.
+    static const FVector Anchors[]={{-24.,6.,85.},{-18.7,0.,90.},{-16.9,11.,78.},{-28.2,0.,88.}};
+    static_assert(UE_ARRAY_COUNT(Anchors)==IslandRules::CharacterModelCount);
+    return Anchors[GetCharacterModel()];
+}
+
+USkeletalMesh* AIslandPlayerState::GetPartyCharacterRig() const
+{
+    const auto* Round=GetWorld()->GetGameState<AIslandGameState>();
+    if (!Round || !Round->bRoomLobby || Round->IsIdentityDisguised()) return nullptr;
+    return GetDefault<UExpeditionAnimalComponent>()->GetCharacterRig(GetCharacterModel());
+}
+
+UStaticMesh* AIslandPlayerState::GetPartyFirstPersonFist() const
+{
+    const auto* Round=GetWorld()->GetGameState<AIslandGameState>();
+    if (!Round || !Round->bRoomLobby || Round->IsIdentityDisguised()) return nullptr;
+    return GetDefault<UExpeditionAnimalComponent>()->GetFirstPersonFist(GetCharacterModel());
+}
+
 void AIslandPlayerState::SetCharacterModel(int32 ModelIndex)
 {
     if (!HasAuthority() || !IslandRules::IsCharacterModel(ModelIndex) || SelectedCharacter == ModelIndex) return;
@@ -83,6 +107,7 @@ void AIslandPlayerState::SetLockView(const FIslandLockView& NewView)
 {
     const FIslandLockView Previous = LockView;
     LockView = NewView;
+    bPrying=NewView.Chest && NewView.Role!=EIslandLockRole::Observer;
     if (const APlayerController* Player = GetPlayerController(); Player && Player->IsLocalController())
     {
         OnRep_LockView(Previous);

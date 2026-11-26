@@ -18,11 +18,11 @@ TArray<FIntVector> ReadSails(UWorld* World, bool bTestSight)
     {
         if (!It->CanToggleSail()) continue;
         const FTransform Pose = It->GetActorTransform();
-        int32 Phase = It->GetPhase();
+        int32 Phase = It->IsSailLowered() ? 1 : 0;
         if (bTestSight)
         {
             const bool bObscures = AIslandNeutralProp::AnySailObscures(*World,
-                Pose.TransformPosition({-100.,180.,110.}), Pose.TransformPosition({100.,180.,110.}));
+                Pose.TransformPosition({-100.,0.,145.}), Pose.TransformPosition({100.,0.,145.}));
             if (bObscures != (Phase == 1)) Phase = INDEX_NONE;
         }
         Sails.Emplace(FMath::RoundToInt(Pose.GetLocation().X), FMath::RoundToInt(Pose.GetLocation().Y), Phase);
@@ -110,10 +110,10 @@ bool AIslandProbe::TickDecoyWorld(EIslandDecoyEvent Event, double Now)
     {
         if (Sails.IsEmpty()) { Require(false, TEXT("a gust needs a surviving sail")); return false; }
         for (FIntVector& Sail : Sails) Sail.Z = 1 - Sail.Z;
-        if (DecoyWorldStage == 1) Sails[0].Z = 1 - Sails[0].Z;
+
     }
 
-    // Let the ordinary rope input or player shovel action finish before taking the second sample.
+    // Let the player shovel action finish before taking the second sample.
     if (DecoyWorldStage == 1 && bNeutralWaitingInput)
     {
         if (Now >= NeutralSendAt)
@@ -129,7 +129,7 @@ bool AIslandProbe::TickDecoyWorld(EIslandDecoyEvent Event, double Now)
     if (!bMatches)
     {
         if (DecoyWorldStage == 1 && Now - DecoyWorldInputAt > 6.)
-            Require(false, TEXT("manual action must edit the sand or cloth exactly once"));
+            Require(false, TEXT("manual action must edit the sand exactly once"));
         return false;
     }
 
@@ -170,23 +170,10 @@ bool AIslandProbe::TickDecoyWorld(EIslandDecoyEvent Event, double Now)
             Sequence, Terrain.GetChecksum(), Sails);
     }
     if (!bConfirmed) return false;
-    if (bRally || DecoyWorldStage == 1) return true;
+    if (bRally || bSail || DecoyWorldStage == 1) return true;
 
-    if (bSand) NeutralDigLane(0, *DecoyRampPeak);
-    else
-    {
-        for (AIslandNeutralProp* Sail : Mode->NeutralProps)
-        {
-            if (!IsValid(Sail) || !Sail->CanToggleSail()) continue;
-            const FVector P = Sail->GetActorLocation();
-            if (FMath::RoundToInt(P.X) == Sails[0].X && FMath::RoundToInt(P.Y) == Sails[0].Y)
-            {
-                AimDecoyRope(*Sail);
-                break;
-            }
-        }
-    }
-    if (!bNeutralWaitingInput) { Require(false, TEXT("the player can stand within normal range of the event surface or rope")); return false; }
+    NeutralDigLane(0, *DecoyRampPeak);
+    if (!bNeutralWaitingInput) { Require(false, TEXT("the player can reach the event sand")); return false; }
     DecoyWorldStage = 1;
     return false;
 }

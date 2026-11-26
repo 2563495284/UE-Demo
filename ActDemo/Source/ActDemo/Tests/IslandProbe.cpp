@@ -1,4 +1,5 @@
 #include "Tests/IslandProbe.h"
+#include "PartyVoxelArena.h"
 
 #include "Components/StaticMeshComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -212,18 +213,20 @@ void AIslandProbePeer::ClientInspect_Implementation(int32 Epoch, bool bDigest)
 
 void AIslandProbePeer::ClientOpenChest_Implementation()
 {
-    if (AIslandPlayerController* Player = Cast<AIslandPlayerController>(GetOwner()))
-    {
-        UE_LOG(LogTemp, Display, TEXT("ISLAND_QA_INTERACT team=%d"), Player->GetTeam());
-        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA")) || FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA"))
-            || FParse::Param(FCommandLine::Get(), TEXT("ExpeditionGamesQA")))
-        {
-            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E, IE_Pressed, 1.f));
-            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E, IE_Released, 0.f));
-            return;
-        }
-        Player->Interact();
-    }
+    // Keep the press and release on separate input frames, including NullRHI clients.
+    AimAtChestUntil = FPlatformTime::Seconds() + 1.5;
+    AimedLidFrames = 0;
+}
+
+void AIslandProbePeer::ClientWatchHeldLid_Implementation()
+{
+    bWatchHeldLid = true;
+    HeldLidSince = -1.;
+}
+
+void AIslandProbePeer::ServerHeldLidObserved_Implementation()
+{
+    bHeldLidObserved = true;
 }
 
 void AIslandProbePeer::ClientJoinCrew_Implementation(int32 Team, bool bReady)
@@ -247,6 +250,16 @@ void AIslandProbePeer::ClientShowChart_Implementation()
 {
     if (AIslandPlayerController* Player = Cast<AIslandPlayerController>(GetOwner()))
     {
+        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA")))
+        {
+            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::Tab, IE_Pressed, 1.f));
+            FTimerHandle Release;
+            GetWorldTimerManager().SetTimer(Release,FTimerDelegate::CreateWeakLambda(Player,[Player]()
+            {
+                Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::Tab,IE_Released,0.f));
+            }),.35f,false);
+            return;
+        }
         if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionGamesQA")))
         {
             Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::Tab, IE_Pressed, 1.f));
@@ -310,6 +323,62 @@ void AIslandProbePeer::Tick(float DeltaSeconds)
         TickArenaViews(*Controller);
     if (Controller && Controller->IsLocalController())
     {
+        if (ReleaseChestClickFrame && GFrameCounter >= ReleaseChestClickFrame)
+        {
+            Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::LeftMouseButton, IE_Released, 0.f));
+            ReleaseChestClickFrame = 0;
+        }
+        if ((bWatchHeldLid || FPlatformTime::Seconds() < AimAtChestUntil) && !ReleaseChestClickFrame)
+        {
+            const auto* Hero = Controller->GetHero();
+            const auto* Chest = Controller->GetReachableChest();
+            if (Hero && Chest)
+            {
+                FVector Target = Chest->GetActorLocation();
+                const FVector Found = Chest->GetDiscoveryPoint();
+                if (FVector::DistSquared(Hero->GetAimOrigin(), Found) < FVector::DistSquared(Hero->GetAimOrigin(), Target)) Target = Found;
+                // In a narrow pit a chest can be nearer than the shoulder offset.
+                // Use the ordinary first-person shortcut for a clear look at its lid.
+                if (Controller->UsesExpeditionAbilities() && !Hero->IsInFirstPersonView())
+                {
+                    Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Pressed,1.f));
+                    Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Released,0.f));
+                }
+                Controller->SetControlRotation(Hero->GetViewRotationForTarget(Target, Hero->GetActorLocation()));
+                const bool bAimed = Controller->GetAimedChest() == Chest;
+                if (bWatchHeldLid)
+                {
+                    const double Now = FPlatformTime::Seconds();
+                    if (!bAimed || !Controller->IsInputKeyDown(EKeys::LeftMouseButton))
+                    {
+                        if (HeldLidSince >= 0.)
+                            Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E,IE_Released,0.f));
+                        HeldLidSince = -1.;
+                    }
+                    else if (HeldLidSince < 0.)
+                    {
+                        Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E,IE_Pressed,1.f));
+                        HeldLidSince = Now;
+                    }
+                    else if (Now - HeldLidSince >= 1.1 && Controller->IsInputKeyDown(EKeys::E))
+                    {
+                        Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E,IE_Released,0.f));
+                        UE_LOG(LogTemp,Display,TEXT("FIELD_QA_UNUSED_E held_and_released=1"));
+                        ServerHeldLidObserved();
+                        bWatchHeldLid = false;
+                    }
+                }
+                else if (!bAimed) AimedLidFrames = 0;
+                else if (++AimedLidFrames >= 3)
+                {
+                    Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::LeftMouseButton, IE_Pressed, 1.f));
+                    ReleaseChestClickFrame = GFrameCounter + 2;
+                    AimAtChestUntil = 0.;
+                    UE_LOG(LogTemp,Display,TEXT("ISLAND_QA_INTERACT team=%d"), Controller->GetTeam());
+                }
+            }
+        }
+        if (!SceneryClip.IsNone()) CaptureSceneryFrame();
         if (HeldArenaKey.IsValid() && FPlatformTime::Seconds() >= ReleaseArenaKeyAt)
         {
             Controller->InputKey(FInputKeyEventArgs::CreateSimulated(HeldArenaKey, IE_Released, 0.f));
@@ -317,6 +386,7 @@ void AIslandProbePeer::Tick(float DeltaSeconds)
         }
         if (GameToolTarget && !HeldArenaKey.IsValid()) TickGameTool(*Controller);
         if (TerrainSampleStage != INDEX_NONE) TickArenaTerrainSample(*Controller);
+        if (ArenaPunchTrial != INDEX_NONE) TickArenaPunchInput(*Controller);
     }
     if (Controller && Controller->IsLocalController() && GameWalkTarget) TickGameWalk();
     if (Controller && Controller->IsLocalController() && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA")))
@@ -619,7 +689,11 @@ void AIslandProbe::TickExpedition(double Now)
     }
     const bool bRealMazeClock = RoomCheck == ERoomCheck::Games && GameCount == 0
         && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMazeQA")) && FParse::Param(FCommandLine::Get(), TEXT("IslandScreenshot"));
-    if (Now - StepAt > (bRealMazeClock ? 280.0 : RoomCheck == ERoomCheck::Stress ? 240.0 : 100.0))
+    // Each arena runs its full match clock. Streaming and the three-client collision
+    // scans also take wall time on a CPU-limited machine.
+    const bool bArenaCollisionRun=RoomCheck==ERoomCheck::Games && FParse::Param(FCommandLine::Get(),TEXT("ExpeditionArenaTerrainQA"));
+    const double Timeout=bRealMazeClock ? 280.0 : RoomCheck==ERoomCheck::Stress ? 240.0 : bArenaCollisionRun ? 180.0 : 100.0;
+    if (Now - StepAt > Timeout)
     {
         UE_LOG(LogTemp, Error, TEXT("ISLAND_QA_TIMEOUT room=%d index=%d phase=%d"), int32(RoomCheck), NextDig, int32(Round->Phase));
         Require(false, TEXT("expedition timed out"));
@@ -984,6 +1058,8 @@ void AIslandProbe::TickExpedition(double Now)
             bGameStarted = bGameOverviewShot = bStoneDug = false;
             StoneProofCell.Reset();
             TerrainStage = 0;
+            PunchSites.Reset();
+            bPunchTrialSent = false;
             TerrainInputSequence = INDEX_NONE;
             bTerrainSampleRequested = false;
             GameAction = 0;

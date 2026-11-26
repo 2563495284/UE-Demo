@@ -1,5 +1,5 @@
-#include "Island/IslandMeshVoxelData.h"
-#include "Island/IslandVoxelSourceArchive.h"
+#include "PartyMeshVoxelData.h"
+#include "PartyVoxelSourceArchive.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "StaticMeshResources.h"
@@ -176,13 +176,13 @@ void FIslandMeshVoxelData::VisitBox(FBox Local,TFunctionRef<void(int32)> Visit) 
         Visit(Index({X,Y,Z}));
 }
 
-void FIslandMeshVoxelData::Build(FVector WorldScale)
+void FIslandMeshVoxelData::Build(FVector WorldScale,double MaxPitch)
 {
     for (const auto& T:Source) for (const auto& V:T.V) Box+=V.Position;
     Box=Box.ExpandBy(.003);
     const FVector Extent=Box.GetSize(), WorldExtent=Extent*WorldScale.GetAbs();
     // Small hardware has its own grid. Large beams, rocks and decks use cells up to 25 cm.
-    const double Pitch=FMath::Clamp(WorldExtent.GetMax()/12.,3.,25.);
+    const double Pitch=FMath::Clamp(WorldExtent.GetMax()/12.,3.,MaxPitch);
     for (int32 Axis=0;Axis<3;++Axis) Size[Axis]=FMath::Clamp(FMath::CeilToInt(WorldExtent[Axis]/Pitch),1,144);
     Step=Extent/FVector(Size);
     Filled.Init(false,Size.X*Size.Y*Size.Z);
@@ -245,25 +245,44 @@ void FIslandMeshVoxelData::Build(FVector WorldScale)
 
 void FIslandMeshVoxelData::Mesh(TArray<FProcMeshSection>& Sections) const
 {
+    MeshWithMask(Missing, Remaining, Sections);
+}
+
+void FIslandMeshVoxelData::MeshSubset(TConstArrayView<int32> Cells, TArray<FProcMeshSection>& Sections) const
+{
+    TBitArray<> Absent = Filled;
+    int32 Present = 0;
+    for (const int32 Cell : Cells)
+        if (Absent.IsValidIndex(Cell) && Absent[Cell])
+        {
+            Absent[Cell] = false;
+            ++Present;
+        }
+    MeshWithMask(Absent, Present, Sections);
+}
+
+void FIslandMeshVoxelData::MeshWithMask(const TBitArray<>& Absent, int32 Count, TArray<FProcMeshSection>& Sections) const
+{
+    auto Present = [&](int32 I){ return Filled[I] && !Absent[I]; };
     for (const auto& T:Source) if(Sections.Num()<=T.Material) Sections.SetNum(T.Material+1);
-    if (Total==Remaining) { for(const auto& T:Source) Emit(Sections[T.Material],T); return; }
-    if (!Remaining) return;
+    if (Total==Count) { for(const auto& T:Source) Emit(Sections[T.Material],T); return; }
+    if (!Count) return;
     for(int32 Face=0;Face<Source.Num();++Face)
     {
         const int32 First=FaceStarts[Face], End=FaceStarts[Face+1];
         bool Whole=true;
-        for(int32 J=First;J<End && Whole;++J) Whole=Live(SkinCells[J]);
+        for(int32 J=First;J<End && Whole;++J) Whole=Present(SkinCells[J]);
         if(Whole) Emit(Sections[Source[Face].Material],Source[Face]);
-        else for(int32 J=First;J<End;++J) if(Live(SkinCells[J])) Emit(Sections[Skin[J].Material],Skin[J]);
+        else for(int32 J=First;J<End;++J) if(Present(SkinCells[J])) Emit(Sections[Skin[J].Material],Skin[J]);
     }
     const FIntVector Axes[]={{1,0,0},{0,1,0},{0,0,1}};
-    for (TConstSetBitIterator<> Removed(Missing);Removed;++Removed)
+    for (TConstSetBitIterator<> Removed(Absent);Removed;++Removed)
     {
         const auto CellPos=XYZ(Removed.GetIndex());
         for(int32 A=0;A<3;++A) for(int32 S:{-1,1})
         {
             const auto Neighbour=CellPos+Axes[A]*S;
-            if(!Inside(Neighbour) || !Live(Index(Neighbour))) continue;
+            if(!Inside(Neighbour) || !Present(Index(Neighbour))) continue;
             const FVector N=FVector(Axes[A])*(-S);
             const FVector C=Center(Index(Neighbour))+N*Step*.5;
             const int32 B=(A+1)%3, D=(A+2)%3;

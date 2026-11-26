@@ -247,9 +247,13 @@ void AIslandProbe::BeginLockCheck(double Now)
             }
             if (!bReachable) continue;
             for (const auto& PC : Players)
-                PC->ClientResetView((Chest - PC->GetHero()->GetAimOrigin()).Rotation());
+                if (PC != Players[1]) PC->ClientResetView((Chest - PC->GetHero()->GetAimOrigin()).Rotation());
             Require(true, TEXT("all three players can reach the vault and the rival can throw at each worker"));
-            SetFieldStage(EFieldStep::Gather, Now);
+            if (!Peers[1]->bHeldLidObserved)
+            {
+                Peers[1]->ClientWatchHeldLid();
+                SetFieldStage(EFieldStep::HoldThroughReveal, Now);
+            }
             return;
         }
     }
@@ -288,8 +292,9 @@ void AIslandProbe::TickFieldCheck(double Now)
     {
         auto* Worker = Players[Seat]->GetHero();
         const int32 Marks = Mode->GetMudMarks(*Worker);
-        const double Interval = Marks == 0 ? .14 : .63;
-        if (Now - LastAction < Interval && LastAction != StepAt) return;
+        const auto* Thrower = Players[2]->GetHero()->GetAbilitySystemComponent();
+        static const FGameplayTag Cooldown = FGameplayTag::RequestGameplayTag(TEXT("Expedition.Cooldown.Throw"));
+        if ((Now - LastAction < .12 && LastAction != StepAt) || Thrower->HasMatchingGameplayTag(Cooldown)) return;
         if (Marks == 2)
         {
             Require(Lock.Chest && Lock.bAssisted && Lock.Team == 0 && !Lock.bSeized &&
@@ -424,9 +429,26 @@ void AIslandProbe::TickFieldCheck(double Now)
                 TEXT("both crews have a key but only the crew with four sites can locate and open the vault"));
             RoomCheck = ERoomCheck::Dig;
             PrepareDig(IslandRules::PrizeIndex);
+            Place(1, Players[0]->GetHero()->GetActorLocation() + FVector(20., 0., 0.));
+            // The coordinator also digs below this witness. Keep the sample pose at
+            // the shaft rim instead of letting an off-island fall reset its held tool.
+            Players[1]->GetHero()->GetCharacterMovement()->DisableMovement();
+            Peers[1]->ClientMudHold(false, true, FRotator(-82.,0.,0.));
         }
         break;
     }
+    case EFieldStep::HoldThroughReveal:
+        if (Peers[1]->bHeldLidObserved)
+        {
+            const bool bHeld = Players[1]->IsHoldingExpeditionDig();
+            const bool bUntouched = Mode->ChestLocks.IsEmpty() && Round->Phase == EIslandPhase::Hunting;
+            Require(bHeld && bUntouched,
+                TEXT("keeping the same left press through excavation and aiming at the revealed lid never opens it"));
+            UE_LOG(LogTemp,Display,TEXT("FIELD_QA_LID_HELD physical=%d exposed=1 aimed=1 locked=%d"),bHeld,!bUntouched);
+            Peers[1]->ClientMudHold(false,false,Players[1]->GetControlRotation());
+            SetFieldStage(EFieldStep::Gather, Now);
+        }
+        break;
     case EFieldStep::Gather:
         if (Age > .6 && LastAction == StepAt)
         {
@@ -554,8 +576,8 @@ void AIslandProbe::TickFieldCheck(double Now)
             const FVector Ahead = (OriginalFloor - FieldStand).GetSafeNormal2D();
             const FVector Side = FVector::CrossProduct(FVector::UpVector, Ahead);
             FVector Stand;
-            if (!FieldFloor(*Terrain, ReferenceFloor + Side*120., SecondFieldTarget)
-                || !FieldFloor(*Terrain, ReferenceFloor - Ahead*90. + Side*60., Stand))
+            if (!FieldFloor(*Terrain, ReferenceFloor + Side*172., SecondFieldTarget)
+                || !FieldFloor(*Terrain, ReferenceFloor - Ahead*84. + Side*86., Stand))
             {
                 Require(false, TEXT("two visible terrain targets have a nearby standing surface"));
                 return;
@@ -579,41 +601,143 @@ void AIslandProbe::TickFieldCheck(double Now)
         }
         break;
     case EFieldStep::HoldFirst:
-        if (Terrain->GetAppliedSequence() > HoldSequence && Age > .65)
+        if (Players[1]->IsHoldingExpeditionDig() && Age > .7)
         {
-            FVector Floor;
-            Require(FieldFloor(*Terrain, ReferenceFloor, Floor) && ReferenceFloor.Z - Floor.Z >= MinimumDigDepth,
-                TEXT("holding real left mouse excavates the first crosshair target"));
-            const auto* Dig = Players[1]->GetHero()->GetAbilitySystemComponent()->FindAbilitySpecFromClass(UExpeditionDigAbility::StaticClass());
-            Require(Dig && Dig->IsActive(), TEXT("held remote input has an active server dig ability"));
-            Peers[1]->ClientFieldKeepDigging(true, SecondFieldTarget);
-            SetFieldStage(EFieldStep::HoldSecond, Now);
+            Require(Terrain->GetAppliedSequence()==HoldSequence,TEXT("holding a physical punch spends no edits"));
+            Peers[1]->ClientFieldKeepDigging(true,SecondFieldTarget);
+            SetFieldStage(EFieldStep::HoldSecond,Now);
         }
         break;
     case EFieldStep::HoldSecond:
-    {
-        FVector Floor;
-        if (FieldFloor(*Terrain, SecondFieldTarget, Floor) && SecondFieldTarget.Z - Floor.Z >= MinimumDigDepth)
+        if (Age > 1.3)
         {
-            Peers[1]->ClientFieldKeepDigging(false, FVector::ZeroVector);
-            HoldSequence = Terrain->GetAppliedSequence();
-            SetFieldStage(EFieldStep::Released, Now);
+            Require(Terrain->GetAppliedSequence()==HoldSequence,TEXT("holding beyond the charge cap still spends no edits"));
+            Peers[1]->ClientFieldKeepDigging(false,FVector::ZeroVector);
+            SetFieldStage(EFieldStep::Released,Now);
         }
         break;
-    }
     case EFieldStep::Released:
-        // Give the reliable remote release time to arrive, then inspect for longer
-        // than a full 0.50 s swing interval.
-        if (Age < .3) HoldSequence = Terrain->GetAppliedSequence();
-        if (Age > 1.15)
+        if (Age > 1.15 && Terrain->GetAppliedSequence()>HoldSequence)
         {
+            FVector Floor, OriginalAimFloor;
             const auto* Dig = Players[1]->GetHero()->GetAbilitySystemComponent()->FindAbilitySpecFromClass(UExpeditionDigAbility::StaticClass());
-            Require(Dig && !Dig->IsActive() && Terrain->GetAppliedSequence()==HoldSequence,
-                TEXT("mouse release cancels the server ability and leaves no queued swing"));
-            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_HELD physical=1 repeated=1 retargeted=1 released=1 sequence=%u"), HoldSequence);
+            Require(Dig && !Dig->IsActive() && Terrain->GetAppliedSequence()==HoldSequence+1 &&
+                FieldFloor(*Terrain,SecondFieldTarget,Floor) && SecondFieldTarget.Z-Floor.Z >= MinimumDigDepth &&
+                FieldFloor(*Terrain,ReferenceFloor,OriginalAimFloor) && FMath::Abs(OriginalAimFloor.Z-ReferenceFloor.Z)<8.,
+                TEXT("release strikes once at the final crosshair target and leaves no automatic swings"));
+            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_HELD physical=1 held_edits=0 retargeted=1 released_edits=1 sequence=%u"), Terrain->GetAppliedSequence());
+            HoldSequence=Terrain->GetAppliedSequence();
+            Peers[1]->ClientFieldKeepDigging(true,ReferenceFloor);
+            SetFieldStage(EFieldStep::ChargeInterrupted,Now);
+        }
+        break;
+    case EFieldStep::ChargeInterrupted:
+        if (Age>.9 && Players[1]->IsHoldingExpeditionDig())
+        {
+            Peers[1]->ClientShowChart();
+            SetFieldStage(EFieldStep::ChargeIdle,Now);
+        }
+        break;
+    case EFieldStep::ChargeIdle:
+        if (Age>.8 && LastAction==StepAt && !Players[1]->IsHoldingExpeditionDig())
+        {
+            Peers[1]->ClientFieldKeepDigging(false,FVector::ZeroVector);
+            LastAction=Now;
+        }
+        if (LastAction>StepAt && Now-LastAction>1.)
+        {
+            Require(!Players[1]->IsHoldingExpeditionDig() && Terrain->GetAppliedSequence()==HoldSequence,
+                TEXT("opening the chart cancels charge; later button release cannot excavate"));
+            UE_LOG(LogTemp,Display,TEXT("FIELD_QA_CHARGE_CANCEL reason=chart release_edits=0"));
+            TerrainStage=0;
+            bPunchTrialSent=bTerrainSampleRequested=false;
+            PunchSites={ReferenceFloor,OriginalFloor,SecondFieldTarget};
+            SetFieldStage(EFieldStep::PunchTrials,Now);
+        }
+        break;
+    case EFieldStep::PunchTrials:
+        if (TickFieldPunchTrials())
+        {
             UE_LOG(LogTemp, Display, TEXT("FIELD_QA_DONE players=%d assisted=1 protected=1 promoted=1 seized=1 single_seizure=1 cancelled=1 private=1"), Players.Num());
             Advance(EStep::Done);
         }
         break;
     }
+}
+
+bool AIslandProbe::TickFieldPunchTrials()
+{
+    constexpr int32 Round=81;
+    constexpr int32 Trials=6;
+    const int32 Trial=TerrainStage/2;
+    if (Trial>=Trials) return true;
+    const bool bAfter=TerrainStage%2!=0;
+    if (!bAfter && bPunchTrialSent)
+    {
+        if (Peers[1]->TriedPunchRound!=Round || Peers[1]->TriedPunchTrial!=Trial) return false;
+        bTerrainSampleRequested=bPunchTrialSent=false;
+        ++TerrainStage;
+        StepAt=FPlatformTime::Seconds();
+        return false;
+    }
+    auto* Terrain=Mode->GetTerrain();
+    if (!bTerrainSampleRequested && !bAfter)
+    {
+        // Select untouched ground and a standing spot clear of props. The same local sample-grid
+        // alignment on every strip lets us compare independent full and overcharged cuts.
+        bool bFound=false;
+        for (int32 Y=-13; Y<=13 && !bFound; ++Y)
+            for (int32 X=-13; X<=13 && !bFound; ++X)
+            {
+                const FVector Near(350.*X,350.*Y,ReferenceFloor.Z);
+                if (PunchSites.ContainsByPredicate([&Near](const FVector& P){ return FVector::DistSquared2D(P,Near)<FMath::Square(335.); })) continue;
+                FVector Center,Stand;
+                if (!FieldFloor(*Terrain,Near,Center) || !FieldFloor(*Terrain,Near-FVector(112,0,0),Stand)
+                    || FMath::Abs(Center.Z-Stand.Z)>18. || Center.Z<70.) continue;
+                bool bClear=true;
+                for (int32 R=0; R<=160 && bClear; R+=10)
+                {
+                    FVector Sample;
+                    bClear=FieldFloor(*Terrain,Center+FVector(0,R,0),Sample) && FMath::Abs(Center.Z-Sample.Z)<18.;
+                }
+                if (!bClear) continue;
+                const auto* Hero=Mode->GetPlayers()[1]->GetHero();
+                const FVector Position=Stand+FVector(0,0,Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()+2.);
+                const FCollisionShape Shape=FCollisionShape::MakeCapsule(Hero->GetCapsuleComponent()->GetScaledCapsuleRadius(),Hero->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+                const FCollisionQueryParams Query(SCENE_QUERY_STAT(FieldChargeStanding),false,Hero);
+                if (GetWorld()->OverlapBlockingTestByChannel(Position,FQuat::Identity,ECC_Pawn,Shape,Query)) continue;
+                FHitResult Aim;
+                if (!Terrain->TraceRock(Position+Hero->GetAimOrigin()-Hero->GetActorLocation(),Center-FVector(0,0,1),Hero,Aim)
+                    || !Aim.ImpactPoint.Equals(Center,3.)) continue;
+                TerrainSamplePoint=Center;
+                TerrainInputSequence=Terrain->GetAppliedSequence();
+                Place(1,Position);
+                if (Trial>=2) PunchSites.Add(Center);
+                UE_LOG(LogTemp,Display,TEXT("FIELD_PUNCH_TRIAL trial=%d sequence=%d floor=%s"),Trial,TerrainInputSequence,*Center.ToCompactString());
+                bFound=true;
+            }
+        if (!bFound) { Require(false,TEXT("fresh island charge strip within reach")); return false; }
+    }
+    const int32 Expected=TerrainInputSequence+int32(bAfter && Trial>=2);
+    if (int32(Terrain->GetAppliedSequence())<Expected) return false;
+    Require(int32(Terrain->GetAppliedSequence())==Expected,TEXT("main island punch changes exactly its expected edit count"));
+    if (!bTerrainSampleRequested)
+    {
+        for (auto& Peer : Peers)
+            Peer->ClientSampleArenaTerrain(Round,TEXT("MainIsland"),10+TerrainStage,TerrainSamplePoint,Expected);
+        bTerrainSampleRequested=true;
+        return false;
+    }
+    for (auto& Peer : Peers)
+        if (Peer->SampledTerrainRound!=Round || Peer->SampledTerrainStage!=10+TerrainStage) return false;
+    if (!bAfter && !bPunchTrialSent)
+    {
+        Peers[1]->ClientTryArenaPunch(Round,Trial,TerrainSamplePoint);
+        bPunchTrialSent=true;
+        return false;
+    }
+    bTerrainSampleRequested=bPunchTrialSent=false;
+    ++TerrainStage;
+    StepAt=FPlatformTime::Seconds();
+    return TerrainStage==2*Trials;
 }

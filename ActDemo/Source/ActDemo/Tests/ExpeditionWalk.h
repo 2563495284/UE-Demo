@@ -7,6 +7,7 @@ class AIslandPlayerController;
 class ACameraActor;
 class AIslandChest;
 class AVoxelTerrain;
+class AVoxelCharacter;
 
 // Opt-in single-player QA driver. Movement always passes through the normal player controller.
 UCLASS(NotPlaceable)
@@ -16,11 +17,20 @@ class AExpeditionWalk : public AActor
 public:
     AExpeditionWalk();
     void Tick(float DeltaSeconds) override;
+    void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Props) const override;
 
 private:
     enum class EStage { Lobby, Landing, Walking, Viewing, Digging, Escaping, Filling, BuildingRoof, UnderRoof, BeyondRoof, Returning, Complete };
     void ChangeStage(EStage Next);
     void TickTreasure(float DeltaSeconds);
+    void TickCrewFilm();
+    int32 FilmFrame = 0;
+    bool bCrewFilm = false;
+    bool bFilmPryStarted = false;
+    bool bFilmSawPeerHit = false;
+    UPROPERTY(Replicated) TObjectPtr<AVoxelCharacter> FilmSubject;
+    UPROPERTY(Replicated) int32 FilmServerFrame = 0;
+
     void TickArtTour();
     bool FrameInventory(AVoxelTerrain& Terrain,const FVector& Sun,FVector& Focus,FVector& Eye,float& Fov);
     bool FrameLandmark(int32 Index, AVoxelTerrain& Terrain, FVector& Focus, FVector& Eye, float& Fov) const;

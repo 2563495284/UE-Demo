@@ -3,6 +3,9 @@
 #include "Voxel/VoxelPlayerController.h"
 #include "Abilities/ExpeditionAbility.h"
 #include "AbilitySystemComponent.h"
+#include "PartyPunch.h"
+#include "Net/UnrealNetwork.h"
+#include "GameFramework/GameStateBase.h"
 #include "Island/ExpeditionAnimalComponent.h"
 
 #include "Animation/AnimInstance.h"
@@ -159,6 +162,20 @@ bool AVoxelCharacter::IsInFirstPersonView() const
     return PC && PC->WantsFirstPersonView() && PC->GetViewTarget() == this;
 }
 
+FRotator AVoxelCharacter::GetViewRotationForTarget(FVector Target, FVector Stand) const
+{
+    const FVector FromEye = Target - (Stand + GetAimOrigin() - GetActorLocation());
+    if (IsInFirstPersonView()) return FromEye.Rotation();
+    if (FromEye.Z < 0. && FromEye.Size2D() < 35.) return FRotator(-82., FromEye.Rotation().Yaw, 0.);
+    // A retracted boom still points along the shoulder ray. Solve for its rotated socket offset.
+    const FVector Pivot = Stand + Boom->GetComponentLocation() - GetActorLocation() + Boom->TargetOffset;
+    const FVector ToTarget = Target - Pivot;
+    FRotator View = ToTarget.Rotation();
+    for (int32 Step = 0; Step < 6; ++Step)
+        View = (ToTarget - View.RotateVector(Boom->SocketOffset)).Rotation();
+    return View;
+}
+
 void AVoxelCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 {
     if (IsInFirstPersonView())
@@ -251,7 +268,7 @@ void AVoxelCharacter::PlayTerrainSwing(EVoxelAction Action)
     const auto* PC = Cast<AVoxelPlayerController>(Controller);
     if (Action == EVoxelAction::Punch && PC && PC->UsesExpeditionAbilities())
     {
-        ExpeditionAnimal->PlayDig();
+        // The accepted strike is played once by MulticastExpeditionDig, including on the host.
         return;
     }
     // Sandbox and classic crews use the locomotion mesh. Pitch the body toward the
@@ -260,13 +277,40 @@ void AVoxelCharacter::PlayTerrainSwing(EVoxelAction Action)
     ToolStrokeRemaining = ToolStrokeDuration;
 }
 
-void AVoxelCharacter::MulticastExpeditionDig_Implementation()
+void AVoxelCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
-    ExpeditionAnimal->PlayDig();
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME_CONDITION(AVoxelCharacter,PunchHeldAt,COND_SkipOwner);
+}
+
+void AVoxelCharacter::SetPunchChargePresentation(bool bHeld)
+{
+    if (HasAuthority())
+    {
+        const bool WasHeld=PunchHeldAt>=0.;
+        if (WasHeld==bHeld) return;
+        const auto* Time=GetWorld()->GetGameState();
+        PunchHeldAt=bHeld ? (Time ? Time->GetServerWorldTimeSeconds() : GetWorld()->GetTimeSeconds()) : -1.;
+        ForceNetUpdate();
+    }
+    if (GetNetMode()!=NM_DedicatedServer) ExpeditionAnimal->SetPunchCharge(bHeld);
+}
+
+void AVoxelCharacter::OnRep_PunchHeldAt()
+{
+    const auto* Time=GetWorld()->GetGameState();
+    const float Elapsed=PunchHeldAt>=0. && Time ? FMath::Max(0.,Time->GetServerWorldTimeSeconds()-PunchHeldAt) : 0.;
+    ExpeditionAnimal->SetPunchCharge(PunchHeldAt>=0.,Elapsed);
+}
+
+void AVoxelCharacter::MulticastExpeditionDig_Implementation(uint8 Power)
+{
+    if (GetNetMode()!=NM_DedicatedServer) ExpeditionAnimal->PlayPunch(PartyPunch::Alpha(Power));
 }
 
 void AVoxelCharacter::ReturnToStart(const FTransform& Start)
 {
+    SetPunchChargePresentation(false);
     if (HasAuthority() && bGrantedExpeditionAbilities)
     {
         TGuardValue<bool> Clearing(bClearingMud, true);

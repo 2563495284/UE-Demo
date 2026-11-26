@@ -1,4 +1,7 @@
 #include "MazeChaseSession.h"
+#include "PartyCarvableMesh.h"
+#include "PartyPunch.h"
+#include "VoxelSurfaceKernel.h"
 
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -17,7 +20,7 @@ namespace
     constexpr double Pitch = 600.;
     constexpr double WallHeight = 540.;
     constexpr double HalfWall = 28.;
-    constexpr double ToolRange = 365.;
+    constexpr double ToolRange = PartyPunch::Reach;
     constexpr double CaptureRange = 210.;
     constexpr double Mid = 50.;
     constexpr double HalfBoard = Width * Pitch * .5;
@@ -69,7 +72,7 @@ void AMazeChaseSession::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
     DOREPLIFETIME(AMazeChaseSession, CaughtSeats);
     DOREPLIFETIME(AMazeChaseSession, WinningTeams);
     DOREPLIFETIME(AMazeChaseSession, HuntersReleasedAt);
-    DOREPLIFETIME(AMazeChaseSession, OpenWalls);
+
 }
 
 UStaticMeshComponent* AMazeChaseSession::MakeBlock(FName Tag, const FBox& Bounds, UMaterialInterface* Paint, bool bSolid)
@@ -172,18 +175,33 @@ void AMazeChaseSession::BuildArena()
         AssignSides(Seats);
         DefineBerths(Seats,false);
     }
-    OnRep_OpenWalls();
+    WallFields.SetNum(Walls.Num());
 }
 
-void AMazeChaseSession::OnRep_OpenWalls()
+UPartyCarvableMesh* AMazeChaseSession::EnsureWallField(int32 Wall)
 {
-    for (int32 I=0; I<Walls.Num(); ++I)
+    if (!Walls.IsValidIndex(Wall)) return nullptr;
+    auto& Field=WallFields[Wall];
+    if (!Field) Field=UPartyCarvableMesh::Create(*Walls[Wall],10.);
+    return Field;
+}
+
+bool AMazeChaseSession::ApplyStructureBrush(const FPartyVoxelChange& Brush)
+{
+    auto* Field=EnsureWallField(Brush.SurfaceId);
+    if (!Field) return false;
+    TArray<int32> Cells;
+    const FVector Point=GetActorLocation()+FVector(Brush.Center);
+    const FVector Normal=FVector(Brush.Normal).GetSafeNormal();
+    Field->SelectBrush(Point,Normal,62.*PartyPunch::RadiusScale(Brush.Power),Brush.bFill ? 64. : 33.,Brush.bFill,Cells);
+    // Authoritative repairs are accepted only after checking the actual capsules.
+    // Peers replay that decision, independent of their interpolated positions.
+    if (HasAuthority() && Brush.bFill && RepairIsOccupied(*Field,Cells))
     {
-        const bool bOpen = OpenWalls.Contains(uint8(I));
-        auto& Part = *Walls[I];
-        Part.SetVisibility(!bOpen);
-        Part.SetCollisionEnabled(bOpen ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
+        UE_LOG(LogTemp,Display,TEXT("MAZE_REPAIR_OCCUPIED wall=%d cells=%d"),Brush.SurfaceId,Cells.Num());
+        return false;
     }
+    return Field->SetCells(Cells,Brush.bFill);
 }
 
 void AMazeChaseSession::SetParticipantTeam(int32 Seat, int32 Team)
@@ -338,58 +356,58 @@ void AMazeChaseSession::CheckOutcome()
     Results();
 }
 
-bool AMazeChaseSession::WallIsOccupied(int32 WallIndex) const
+bool AMazeChaseSession::RepairIsOccupied(const UPartyCarvableMesh& Field,const TArray<int32>& Cells) const
 {
-    const FBox& Box = LocalWallBounds[WallIndex];
-    TArray<FOverlapResult> Touching;
-    GetWorld()->OverlapMultiByObjectType(Touching,GetActorLocation()+Box.GetCenter(),FQuat::Identity,
-        FCollisionObjectQueryParams(ECC_Pawn),FCollisionShape::MakeBox(Box.GetExtent()+FVector(4.)));
-    for (const FOverlapResult& Hit : Touching)
-        if (const auto* Pawn = Cast<APartyVoxelPawn>(Hit.GetActor()); Pawn && Pawn->GetSession()==this && !IsCaught(Pawn->GetSeat()))
-            return true;
+    for (const int32 Seat:PlayingSeats())
+    {
+        const auto* Pawn=Participant(Seat);
+        if (!Pawn || IsCaught(Seat)) continue;
+        const auto* Capsule=Pawn->GetCapsuleComponent();
+        const double Radius=Capsule->GetScaledCapsuleRadius()+1.;
+        const double Axis=Capsule->GetScaledCapsuleHalfHeight()-Capsule->GetScaledCapsuleRadius();
+        const FVector Center=Capsule->GetComponentLocation();
+        for (int32 I:Cells)
+        {
+            const FBox Box=Field.CellBounds(I);
+            const double Z=FMath::Clamp(Box.GetCenter().Z,Center.Z-Axis,Center.Z+Axis);
+            if (Box.ComputeSquaredDistanceToPoint(FVector(Center.X,Center.Y,Z))<=Radius*Radius) return true;
+        }
+    }
     return false;
 }
 
-EPartyChaseAim AMazeChaseSession::FindTarget(const APartyVoxelPawn& Pawn, FVector From, FVector Direction,
-    int32& WallIndex, int32& TargetSeat, bool bCheckGaps) const
+EPartyChaseAim AMazeChaseSession::FindTarget(const APartyVoxelPawn& Pawn,FVector From,FVector Direction,
+    int32& WallIndex,int32& TargetSeat,bool bCheckGaps,FVector* AimPoint,FVector* AimNormal) const
 {
-    WallIndex = TargetSeat = INDEX_NONE;
-    const FVector Ray = Direction.GetSafeNormal();
+    WallIndex=TargetSeat=INDEX_NONE;
+    const FVector Ray=Direction.GetSafeNormal();
     if (Ray.IsNearlyZero() || Ray.ContainsNaN()) return EPartyChaseAim::None;
-    const FVector End = From+Ray*ToolRange;
-    FCollisionQueryParams Query(SCENE_QUERY_STAT(MazeTool),false,&Pawn);
+    FCollisionQueryParams Query(SCENE_QUERY_STAT(MazePunch),false,&Pawn);
     FHitResult Hit;
-    const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit,From,End,ECC_Visibility,Query);
-    if (bHit)
+    const bool bHit=GetWorld()->LineTraceSingleByChannel(Hit,From,From+Ray*ToolRange,ECC_Visibility,Query);
+    if (bCheckGaps && bHit && Hit.Distance<=CaptureRange && !IsRunner(Pawn.GetSeat()))
     {
-        const auto* Other = Cast<APartyVoxelPawn>(Hit.GetActor());
-        if (bCheckGaps && Other && Other->GetSession()==this && Hit.Distance<=CaptureRange && !IsRunner(Pawn.GetSeat())
-            && IsRunner(Other->GetSeat()) && !IsCaught(Other->GetSeat()))
-        {
-            TargetSeat = Other->GetSeat();
-            return EPartyChaseAim::Runner;
-        }
+        const auto* Other=Cast<APartyVoxelPawn>(Hit.GetActor());
+        if (Other && Other->GetSession()==this && IsRunner(Other->GetSeat()) && !IsCaught(Other->GetSeat()))
+        { TargetSeat=Other->GetSeat(); return EPartyChaseAim::Runner; }
     }
-
-    // Open walls have no collision. Intersect their old volumes, clipped against the first solid obstruction.
-    double Nearest = bHit ? Hit.Distance : ToolRange;
-    const FVector LocalFrom = From-GetActorLocation();
-    for (const uint8 I : OpenWalls)
-    {
-        if (!bCheckGaps) break;
-        if (!LocalWallBounds.IsValidIndex(I)) continue;
-        FVector Point, Normal;
-        float Fraction;
-        if (FMath::LineExtentBoxIntersection(LocalWallBounds[I],LocalFrom,LocalFrom+Ray*ToolRange,
-            FVector::ZeroVector,Point,Normal,Fraction) && Fraction*ToolRange < Nearest)
+    double Nearest=bHit ? Hit.Distance : ToolRange;
+    if (bCheckGaps)
+        for (int32 I=0;I<WallFields.Num();++I)
         {
-            Nearest = Fraction*ToolRange;
-            WallIndex = I;
+            FVector P; double Distance;
+            if (!WallFields[I] || Nearest<=.01 || !WallFields[I]->FirstMissing(From,Ray,Nearest,P,Distance)) continue;
+            Nearest=Distance;
+            WallIndex=I;
+            if (AimPoint) *AimPoint=P;
+            if (AimNormal) *AimNormal=-Ray;
         }
-    }
-    if (WallIndex!=INDEX_NONE && !WallIsOccupied(WallIndex)) return EPartyChaseAim::Gap;
+    if (WallIndex!=INDEX_NONE) return EPartyChaseAim::Gap;
     if (!bHit || Hit.GetActor()!=this || !Hit.GetComponent()->ComponentHasTag(TEXT("MazeWall"))) return EPartyChaseAim::None;
-    WallIndex = Walls.IndexOfByKey(Cast<UStaticMeshComponent>(Hit.GetComponent()));
+    auto* Field=Cast<UPartyCarvableMesh>(Hit.GetComponent());
+    WallIndex=Walls.IndexOfByKey(Field ? Field->Source() : Cast<UStaticMeshComponent>(Hit.GetComponent()));
+    if (AimPoint) *AimPoint=Hit.ImpactPoint;
+    if (AimNormal) *AimNormal=Hit.ImpactNormal;
     return WallIndex!=INDEX_NONE ? EPartyChaseAim::Wall : EPartyChaseAim::None;
 }
 
@@ -399,17 +417,18 @@ EPartyChaseAim AMazeChaseSession::GetChaseAim(const APartyVoxelPawn& Pawn, FVect
     return FindTarget(Pawn,From,Direction,WallIndex,TargetSeat);
 }
 
-bool AMazeChaseSession::UseTerrainTool(APartyVoxelPawn& Pawn, bool bPlace, FVector Direction)
+bool AMazeChaseSession::UseTerrainTool(APartyVoxelPawn& Pawn, bool bPlace, FVector Direction, uint8 Power)
 {
     const int32 Seat = Pawn.GetSeat();
     const double Now = Clock();
-    const double ReadyAt = NextToolTime.FindRef(Seat);
+    const FIntPoint Tool(Seat,bPlace ? 1 : 0);
+    const double ReadyAt = NextToolTime.FindRef(Tool);
     if (!HasAuthority() || GetPhase()!=EPartyVoxelPhase::Playing || SecondsLeft()<=0.f || Participant(Seat)!=&Pawn
         || IsCaught(Seat) || (!IsRunner(Seat) && GetHeadStartRemaining()>0.f) || Now+.03<ReadyAt) return false;
-    // Both buttons consume one recovery window, including missed swings.
-    NextToolTime.Add(Seat,FMath::Max(Now,ReadyAt)+ChaseToolRecovery(bPlace));
+    NextToolTime.Add(Tool,FMath::Max(Now,ReadyAt)+ChaseToolRecovery(bPlace));
     int32 Wall, Other;
-    const EPartyChaseAim Aim = FindTarget(Pawn,Pawn.GetPawnViewLocation(),Direction,Wall,Other,bPlace);
+    FVector Point,Normal;
+    const EPartyChaseAim Aim = FindTarget(Pawn,Pawn.GetPawnViewLocation(),Direction,Wall,Other,bPlace,&Point,&Normal);
     if (bPlace && Aim==EPartyChaseAim::Runner)
     {
         auto* Target = Participant(Other);
@@ -425,19 +444,15 @@ bool AMazeChaseSession::UseTerrainTool(APartyVoxelPawn& Pawn, bool bPlace, FVect
         CheckOutcome();
         return true;
     }
-    if (!bPlace && Aim==EPartyChaseAim::Wall)
-    {
-        OpenWalls.Add(uint8(Wall));
-        RefillAfter.Add(Wall,Now+1.5);
-    }
-    else if (bPlace && Aim==EPartyChaseAim::Gap)
-    {
-        if (Now<RefillAfter.FindRef(Wall)) return false;
-        OpenWalls.Remove(uint8(Wall));
-    }
-    else return false;
-    OnRep_OpenWalls();
-    ForceNetUpdate();
-    UE_LOG(LogTemp,Display,TEXT("MAZE_CHASE_WALL seat=%d wall=%d open=%d"),Seat,Wall,!bPlace);
+    if (bPlace ? (Aim!=EPartyChaseAim::Gap || Now<RefillAfter.FindRef(Wall)) : Aim!=EPartyChaseAim::Wall) return false;
+    FPartyVoxelChange Stroke;
+    Stroke.SurfaceId=Wall;
+    Stroke.Center=VoxelSurfaceKernel::QuantizeCenter(Point-GetActorLocation());
+    Stroke.Normal=VoxelSurfaceKernel::QuantizeNormal(Normal);
+    Stroke.Power=bPlace ? 0 : Power;
+    Stroke.bFill=bPlace;
+    if (!CommitBrush(Stroke)) return false;
+    if (!bPlace) RefillAfter.Add(Wall,Now+1.5);
+    UE_LOG(LogTemp,Display,TEXT("MAZE_CHASE_WALL seat=%d wall=%d open=%d power=%d remaining=%d"),Seat,Wall,!bPlace,Power,WallFields[Wall]->Data().Remaining);
     return true;
 }

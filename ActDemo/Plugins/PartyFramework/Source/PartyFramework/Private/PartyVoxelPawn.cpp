@@ -1,5 +1,9 @@
 #include "PartyVoxelArena.h"
+#include "PartyPunch.h"
+#include "GameFramework/GameStateBase.h"
 #include "PartyCrewAppearance.h"
+#include "PartyCrewRig.h"
+#include "Engine/SkeletalMesh.h"
 #include "GameFramework/PlayerState.h"
 
 #include "Camera/CameraComponent.h"
@@ -58,10 +62,13 @@ APartyVoxelPawn::APartyVoxelPawn()
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Teal(TEXT("/Game/TreasureIsland/Art/Crew/MI_LagoonTrim"));
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> Paint(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
     BaseMaterial=Paint.Object;
+    UnpaintedFist=Mitten.Object;
+    OutfitRoot=CreateDefaultSubobject<USceneComponent>(TEXT("OutfitRoot"));
+    OutfitRoot->SetupAttachment(GetCapsuleComponent());
     auto Part=[&](const TCHAR* Name,FVector Center,FVector Scale, UMaterialInterface* Surface, UStaticMesh* Shape=nullptr)
     {
         auto* M=CreateDefaultSubobject<UStaticMeshComponent>(FName(Name));
-        M->SetupAttachment(GetCapsuleComponent());
+        M->SetupAttachment(OutfitRoot);
         M->SetStaticMesh(Shape ? Shape : Orb.Object.Get());
         M->SetMaterial(0,Surface);
         M->SetReceivesDecals(false);
@@ -103,6 +110,10 @@ APartyVoxelPawn::APartyVoxelPawn()
         EyePaws.Add(Paw);
     }
     CrewSculpture=Part(TEXT("CrewSculpture"),{0,0,-88},FVector::OneVector,nullptr);
+    CrewRig=CreateDefaultSubobject<UPartyCrewRig>(TEXT("CrewRig"));
+    CrewRig->SetupAttachment(OutfitRoot);
+    CrewRig->SetRelativeLocation({0.,0.,-88.});
+    CrewRig->SetVisibility(false);
     CrewSculpture->SetStaticMesh(nullptr);
     CrewSculpture->SetVisibility(false);
     CrewBadge=Part(TEXT("CrewBadge"),{-36,0,-26},{.07,.43,.30},Canvas.Object);
@@ -113,6 +124,7 @@ void APartyVoxelPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(APartyVoxelPawn,Arena);
+    DOREPLIFETIME_CONDITION(APartyVoxelPawn,ServerPunchStart,COND_SkipOwner);
     DOREPLIFETIME(APartyVoxelPawn,Seat);
     DOREPLIFETIME_CONDITION(APartyVoxelPawn,bObservedFirstPerson,COND_SkipOwner);
 }
@@ -129,7 +141,7 @@ void APartyVoxelPawn::SetCrewTint(FLinearColor Color)
         Body->SetMaterial(0,SuitPaint);
         CrewBadge->SetMaterial(0,SuitPaint);
         for (const auto& Glove : Gloves) Glove->SetMaterial(0,SuitPaint);
-        for (const auto& Paw : EyePaws) Paw->SetMaterial(0,SuitPaint);
+        for (const auto& Paw : EyePaws) if (Paw->GetStaticMesh()==UnpaintedFist) Paw->SetMaterial(0,SuitPaint);
     }
     SuitColor = Color;
     SuitPaint->SetVectorParameterValue(TEXT("Color"),Color);
@@ -140,13 +152,28 @@ void APartyVoxelPawn::UpdateCrewModel()
     const auto* Appearance=Cast<IPartyCrewAppearance>(GetPlayerState());
     bool bLongPaws=false;
     UStaticMesh* Mesh=Appearance ? Appearance->GetPartyCharacterMesh(bLongPaws) : nullptr;
-    if (CrewSculpture->GetStaticMesh()==Mesh) return;
+    USkeletalMesh* Skin=Appearance ? Appearance->GetPartyCharacterRig() : nullptr;
+    if (CrewSculpture->GetStaticMesh()==Mesh && CrewRig->GetSkinnedAsset()==Skin) return;
+    CrewRig->SetSkinnedAssetAndUpdate(Skin);
+    CrewRig->SetVisibility(Skin!=nullptr);
+    CrewBadge->SetRelativeLocationAndRotation(Skin ? Appearance->GetCrewBadgeAnchor()+FVector(-2.2,0.,-87.65) : FVector(-36.,0.,-26.),
+        Skin ? FRotator(-10.,0.,0.) : FRotator::ZeroRotator);
+    CrewBadge->SetRelativeScale3D(Skin ? FVector(.024,.20,.12) : FVector(.07,.43,.30));
+    UStaticMesh* Fist=Appearance ? Appearance->GetPartyFirstPersonFist() : nullptr;
+    for (int32 I=0;I<EyePaws.Num();++I)
+    {
+        EyePaws[I]->SetStaticMesh(Fist ? Fist : UnpaintedFist.Get());
+        EyePaws[I]->SetMaterial(0,Fist ? nullptr : SuitPaint.Get());
+        EyePaws[I]->SetRelativeScale3D(Fist ? FVector(.20,I ? .20 : -.20,.20) : FVector(.22,I ? .14 : -.14,.17));
+    }
 
     CrewSculpture->SetStaticMesh(Mesh);
     for (const auto& Part : SuitParts)
     {
-        if (Part==CrewSculpture || Part==CrewBadge) Part->SetVisibility(Mesh!=nullptr);
-        else if (!Gloves.Contains(Part) && !Boots.Contains(Part)) Part->SetVisibility(Mesh==nullptr);
+        if (Part==CrewSculpture) Part->SetVisibility(Mesh && !Skin);
+        else if (Part==CrewBadge) Part->SetVisibility(Mesh || Skin);
+        else if (Gloves.Contains(Part) || Boots.Contains(Part)) Part->SetVisibility(!Skin);
+        else Part->SetVisibility(!Mesh && !Skin);
     }
     for (const auto& Glove : Gloves)
     {
@@ -189,6 +216,7 @@ void APartyVoxelPawn::CalcCamera(float DeltaSeconds,FMinimalViewInfo& OutView)
     if (bHideSuit!=bSuitHiddenFromOwner)
     {
         bSuitHiddenFromOwner=bHideSuit;
+        CrewRig->SetOwnerNoSee(bHideSuit);
         for (const auto& Part : SuitParts) Part->SetOwnerNoSee(bHideSuit);
     }
 }
@@ -209,19 +237,35 @@ void APartyVoxelPawn::FollowSurvivingTeammate(APlayerController& Player)
     if (Player.GetViewTarget() != Target) Player.SetViewTarget(Target);
 }
 
-void APartyVoxelPawn::UpdatePaws()
+void APartyVoxelPawn::SetPunchCharge(bool bHeld,float Elapsed)
+{
+    CrewMotion.Charge(GetWorld()->GetTimeSeconds(),bHeld,Elapsed);
+}
+
+void APartyVoxelPawn::PlayPunch(float Strength)
+{
+    CrewMotion.Strike(GetWorld()->GetTimeSeconds(),Strength);
+}
+
+void APartyVoxelPawn::UpdatePaws(float DeltaSeconds)
 {
     const double Now=GetWorld()->GetTimeSeconds();
-    const float Stride=FMath::Sin(Now*11.)*FMath::Clamp(GetVelocity().Size2D()/570.,0.,1.);
-    const float Stroke=FMath::Sin(PI*FMath::Clamp((Now-ToolStrokeAt)/.22,0.,1.));
+    if (bPlacingStroke && LastRenderedThrow!=ToolStrokeAt)
+    {
+        LastRenderedThrow=ToolStrokeAt;
+        CrewMotion.Throw(ToolStrokeAt);
+    }
+    const FPartyCrewPose Pose=CrewMotion.Sample(Now,DeltaSeconds,FMath::Clamp(float(GetVelocity().Size2D())/570.f,0.f,1.f),
+        GetVelocity().Z,GetCharacterMovement()->IsFalling());
+    // Spin around the soles, keeping the camera, collision and aim on their original axes.
+    const FVector Sole(0,0,-88.);
+    OutfitRoot->SetRelativeLocationAndRotation(Pose.BodyOffset+Sole-Pose.BodyRot.RotateVector(Sole),Pose.BodyRot);
+    CrewRig->Apply(Pose);
     for (int32 I=0;I<2;++I)
     {
-        const double Side=I ? 1. : -1.;
-        const double Swing=Side*Stride;
-        const double Reach=(I==int32(bPlacingStroke)) ? Stroke : 0.;
-        Gloves[I]->SetRelativeLocation({9.+10.*Swing+20.*Reach,Side*32.,-17.+7.*Reach});
-        Boots[I]->SetRelativeLocation({7.-10.*Swing,Side*18.,-73.+FMath::Max(0.,Swing)*6.});
-        if (bLocalFirstPerson) EyePaws[I]->SetRelativeLocation({38.+Swing+Reach*11.,Side*(21.-Reach*6.),-18.+Swing+Reach*6.});
+        Gloves[I]->SetRelativeLocationAndRotation(Sole+Pose.Hands[I],Pose.HandRot[I]);
+        Boots[I]->SetRelativeLocation(Sole+Pose.Feet[I]);
+        if (bLocalFirstPerson) EyePaws[I]->SetRelativeLocationAndRotation(Pose.EyeHands[I],Pose.EyeRot[I]);
     }
 }
 
@@ -244,6 +288,7 @@ bool APartyVoxelPawn::HasLocalPartyInput() const
 
 void APartyVoxelPawn::ReleaseLocalPartyInput()
 {
+    CancelPunchInput();
     bInputReady=false;
     if (Arena && Arena->IsChaseGame())
         if (auto* PC=Cast<APlayerController>(Controller); PC && PC->IsLocalController() && PC->GetPawn()==this)
@@ -264,7 +309,7 @@ FVector APartyVoxelPawn::GetToolAimDirection() const
     PC->GetPlayerViewPoint(Camera, View);
     const FVector EyePosition = GetPawnViewLocation();
     const FVector Crosshair = View.Vector();
-    const double Range = APartyVoxelSession::StructureReach + FVector::Distance(Camera, EyePosition);
+    const double Range = APartyVoxelSession::FillReach + FVector::Distance(Camera, EyePosition);
     const FVector End = Camera + Crosshair * Range;
     FHitResult Hit;
     const FCollisionQueryParams Query(SCENE_QUERY_STAT(PartyCrosshair), false, this);
@@ -278,26 +323,104 @@ bool APartyVoxelPawn::AimTerrain(FHitResult& Hit) const
     return Arena && Arena->TraceTerrain(GetPawnViewLocation(), GetToolAimDirection(), this, Hit);
 }
 
+bool APartyVoxelPawn::CanPunch() const
+{
+    return Arena && Arena->GetPhase()==EPartyVoxelPhase::Playing && !Arena->IsCaught(Seat)
+        && (!Arena->IsChaseGame() || Arena->IsRunner(Seat) || Arena->GetHeadStartRemaining()<=0.);
+}
+
+float APartyVoxelPawn::GetPunchChargeAlpha() const
+{
+    return LocalPunchStart < 0. ? 0.f : FMath::Clamp(float(FPlatformTime::Seconds()-LocalPunchStart)/PartyPunch::ChargeSeconds,0.f,1.f);
+}
+
+void APartyVoxelPawn::BeginPunchInput()
+{
+    if (!HasLocalPartyInput() || !CanPunch() || LocalPunchStart>=0.) return;
+    LocalPunchStart=FPlatformTime::Seconds();
+    SetPunchCharge(true);
+    ServerBeginPunch();
+}
+
+void APartyVoxelPawn::ReleasePunchInput()
+{
+    if (LocalPunchStart<0.) return;
+    const float Held=float(FPlatformTime::Seconds()-LocalPunchStart);
+    LocalPunchStart=-1.;
+    SetPunchCharge(false);
+    ServerEndPunch(!CanPunch(),GetToolAimDirection(),Held);
+}
+
+void APartyVoxelPawn::CancelPunchInput()
+{
+    if (LocalPunchStart<0.) return;
+    LocalPunchStart=-1.;
+    bWaitDigRelease=true;
+    SetPunchCharge(false);
+    ServerEndPunch(true,FVector::ForwardVector,0.f);
+}
+
+void APartyVoxelPawn::OnRep_PunchStart()
+{
+    if (IsLocallyControlled()) return;
+    const auto* GS=GetWorld()->GetGameState();
+    SetPunchCharge(ServerPunchStart>=0.,GS && ServerPunchStart>=0. ?
+        FMath::Max(0.,GS->GetServerWorldTimeSeconds()-ServerPunchStart) : 0.);
+}
+
+void APartyVoxelPawn::ServerBeginPunch_Implementation()
+{
+    if (!CanPunch() || ServerPunchStart>=0.) return;
+    ServerPunchRealStart=FPlatformTime::Seconds();
+    // Replicated poses use the server world clock shared with remote GameStates.
+    ServerPunchStart=GetWorld()->GetTimeSeconds();
+    OnRep_PunchStart();
+    ForceNetUpdate();
+}
+
+void APartyVoxelPawn::ServerEndPunch_Implementation(bool bCancel,FVector_NetQuantizeNormal Direction,float ReportedHoldSeconds)
+{
+    if (ServerPunchStart<0.) return;
+    const double Now=GetWorld()->GetTimeSeconds();
+    const double Held=FPlatformTime::Seconds()-ServerPunchRealStart;
+    ServerPunchStart=-1.;
+    OnRep_PunchStart();
+    ForceNetUpdate();
+    if (bCancel || !CanPunch() || Direction.ContainsNaN() || Direction.IsNearlyZero() || Now<NextServerDig) return;
+    const auto* PS=GetPlayerState();
+    const float Ping=PS && !IsLocallyControlled() ? PS->GetPingInMilliseconds() : -1.f;
+    const uint8 Power=PartyPunch::ResolvePower(Held,ReportedHoldSeconds,Ping);
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(),TEXT("IslandQA")))
+        UE_LOG(LogTemp,Display,TEXT("PARTY_PUNCH_RELEASE seat=%d authority_seconds=%.3f client_seconds=%.3f ping_ms=%.1f power=%u"),
+            Seat,Held,ReportedHoldSeconds,Ping,Power);
+#endif
+    NextServerDig=Now+.5;
+    Arena->UseTerrainTool(*this,false,Direction,Power);
+    MulticastPunch(Power);
+}
+
+void APartyVoxelPawn::MulticastPunch_Implementation(uint8 Power)
+{
+    PlayPunch(PartyPunch::Alpha(Power));
+}
+
 void APartyVoxelPawn::UseTool(bool bPlace)
 {
-    if (HasLocalPartyInput() && Arena->GetPhase()==EPartyVoxelPhase::Playing)
-    {
-        if (Arena->IsChaseGame() && (Arena->IsCaught(Seat) || (!Arena->IsRunner(Seat) && Arena->GetHeadStartRemaining()>0.f))) return;
-        ToolStrokeAt = GetWorld()->GetTimeSeconds();
-        bPlacingStroke = bPlace;
-        ServerTool(bPlace,GetToolAimDirection());
-    }
+    if (!HasLocalPartyInput() || !CanPunch()) return;
+    if (!bPlace) { BeginPunchInput(); ReleasePunchInput(); return; }
+    ToolStrokeAt=GetWorld()->GetTimeSeconds();
+    bPlacingStroke=true;
+    ServerTool(true,GetToolAimDirection());
 }
 
 void APartyVoxelPawn::ServerTool_Implementation(bool bPlace,FVector_NetQuantizeNormal Direction)
 {
-    if (!Arena || Direction.ContainsNaN() || Direction.IsNearlyZero()) return;
+    if (!bPlace || !CanPunch() || Direction.ContainsNaN() || Direction.IsNearlyZero()) return;
     const double Time=GetWorld()->GetTimeSeconds();
-    double& NextUse = bPlace ? NextServerPlace : NextServerDig;
-    if (Time<NextUse) return;
-    NextUse=Time+.22;
-    // The server resolves the actual surface and applies the brush.
-    Arena->UseTerrainTool(*this,bPlace,Direction);
+    if (Time<NextServerPlace) return;
+    NextServerPlace=Time+.22;
+    Arena->UseTerrainTool(*this,true,Direction);
 }
 
 void APartyVoxelPawn::Tick(float DeltaSeconds)
@@ -306,7 +429,7 @@ void APartyVoxelPawn::Tick(float DeltaSeconds)
     if (GetNetMode()!=NM_DedicatedServer)
     {
         UpdateCrewModel();
-        UpdatePaws();
+        UpdatePaws(DeltaSeconds);
     }
     const bool bChase=Arena && Arena->IsChaseGame();
     const bool bCaught=bChase && Arena->IsCaught(Seat);
@@ -326,7 +449,9 @@ void APartyVoxelPawn::Tick(float DeltaSeconds)
         const double Pitch=FRotator::NormalizeAxis(GetViewRotation().Pitch);
         CameraBoom->SocketOffset.Y=55.*FMath::GetMappedRangeValueClamped(FVector2D(-75.,-45.),FVector2D(0.,1.),Pitch);
     }
+    if (HasAuthority() && ServerPunchStart>=0. && !CanPunch()) { ServerPunchStart=-1.; OnRep_PunchStart(); ForceNetUpdate(); }
     if (!bLocalInput) return;
+    if (!CanPunch() || PC->bShowMouseCursor) CancelPunchInput();
     if (bChase && bSentFirstPerson!=bLocalFirstPerson)
     {
         bSentFirstPerson=bLocalFirstPerson;
@@ -379,26 +504,22 @@ void APartyVoxelPawn::Tick(float DeltaSeconds)
     }
     if (Playing && !bWaitingHunter)
     {
-        const bool bDig=DigDown && !bWaitDigRelease, bPlace=PlaceDown && !bWaitPlaceRelease;
+        const bool bDig=DigDown && !bWaitDigRelease;
+        const bool bPlace=!bWaitPlaceRelease && (PlaceDown || PC->WasInputKeyJustPressed(EKeys::RightMouseButton));
         const double Time=GetWorld()->GetTimeSeconds();
-        if (bDig && Time >= NextLocalDig)
-        {
-            UseTool(false);
-            NextLocalDig = Time + (bChase ? APartyVoxelSession::ChaseToolRecovery(false) : .28);
-            if (bChase) NextLocalPlace = NextLocalDig;
-        }
+        if (!bWaitDigRelease && (bDig || PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))) BeginPunchInput();
+        if (!bDig && LocalPunchStart>=0.) ReleasePunchInput();
         if (bPlace && Time >= NextLocalPlace)
         {
             UseTool(true);
             NextLocalPlace = Time + (bChase ? APartyVoxelSession::ChaseToolRecovery(true) : .28);
-            if (bChase) NextLocalDig = NextLocalPlace;
         }
     }
     if (bChase) return; // Maze walls and capturable runners use a shared server/client targeting query.
     FHitResult Hit;
     const FVector Aim = Playing ? GetToolAimDirection() : FVector::ZeroVector;
     const bool Target=Playing && Arena->TraceTerrain(GetPawnViewLocation(), Aim, this, Hit);
-    if (Target) SurfaceAimPoint = Hit.ImpactPoint;
+    if (Target && (LocalPunchStart<0. || Hit.Distance<=PartyPunch::Reach)) SurfaceAimPoint = Hit.ImpactPoint;
     else SurfaceAimPoint.Reset();
     bAimingAtVenue = Playing && !Target && Arena->TraceVenueStructure(GetPawnViewLocation(),Aim,this) != INDEX_NONE;
 }

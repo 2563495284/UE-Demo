@@ -55,7 +55,7 @@ namespace
 FBox VoxelPlayground::PartyBrushBounds(const FVoxelEdit& Edit)
 {
     const FVector Center(Edit.Center);
-    if (Edit.BrushId == ShallowCut) return FBox::BuildAABB(Center, FVector(90. * Edit.FootprintScale()));
+    if (Edit.BrushId == ShallowCut) return FBox::BuildAABB(Center, FVector(Edit.PunchRadius()+28.));
     if (Edit.BrushId == MudPad)
     {
         const double Width = 110. * Edit.FootprintScale();
@@ -69,6 +69,7 @@ int32 VoxelPlayground::PartyBrushDistance(const FVoxelEdit& Edit, FIntVector Wor
 {
     const FIntVector Local = World - Edit.Center;
     const FIntVector N = Edit.SurfaceNormal;
+    if (Edit.BrushId == ShallowCut) return VoxelSurfaceKernel::ToolDistanceWithRadius(Local,N,Edit.PunchRadius());
     int32 Distance = IsBurial(Edit.BrushId)
         ? BurialDistance(Local, Edit.BrushId - FirstBurialLayer + 1)
         : VoxelSurfaceKernel::ToolDistance(Local,N,Edit.BrushId == MudPad,Edit.FootprintScale());
@@ -197,7 +198,7 @@ bool FVoxelGrid::IsValidEdit(const FVoxelEdit& Edit) const
     const bool bCorrectBrush = bPartyBrush
         ? Edit.Action == (Edit.BrushId == ShallowCut ? EVoxelAction::Punch : EVoxelAction::Fill)
         : Edit.BrushId == BrushFor(Edit.Action);
-    if (Edit.Action > EVoxelAction::Fill || !bCorrectBrush
+    if (Edit.Action > EVoxelAction::Fill || !bCorrectBrush || (Edit.PunchPower && Edit.BrushId != ShallowCut)
         || (Edit.bWideFootprint && Edit.BrushId != ShallowCut && Edit.BrushId != MudPad)
         || (bPartyBrush && !Edit.ExtraFillCenters.IsEmpty())
         || ((!bPartyBrush || Edit.Action != EVoxelAction::Fill) && !Edit.ProtectedBoxes.IsEmpty())
@@ -213,7 +214,7 @@ bool FVoxelGrid::IsValidEdit(const FVoxelEdit& Edit) const
         const int32 NormalSquared = LengthSquared(Edit.SurfaceNormal);
         if (NormalSquared < 990000 || NormalSquared > 1010000) return false;
     }
-    const int32 Radius = RadiusFor(Edit.BrushId) * Edit.FootprintScale();
+    const int32 Radius = Edit.BrushId==ShallowCut ? Edit.PunchRadius() : RadiusFor(Edit.BrushId) * Edit.FootprintScale();
     const FIntVector Max = Origin + Cells * Spacing;
     const auto InBounds = [&](const FIntVector& P)
     {

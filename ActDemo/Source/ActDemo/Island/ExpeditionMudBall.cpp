@@ -4,6 +4,8 @@
 #include "Engine/StaticMesh.h"
 #include "GameFramework/GameStateBase.h"
 #include "Island/ExpeditionAnimalComponent.h"
+#include "Island/IslandAttachedMud.h"
+#include "Island/IslandNeutralProp.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -89,7 +91,17 @@ bool AExpeditionMudBall::TraceSegment(const FVector& Start, const FVector& End, 
 {
     FCollisionQueryParams Query(SCENE_QUERY_STAT(ExpeditionMud), false, GetInstigator());
     const FCollisionShape Shape = FCollisionShape::MakeSphere(Radius);
-    const bool bWorld = GetWorld()->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Visibility, Shape, Query);
+    TArray<FHitResult> Contacts;
+    GetWorld()->SweepMultiByChannel(Contacts, Start, End, FQuat::Identity, ECC_Visibility, Shape, Query);
+    // Thin timbers and canvas are query touches, so that visibility rays can pass
+    // through them. Clay still lands on the first real voxel surface it contacts.
+    const FHitResult* WorldHit = Contacts.FindByPredicate([](const FHitResult& Contact)
+    {
+        return Contact.bBlockingHit || Cast<AIslandNeutralProp>(Contact.GetActor())
+            || AIslandAttachedMud::CanReceive(Contact.GetComponent());
+    });
+    const bool bWorld = WorldHit != nullptr;
+    if (WorldHit) Hit = *WorldHit;
     // Pawn capsules intentionally ignore visibility: digging and opening chests still work in a crowd.
     // Compare both continuous sweeps; a wall wins ties with a capsule touching its far side.
     FHitResult PawnHit;

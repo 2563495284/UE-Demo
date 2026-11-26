@@ -24,8 +24,6 @@
 
 namespace
 {
-    using namespace IslandMenuStyle;
-
     const TCHAR* CharacterName(int32 Model)
     {
         switch (Model)
@@ -91,10 +89,10 @@ TSharedRef<SWidget> SIslandRoomPanel::FocusTarget()
 TSharedRef<SWidget> SIslandRoomPanel::Button(TAttribute<FText> Value, TFunction<void()> Press,
     TAttribute<bool> Enabled, bool bPrimary, FName Tag)
 {
-    static const FButtonStyle Plain = MakeButtonStyle(false), Strong = MakeButtonStyle(true);
+    static const FButtonStyle Plain = IslandMenuStyle::MakeButtonStyle(false), Strong = IslandMenuStyle::MakeButtonStyle(true);
     return SNew(SButton).Tag(Tag).ButtonStyle(bPrimary ? &Strong : &Plain).IsEnabled(Enabled)
         .OnClicked_Lambda([this,Action = MoveTemp(Press)] { ++Actions; Action(); return FReply::Handled(); })
-        [Label(Value, 17, bPrimary ? FLinearColor(.018f,.034f,.034f) : Ink, bPrimary)];
+        [Label(Value, 17, bPrimary ? FLinearColor(.018f,.034f,.034f) : IslandMenuStyle::Ink, bPrimary)];
 }
 
 void SIslandRoomPanel::Add(TSharedRef<SWidget> Item, float Gap)
@@ -104,12 +102,12 @@ void SIslandRoomPanel::Add(TSharedRef<SWidget> Item, float Gap)
 
 void SIslandRoomPanel::AddTitle(const FString& Title)
 {
-    Add(Label(Txt(Title), 35, Ink, true), 16);
+    Add(Label(Txt(Title), 35, IslandMenuStyle::Ink, true), 16);
 }
 
 void SIslandRoomPanel::AddMessage(TAttribute<FText> Value, bool bWarning)
 {
-    TSharedRef<SWidget> Item = Label(Value, 15, bWarning ? Alert : Muted);
+    TSharedRef<SWidget> Item = Label(Value, 15, bWarning ? IslandMenuStyle::Alert : IslandMenuStyle::Muted);
     Item->SetVisibility(TAttribute<EVisibility>::CreateLambda([Value]
         { return Value.Get().IsEmpty() ? EVisibility::Collapsed : EVisibility::HitTestInvisible; }));
     Add(Item, 4);
@@ -186,11 +184,11 @@ void SIslandRoomPanel::Build()
             return FOptionalSize(FMath::Lerp(PreviousHeight,FMath::Max(32.f,Target),FMath::SmoothStep(0.f,1.f,T)));
         })
         [
-            SNew(SBorder).BorderImage(&Backing).Padding(0)
+            SNew(SBorder).BorderImage(&IslandMenuStyle::Backing).Padding(0)
             [
                 SNew(SHorizontalBox)
                 + SHorizontalBox::Slot().AutoWidth()
-                [ SNew(SBox).WidthOverride(3)[ SNew(SBorder).BorderImage(&Accent) ] ]
+                [ SNew(SBox).WidthOverride(3)[ SNew(SBorder).BorderImage(&IslandMenuStyle::Accent) ] ]
                 + SHorizontalBox::Slot().FillWidth(1)
                 [ SNew(SScrollBox).ScrollBarPadding(FMargin(1)).ConsumeMouseWheel(EConsumeMouseWheel::WhenScrollingPossible)
                   + SScrollBox::Slot().Padding(22,18,16,14)[ SAssignNew(Body,SVerticalBox) ] ]
@@ -244,7 +242,7 @@ void SIslandRoomPanel::Build()
                 : FString(EXPEDITION_TEXT("尚未合成钥匙","Key incomplete"));
             return Txt(FString::Format(EXPEDITION_TEXT("真箱点位 {0}/4  ·  散片 {1}  ·  {2}","True sites {0}/4  ·  Spare fragments {1}  ·  {2}"),
                 {Loot.Count(),Loot.FragmentCount(),Key}));
-        }),16,Ink),14);
+        }),16,IslandMenuStyle::Ink),14);
         if (Me() && Me()->bHost)
         {
             Primary = Button(Txt(EXPEDITION_TEXT("返回房间", "Return to room")), [this]{ if (PC.IsValid()) PC->ServerReturnToRoom(); },
@@ -290,13 +288,13 @@ void SIslandRoomPanel::BuildForm()
 {
     const bool bNew = Page == EIslandPanel::Create;
     AddTitle(bNew ? EXPEDITION_TEXT("创建房间", "Create room") : EXPEDITION_TEXT("房间设置", "Room settings"));
-    Add(Label(Txt(EXPEDITION_TEXT("房间名称", "Room name")),15,Muted),2);
+    Add(Label(Txt(EXPEDITION_TEXT("房间名称", "Room name")),15,IslandMenuStyle::Muted),2);
     Add(SAssignNew(NameField, SEditableTextBox).Tag("Island.RoomName").Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).Text(Txt(Draft.RoomName))
         .OnTextChanged_Lambda([this](const FText& Value){ Draft.RoomName = Value.ToString(); }));
     const auto Number = [this](const TCHAR* Caption, int32 FIslandRoomSettings::* Member, FName Tag, int32 Minimum=1, int32 Maximum=8)
     {
         Add(SNew(SHorizontalBox)
-            + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)[Label(Txt(Caption),16,Ink)]
+            + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)[Label(Txt(Caption),16,IslandMenuStyle::Ink)]
             + SHorizontalBox::Slot().AutoWidth()[ SNew(SBox).WidthOverride(106)
                 [SNew(SSpinBox<int32>).Tag(Tag).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).MinValue(Minimum).MaxValue(Maximum)
                  .Value_Lambda([this,Member]{return Draft.*Member;})
@@ -441,7 +439,7 @@ void SIslandRoomPanel::BuildCharacterPicker()
     AddTitle(EXPEDITION_TEXT("选择角色", "Choose character"));
     static const FButtonStyle ChoiceStyle = []
     {
-        FButtonStyle Style = MakeButtonStyle(false);
+        FButtonStyle Style = IslandMenuStyle::MakeButtonStyle(false);
         Style.SetNormalPadding(FMargin(3, 6));
         Style.SetPressedPadding(FMargin(3, 7, 3, 5));
         return Style;
@@ -483,13 +481,13 @@ void SIslandRoomPanel::BuildCharacterPicker()
                     [
                         SNew(SHorizontalBox)
                         + SHorizontalBox::Slot().AutoWidth()
-                        [SNew(SBox).WidthOverride(4)[SNew(SBorder).BorderImage_Lambda([Selected]{ return Selected() ? &Accent : &Clear; })]]
+                        [SNew(SBox).WidthOverride(4)[SNew(SBorder).BorderImage_Lambda([Selected]{ return Selected() ? &IslandMenuStyle::Accent : &Clear; })]]
                         + SHorizontalBox::Slot().FillWidth(1).Padding(9,0,6,0).VAlign(VAlign_Center)
-                        [Label(Txt(CharacterName(Model)), 19, Ink, true, false)]
+                        [Label(Txt(CharacterName(Model)), 19, IslandMenuStyle::Ink, true, false)]
                         + SHorizontalBox::Slot().AutoWidth().Padding(2,0,8,0).VAlign(VAlign_Center)
                         [SNew(SBox).Tag(FName(*FString::Printf(TEXT("Island.Character.Current.%d"), Model)))
                             .Visibility_Lambda([Selected]{ return Selected() ? EVisibility::HitTestInvisible : EVisibility::Collapsed; })
-                            [Label(Txt(EXPEDITION_TEXT("已选", "Selected")), 14, Ink, false, false)]]
+                            [Label(Txt(EXPEDITION_TEXT("已选", "Selected")), 14, IslandMenuStyle::Ink, false, false)]]
                     ]
                 ]
             ];
@@ -513,7 +511,7 @@ void SIslandRoomPanel::BuildLobby()
             ? EXPEDITION_TEXT("互联网", "Internet") : EXPEDITION_TEXT("局域网", "LAN");
         return Round() ? Txt(FString::Format(EXPEDITION_TEXT("{0}  ·  真箱 4  ·  假箱 {1}","{0}  ·  True chests 4  ·  Decoys {1}"),
             {Network, Round()->RoomSettings.DecoyCount})) : FText::GetEmpty();
-    }),15,Muted);
+    }),15,IslandMenuStyle::Muted);
     ChestRules->SetTag("Island.LobbyChestRules");
     Add(ChestRules,4);
     AddMessage(TAttribute<FText>::CreateLambda([this]{ return Txt(RoomStatus()); }));
@@ -531,7 +529,7 @@ void SIslandRoomPanel::BuildLobby()
             + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
             [Label(TAttribute<FText>::CreateLambda([this,Team]{
                 return Txt(FString::Format(EXPEDITION_TEXT("第 {0} 队{1}", "Team {0}{1}"), {Team+1,Me() && Me()->Team==Team?EXPEDITION_TEXT(" · 本队", " · Your team"):TEXT("")}));
-            }),17,Ink,true)]
+            }),17,IslandMenuStyle::Ink,true)]
             + SHorizontalBox::Slot().AutoWidth()
             [SNew(SBox).Visibility_Lambda([this,Team]{ return Me() && Me()->Team!=Team?EVisibility::Visible:EVisibility::Collapsed; })
                 [Button(Txt(EXPEDITION_TEXT("加入", "Join")), [this,Team]{ if (PC.IsValid()) PC->ServerChooseTeam(Team); },
@@ -539,7 +537,7 @@ void SIslandRoomPanel::BuildLobby()
                         && !Me()->bRoomReady && CrewSize(Team)<Round()->RoomSettings.TeamCapacity;}),false,
                     FName(*FString::Printf(TEXT("Island.Team.%d"),Team)))]]
         ];
-        Crew->AddSlot().AutoHeight().Padding(0,0,0,10)[Label(TAttribute<FText>::CreateLambda([this,Team]{return Txt(TeamMembers(Team));}),15,Ink)];
+        Crew->AddSlot().AutoHeight().Padding(0,0,0,10)[Label(TAttribute<FText>::CreateLambda([this,Team]{return Txt(TeamMembers(Team));}),15,IslandMenuStyle::Ink)];
         Body->AddSlot().AutoHeight()[Crew];
     }
     const auto EmptyToggle=Button(TAttribute<FText>::CreateLambda([this]{return Txt(bChooseEmpty?EXPEDITION_TEXT("收起空队", "Hide empty teams"):EXPEDITION_TEXT("选择其他空队", "Choose an empty team"));}),

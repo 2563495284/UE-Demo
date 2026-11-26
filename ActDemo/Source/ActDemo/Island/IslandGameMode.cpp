@@ -1,6 +1,7 @@
 #include "Island/IslandGameMode.h"
 #include "Abilities/ExpeditionMudEffect.h"
 #include "Island/IslandBreakable.h"
+#include "Island/IslandAttachedMud.h"
 #include "Island/IslandSceneryVoxels.h"
 #include "Voxel/IslandRouteLayout.h"
 #include "Voxel/IslandRouteVoxel.h"
@@ -264,7 +265,7 @@ bool AIslandGameMode::PrepareRound(FString& Error)
             auto* Prop = GetWorld()->SpawnActorDeferred<AIslandNeutralProp>(AIslandNeutralProp::StaticClass(),
                 Transform, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
             if (!Prop) continue;
-            Prop->Initialize(Placement.Kind);
+            Prop->Initialize(Placement);
             Prop->FinishSpawning(Transform);
             NeutralProps.Add(Prop);
             if (Placement.Kind == EIslandNeutralKind::Tide) Prop->RefreshTide(*Terrain);
@@ -568,23 +569,33 @@ void AIslandGameMode::OnRoundStarted()
     }
 }
 
-bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim)
+bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim, uint8 PunchPower, bool bProtectChest)
 {
     const FVector Start = Hero.GetAimOrigin();
     FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandPropStrike), false, &Hero);
     Query.bReturnFaceIndex=bExpeditionRoom;
+    // A held tool has already committed to a punch. Respect a lid that became
+    // reachable while winding up, including a discovery target whose boards are gone.
+    auto* Player = Cast<AIslandPlayerController>(Hero.GetController());
+    if (bExpeditionRoom && bProtectChest && Player && Player->GetChestAlongAim(Aim)) return true;
     FHitResult Hit;
     if (AIslandNeutralProp::TraceShovel(*GetWorld(), Hit, Start, Start + Aim * AimReach, Query))
     {
         if (bExpeditionRoom)
         {
-            auto* Player = Cast<AIslandPlayerController>(Hero.GetController());
             const auto* Round = GetGameState<AIslandGameState>();
             const bool bWide = Player && Round && Round->HasDecoyToolBoost(Player->GetTeam());
-            if (auto* Route = Cast<AIslandRouteVoxel>(Hit.GetActor())) return Route->Strike(Hit,bWide);
+            const float Scale = PartyPunch::RadiusScale(PunchPower,bWide);
+            if (auto* Mud = Cast<AIslandAttachedMud>(Hit.GetActor())) { Mud->Strike(Hit,Scale); return true; }
+            if (auto* Route = Cast<AIslandRouteVoxel>(Hit.GetActor())) { Route->Strike(Hit,Scale); return true; }
             if (auto* Neutral = Cast<AIslandNeutralProp>(Hit.GetActor()))
                 if (Player && Neutral->Strike(*Player,Hit)) return true;
-            return IslandSceneryVoxels::Strike(Hit,bWide);
+            if (Cast<UIslandMeshVoxels>(IslandSceneryVoxels::SurfaceFor(Hit.GetComponent())))
+            {
+                IslandSceneryVoxels::Strike(Hit,Scale);
+                return true;
+            }
+            return Hit.GetActor() != GetTerrain();
         }
         if (AIslandBreakable* Prop = Cast<AIslandBreakable>(Hit.GetActor()))
         {
@@ -622,7 +633,7 @@ void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerCon
     }
     AIslandPlayerController* Digger = bExpeditionRoom ? Cast<AIslandPlayerController>(Source) : nullptr;
     const FVector BrushCenter(Edit.Center);
-    const double BrushRadius = VoxelPlayground::RadiusFor(Edit.BrushId);
+    const double BrushRadius = Edit.BrushId == VoxelPlayground::ShallowCut ? Edit.PunchRadius() : VoxelPlayground::RadiusFor(Edit.BrushId);
     bool bFaintEcho = false;
     bool bStrongEcho = false;
     for (int32 Index = 0; Index < Exposed.Num(); ++Index)
@@ -735,22 +746,16 @@ void AIslandGameMode::RallyCrew(AIslandPlayerController& Sender)
     }
 }
 
-void AIslandGameMode::TryOpen(AIslandPlayerController& Player)
+void AIslandGameMode::TryOpen(AIslandPlayerController& Player, const AIslandChest& Chest)
 {
     const int32 Team = Player.GetTeam();
     if (!CanPlayerAct(Player) || !TeamClues.IsValidIndex(Team))
     {
         return;
     }
-    const int32 Index = FindReachableChest(Player);
+    const int32 Index = Exposed.IndexOfByKey(&Chest);
     if (Index == INDEX_NONE)
     {
-        if (bExpeditionRoom)
-            if (auto* Sail = Player.GetReachableSail())
-            {
-                Sail->UseRope(Player);
-                return;
-            }
         Player.ClientEditRejected(TEXT("Reach an exposed chest"));
     }
     else if (HiddenLayout.IsDecoy(Index) && !bExpeditionRoom)
@@ -1037,6 +1042,7 @@ void AIslandGameMode::ReturnToSafeGround(AVoxelPlayerController& Player)
 
 void AIslandGameMode::RecoverPlayer(AVoxelPlayerController& Player)
 {
+    Player.CancelPunchCharge();
     const EIslandPhase Phase = GetGameState<AIslandGameState>()->Phase;
     if (Phase == EIslandPhase::PartyLoading || Phase == EIslandPhase::PartyPlaying || Phase == EIslandPhase::PartyReturning)
     {

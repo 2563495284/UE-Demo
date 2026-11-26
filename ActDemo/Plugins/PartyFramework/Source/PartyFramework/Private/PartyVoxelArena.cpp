@@ -1,4 +1,5 @@
 #include "PartyVoxelArena.h"
+#include "PartyPunch.h"
 
 #include "Components/CapsuleComponent.h"
 #include "PartyDensityTerrain.h"
@@ -15,7 +16,6 @@
 namespace PartyGrid
 {
     constexpr double Size = 100.;
-    constexpr double Reach = 435.;
     constexpr int32 Seats = 8;
     bool InGrid(FIntVector P)
     {
@@ -62,7 +62,7 @@ void APartyVoxelSession::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
     DOREPLIFETIME(APartyVoxelSession,Standings);
     DOREPLIFETIME(APartyVoxelSession,Changes);
     DOREPLIFETIME(APartyVoxelSession,Beacons);
-    DOREPLIFETIME(APartyVoxelSession,DestroyedVenueStructures);
+
 }
 
 FVector APartyVoxelSession::CellCenter(FIntVector P) const
@@ -92,6 +92,7 @@ void APartyVoxelSession::EnsureGrid()
     if (bBuildStarted) return;
     bBuildStarted = true;
     BuildArena();
+    if (!IsChaseGame()) BuildVenuePaths();
     for (const auto& Pair : Blocks)
     {
         MinCell = MinCell.ComponentMin(Pair.Key);
@@ -103,6 +104,7 @@ void APartyVoxelSession::EnsureGrid()
     for (const auto& Pair : InitialBeacons) ApplyBeacon(Pair.Key,Pair.Value);
     InitialBeacons.Empty();
     bBuilt = true;
+    PlaceVenueBuildings();
 #if !UE_BUILD_SHIPPING
     if (bQAViews) InitialGridDigest = GridDigest();
 #endif
@@ -132,14 +134,29 @@ void APartyVoxelSession::ReplayBrushes(TArrayView<const int32> Indices)
     while (PendingBrushes.RemoveAndCopyValue(AppliedEdits + 1,Index))
     {
         const auto& Brush = Changes.Items[Index];
-        Terrain->ApplyBrush(Brush.Center,Brush.Normal,Brush.bFill,Brush.ProtectedMin,Brush.ProtectedMax);
+        if (Brush.SurfaceId!=INDEX_NONE && !IsChaseGame() && !bVenuePlaced)
+        {
+            PendingBrushes.Add(Brush.Sequence,Index);
+            break;
+        }
+        if (!ApplyBrushLocally(Brush))
+            UE_LOG(LogTemp,Warning,TEXT("PARTY_EDIT_REPLAY_EMPTY seq=%d surface=%d"),Brush.Sequence,Brush.SurfaceId);
         ++AppliedEdits;
     }
 }
 
+bool APartyVoxelSession::ApplyBrushLocally(const FPartyVoxelChange& Brush)
+{
+    if (Brush.SurfaceId!=INDEX_NONE) return ApplyStructureBrush(Brush);
+    const bool Changed=Terrain->ApplyBrush(Brush.Center,Brush.Normal,Brush.bFill,Brush.ProtectedMin,Brush.ProtectedMax,Brush.Power);
+    if (Changed && !Brush.bFill && !IsChaseGame())
+        CheckVenueFoundations(FBox::BuildAABB(GetActorLocation()+FVector(Brush.Center),FVector(62.*PartyPunch::RadiusScale(Brush.Power)+45.)));
+    return Changed;
+}
+
 bool APartyVoxelSession::CommitBrush(FPartyVoxelChange& Brush)
 {
-    if (!Terrain->ApplyBrush(Brush.Center,Brush.Normal,Brush.bFill,Brush.ProtectedMin,Brush.ProtectedMax)) return false;
+    if (!ApplyBrushLocally(Brush)) return false;
     Brush.Sequence = ++AppliedEdits;
     auto& Item = Changes.Items.Add_GetRef(Brush);
     Changes.MarkItemDirty(Item);
@@ -443,7 +460,7 @@ bool APartyVoxelSession::TraceTerrain(FVector From, FVector Direction, const AAc
 {
     if (!bBuilt || Direction.IsNearlyZero()) return false;
     const FCollisionQueryParams Query(SCENE_QUERY_STAT(PartyTerrainTool),false,Ignore);
-    return GetWorld()->LineTraceSingleByChannel(Hit,From,From+Direction.GetSafeNormal()*PartyGrid::Reach,ECC_Visibility,Query)
+    return GetWorld()->LineTraceSingleByChannel(Hit,From,From+Direction.GetSafeNormal()*FillReach,ECC_Visibility,Query)
         && Terrain->OwnsSurface(Hit.GetComponent());
 }
 
@@ -484,7 +501,7 @@ void APartyVoxelSession::ProtectParticipants(FPartyVoxelChange& Brush, TMap<APar
     }
 }
 
-bool APartyVoxelSession::UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVector Direction)
+bool APartyVoxelSession::UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVector Direction,uint8 Power)
 {
     if (!HasAuthority() || Phase!=EPartyVoxelPhase::Playing || Participants.FindRef(Pawn.Seat).Get()!=&Pawn) return false;
     FHitResult Hit;
@@ -493,15 +510,22 @@ bool APartyVoxelSession::UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVecto
         if (bPlace) return false;
         const int32 Structure = TraceVenueStructure(Pawn.GetPawnViewLocation(), Direction, &Pawn);
         if (Structure == INDEX_NONE) return false;
-        DestroyedVenueStructures.Add(Structure);
-        ApplyVenueDestruction(true);
-        ForceNetUpdate();
-        return true;
+        FHitResult Face;
+        if (!GetWorld()->LineTraceSingleByChannel(Face,Pawn.GetPawnViewLocation(),Pawn.GetPawnViewLocation()+Direction.GetSafeNormal()*PartyPunch::Reach,
+            ECC_Visibility,FCollisionQueryParams(SCENE_QUERY_STAT(VenuePunch),false,&Pawn))) return false;
+        FPartyVoxelChange Stroke;
+        Stroke.Power=Power;
+        Stroke.SurfaceId=Structure;
+        Stroke.Center=VoxelSurfaceKernel::QuantizeCenter(Face.ImpactPoint-GetActorLocation());
+        Stroke.Normal=VoxelSurfaceKernel::QuantizeNormal(Face.ImpactNormal);
+        return CommitBrush(Stroke);
     }
+    if (!bPlace && Hit.Distance>PartyPunch::Reach) return false;
     const FIntVector Cell = CellAt(Hit.ImpactPoint-Hit.ImpactNormal*2.);
     if (bPlace && (Cell.X<MinCell.X || Cell.X>MaxCell.X || Cell.Y<MinCell.Y || Cell.Y>MaxCell.Y
         || Cell.Z<MinCell.Z-1 || Cell.Z>MaxCell.Z+6)) return false;
     FPartyVoxelChange Brush;
+    Brush.Power=Power;
     Brush.Center = VoxelSurfaceKernel::QuantizeCenter(Hit.ImpactPoint-GetActorLocation());
     Brush.Normal = VoxelSurfaceKernel::QuantizeNormal(Hit.ImpactNormal);
     Brush.bFill = bPlace;
@@ -509,6 +533,6 @@ bool APartyVoxelSession::UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVecto
     if (bPlace) ProtectParticipants(Brush,Lifts);
     if (!CommitBrush(Brush)) return false;
     for (const auto& Lift : Lifts) Lift.Key->SetActorLocation(Lift.Value,false,nullptr,ETeleportType::TeleportPhysics);
-    OnTerrainEdited(Pawn.Seat,FBox::BuildAABB(GetActorLocation()+FVector(Brush.Center),FVector(110.)),bPlace);
+    OnTerrainEdited(Pawn.Seat,FBox::BuildAABB(GetActorLocation()+FVector(Brush.Center),FVector(bPlace ? 110.f : 62.f*PartyPunch::RadiusScale(Power)+VoxelSurfaceKernel::Band)),bPlace);
     return true;
 }

@@ -17,7 +17,7 @@ public:
     UPartyDensityTerrain();
     void Initialize(const TMap<FIntVector,EPartyBlock>& InitialCells, FColor Theme, TConstArrayView<FVector> Berths);
     bool ApplyBrush(FIntVector Center, FIntVector Normal, bool bFill,
-        const TArray<FIntVector>& ProtectedMin, const TArray<FIntVector>& ProtectedMax);
+        const TArray<FIntVector>& ProtectedMin, const TArray<FIntVector>& ProtectedMax, uint8 Power=0);
     float DensityAt(FVector LocalPosition) const;
     EPartyBlock MaterialAt(FVector LocalPosition) const;
     bool OwnsSurface(const UPrimitiveComponent* Component) const;

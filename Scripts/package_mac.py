@@ -64,6 +64,10 @@ def check_island_content(app, unreal_pak, scratch):
                 "treasureisland/art/harbour/sm_reefshelf.uasset", "treasureisland/art/neutral/sm_windcanvas.uasset",
                 "treasureisland/art/neutral/m_wreckfinish.uasset"}
     required.update(f"treasureisland/art/crew/sm_{animal}.uasset" for animal in ("pig", "monkey", "fox", "calf"))
+    for animal in ("monkey", "fox", "calf"):
+        folder = f"treasureisland/art/crew/{animal}"
+        required.update((f"{folder}/sk_expedition{animal}.uasset", f"{folder}/sk_expedition{animal}_skeleton.uasset",
+                         f"{folder}/sm_{animal}fist.uasset"))
     required.update({
         "treasureisland/fx/m_routepigment.uasset",
         "treasureisland/art/harbour/sm_rescueraft.uasset",
@@ -78,6 +82,10 @@ def check_island_content(app, unreal_pak, scratch):
         "treasureisland/art/crew/sm_cofferhasp.uasset",
         "treasureisland/art/crew/sm_cofferkeyway.uasset",
         "treasureisland/art/crew/sm_cofferdial.uasset",
+        "treasureisland/art/crew/pig/sk_expeditionpig.uasset",
+        "treasureisland/art/crew/pig/sk_expeditionpig_skeleton.uasset",
+        "treasureisland/art/crew/pig/m_pigpaint.uasset",
+        "treasureisland/art/crew/pig/sm_pigfist.uasset",
     })
     for arena in ("reefrun", "beaconclimb", "crystalhunt", "bridgedash", "floodgates", "crownhold", "mazechase"):
         plugin = f"plugins/gamefeatures/party{arena}/content/"
@@ -114,7 +122,7 @@ def check_voxel_archive(app, unreal_pak, scratch):
         raise RuntimeError("Cooked expedition voxel triangles differ from the authored island meshes")
 
 
-def prepare_download(directory):
+def prepare_download(directory, previews=PREVIEWS):
     app = directory / APP_NAME
     (directory / "ActDemo.app").rename(app)
     with (app / "Contents/Info.plist").open("rb") as source:
@@ -128,17 +136,17 @@ def prepare_download(directory):
 
     guide = directory / GUIDE.name
     shutil.copyfile(GUIDE, guide)
-    for preview in PREVIEWS:
+    for preview in previews:
         shutil.copy2(preview, directory / preview.name)
     archive = directory / ZIP_NAME
     # Apple's bsdtar marks Chinese member paths as UTF-8 and keeps executable modes and symlinks.
     subprocess.run(["/usr/bin/tar", "--format", "zip", "--mac-metadata", "--options", "zip:hdrcharset=UTF-8",
-                    "-cf", archive, "-C", directory, APP_NAME, guide.name, *(p.name for p in PREVIEWS)], check=True)
+                    "-cf", archive, "-C", directory, APP_NAME, guide.name, *(p.name for p in previews)], check=True)
     with zipfile.ZipFile(archive) as bundle:
         if bundle.testzip() or bundle.read(guide.name) != guide.read_bytes():
             raise RuntimeError(f"Archive verification failed for {archive}")
         bundle.getinfo(f"{APP_NAME}/{executable}")
-        for preview in PREVIEWS:
+        for preview in previews:
             if bundle.read(preview.name) != preview.read_bytes() or not (bundle.getinfo(preview.name).external_attr >> 16) & 0o111:
                 raise RuntimeError(f"{preview.name} is missing or not executable in {archive}")
 
@@ -196,44 +204,65 @@ def legacy_link_target(alias):
 def main():
     engine = Path(sys.argv[1]) / "Engine"
     uat = engine / "Build/BatchFiles/RunUAT.sh"
+    samples = {
+        "--pig-sample": ("ExpeditionPunchPig", "试玩探险小猪.command"),
+        "--crew-sample": ("ExpeditionCrew", "试玩港口船员.command"),
+    }
+    requested = [flag for flag in samples if flag in sys.argv[2:]]
+    if len(requested) > 1:
+        raise ValueError("Select one playable sample per build")
+    sample = samples[requested[0]] if requested else None
+    output = ROOT / "Builds" / sample[0] / "Mac" if sample else OUTPUT
+    previews = PREVIEWS + (ROOT / "Scripts" / sample[1],) if sample else PREVIEWS
+    uat_args = [arg for arg in sys.argv[2:] if arg not in samples]
     expected = read_eos_config(EOS_CONFIG)
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    # UAT also writes to shared project build and cook intermediates.
-    with (OUTPUT.parent / ".package.lock").open("a") as lock:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Serialize cooks in this checkout and keep the sample separate from the public playtest.
+    with (ROOT / "ActDemo/Saved/.island-cook.lock").open("a") as cook_lock, (output.parent / ".package.lock").open("a") as lock:
+        fcntl.flock(cook_lock, fcntl.LOCK_EX)
         fcntl.flock(lock, fcntl.LOCK_EX)
-        with tempfile.TemporaryDirectory(prefix=".package-", dir=OUTPUT.parent) as scratch:
+        with tempfile.TemporaryDirectory(prefix=".package-", dir=output.parent) as scratch:
             directory = Path(scratch) / "Mac"
+            project = ROOT / "ActDemo/ActDemo.uproject"
+            if sample:
+                # UAT puts its -ubtargs inside a single target; a multi-target build
+                # needs the mutex argument on the outer UBT invocation.
+                subprocess.run([engine / "Build/BatchFiles/Mac/Build.sh",
+                                f'-Target=ActDemoEditor Mac Development -Project="{project}"',
+                                f'-Target=ActDemo Mac Development -Project="{project}"',
+                                "-WaitMutex", "-NoHotReload", "-NoUBA", "-MaxParallelActions=6",
+                                f"-log={ROOT / 'ActDemo/Saved/Logs/PunchPigReleaseBuild.log'}"], check=True)
             subprocess.run([
-                engine / "Binaries/Mac/UnrealEditor-Cmd", ROOT / "ActDemo/ActDemo.uproject",
+                engine / "Binaries/Mac/UnrealEditor-Cmd", project,
                 "-run=ActIslandVoxelSources", "-unattended", "-nullrhi", "-nosound", "-NoSplash",
                 f"-abslog={ROOT / 'ActDemo/Saved/Logs/IslandVoxelArchive.log'}",
             ], check=True)
             subprocess.run([
                 uat, "BuildCookRun", f"-project={ROOT / 'ActDemo/ActDemo.uproject'}",
                 "-noP4", "-platform=Mac", "-clientconfig=Development",
-                "-build", "-cook", "-stage", "-pak", "-package", "-archive",
-                f"-archivedirectory={directory}", "-utf8output", "-unattended", *sys.argv[2:],
+                "-skipbuild" if sample else "-build", "-cook", "-stage", "-pak", "-package", "-archive",
+                f"-archivedirectory={directory}", "-utf8output", "-unattended", *uat_args,
             ], check=True)
             app = directory / "ActDemo.app"
             unreal_pak = engine / "Binaries/Mac/UnrealPak"
             check_eos_package(app, unreal_pak, Path(scratch), expected)
             check_island_content(app, unreal_pak, Path(scratch))
             check_voxel_archive(app, unreal_pak, Path(scratch))
-            prepare_download(directory)
-            aliases = [ROOT / "Builds/Mac", ROOT / "Builds/VoxelPlayground/Mac"]
+            prepare_download(directory, previews)
+            aliases = [] if sample else [ROOT / "Builds/Mac", ROOT / "Builds/VoxelPlayground/Mac"]
             pending = [(path, legacy_link_target(path)) for path in aliases]
-            if OUTPUT.is_dir():
-                extras = {item.name for item in OUTPUT.iterdir()} - {APP_NAME, ZIP_NAME, "ActDemo.app", "ActDemo.zip", GUIDE.name, *(p.name for p in PREVIEWS), ".DS_Store"}
+            if output.is_dir():
+                extras = {item.name for item in output.iterdir()} - {APP_NAME, ZIP_NAME, "ActDemo.app", "ActDemo.zip", GUIDE.name, *(p.name for p in previews), ".DS_Store"}
                 if extras:
-                    raise RuntimeError(f"Move unrelated files out of {OUTPUT} before packaging: {sorted(extras)}")
-            replace_entry(directory, OUTPUT)
+                    raise RuntimeError(f"Move unrelated files out of {output} before packaging: {sorted(extras)}")
+            replace_entry(directory, output)
             for index, (alias, target) in enumerate(pending):
                 if target is not None:
                     alias.parent.mkdir(parents=True, exist_ok=True)
                     link = Path(scratch) / f"previous-{index}"
                     link.symlink_to(target, target_is_directory=True)
                     replace_entry(link, alias)
-    print(OUTPUT / ZIP_NAME)
+    print(output / ZIP_NAME)
 
 
 if __name__ == "__main__":

@@ -2,11 +2,14 @@
 
 #include "AbilitySystemComponent.h"
 #include "Algo/MaxElement.h"
+#include "EngineUtils.h"
 #include "NativeGameplayTags.h"
 #include "TimerManager.h"
 #include "Island/IslandGameMode.h"
+#include "Island/IslandNeutralProp.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
+#include "Island/IslandWorld.h"
 #include "Voxel/VoxelCharacter.h"
 
 namespace ExpeditionTags
@@ -156,7 +159,8 @@ void UExpeditionJumpAbility::Perform(AVoxelCharacter& Hero, AIslandPlayerControl
 
 void UExpeditionInteractAbility::Perform(AVoxelCharacter& Hero, AIslandPlayerController& PC, const FGameplayEventData* Payload)
 {
-    Hero.GetWorld()->GetAuthGameMode<AIslandGameMode>()->TryOpen(PC);
+    if (const auto* Chest = Payload ? Cast<AIslandChest>(Payload->Target.Get()) : nullptr)
+        Hero.GetWorld()->GetAuthGameMode<AIslandGameMode>()->TryOpen(PC, *Chest);
     K2_EndAbility();
 }
 
@@ -168,8 +172,8 @@ void UExpeditionRallyAbility::Perform(AVoxelCharacter& Hero, AIslandPlayerContro
 
 void UExpeditionDigAbility::UseTool(AVoxelCharacter& Hero, AIslandPlayerController& PC, AIslandGameMode& Mode, const FVector& Aim)
 {
-    Hero.MulticastExpeditionDig();
-    Mode.RequestEdit(PC, EVoxelAction::Punch, Aim);
+    Hero.MulticastExpeditionDig(PC.GetReleasedPunchPower());
+    Mode.RequestEdit(PC, EVoxelAction::Punch, Aim, PC.GetReleasedPunchPower(), PC.IsPunchRelease());
 }
 
 void UExpeditionThrowAbility::UseTool(AVoxelCharacter& Hero, AIslandPlayerController& PC, AIslandGameMode& Mode, const FVector& Aim)
@@ -179,7 +183,10 @@ void UExpeditionThrowAbility::UseTool(AVoxelCharacter& Hero, AIslandPlayerContro
 
 void UExpeditionToolAbility::Perform(AVoxelCharacter& Hero, AIslandPlayerController& PC, const FGameplayEventData* Payload)
 {
-    bRepeat = Payload && Payload->EventMagnitude > 0.f;
+    const bool bHeld = Payload && Payload->EventMagnitude > 0.f;
+    // A held fist winds up without spending its cooldown. Its release is a single activation.
+    if (Action == EExpeditionAction::Dig && bHeld) return;
+    bRepeat = bHeld;
     Swing();
 }
 
@@ -273,14 +280,35 @@ float UExpeditionCharacterMovement::GetIslandJumpZVelocity() const
 
 bool UExpeditionCharacterMovement::DoJump(bool bReplayingMoves, float DeltaTime)
 {
-    // Character movement uses this path for the owner's prediction, replay and server simulation.
-    // Leave the normal tuning intact for external launches such as a geyser.
+    const bool bFromGround = IsMovingOnGround();
     TGuardValue<float> JumpSpeed(JumpZVelocity, GetIslandJumpZVelocity());
-    return Super::DoJump(bReplayingMoves, DeltaTime);
+    if (!Super::DoJump(bReplayingMoves, DeltaTime)) return false;
+    const auto* Hero = Cast<AVoxelCharacter>(CharacterOwner);
+    const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
+    if (!bFromGround || !Hero || !Round || !Round->bRoomLobby || Round->Phase!=EIslandPhase::Hunting) return true;
+    // Apply the same takeoff on the autonomous client, its saved-move replays and the server.
+    // An authority-only, next-frame launch otherwise competes with a replayed ordinary jump.
+    for (TActorIterator<AIslandNeutralProp> It(GetWorld()); It; ++It)
+    {
+        if (const auto Launch = It->WindJumpVelocity(*Hero))
+        {
+            Velocity = *Launch;
+#if !UE_BUILD_SHIPPING
+            if (FParse::Param(FCommandLine::Get(),TEXT("ExpeditionNeutralQA")))
+                UE_LOG(LogTemp,Display,TEXT("ROUTE_QA_TAKEOFF authority=%d replay=%d at=%s launch=%s"),
+                    Hero->HasAuthority(),bReplayingMoves,*Hero->GetActorLocation().ToCompactString(),*Velocity.ToCompactString());
+#endif
+            break;
+        }
+    }
+    return true;
 }
 
 float UExpeditionCharacterMovement::GetMaxSpeed() const
 {
     const auto* Hero = Cast<AVoxelCharacter>(CharacterOwner);
-    return Hero && Hero->IsMudStunned() ? 0.f : Super::GetMaxSpeed();
+    if (Hero && Hero->IsMudStunned()) return 0.f;
+    const float Base = Super::GetMaxSpeed();
+    return Hero && IsMovingOnGround() && !Hero->bIsCrouched
+        ? AIslandNeutralProp::CurrentWalkSpeed(*Hero, GetCurrentAcceleration(), Base) : Base;
 }

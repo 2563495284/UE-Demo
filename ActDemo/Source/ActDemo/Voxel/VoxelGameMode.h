@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GameFramework/GameModeBase.h"
+#include "PartyPunch.h"
 #include "Voxel/VoxelDensity.h"
 #include "VoxelGameMode.generated.h"
 
@@ -15,10 +16,10 @@ class ACTDEMO_API AVoxelGameMode : public AGameModeBase
 
 public:
     AVoxelGameMode();
-    static constexpr double AimReach = 235.0;
+    static constexpr double AimReach = PartyPunch::Reach;
 
     void ReceiveReady(AVoxelPlayerController& Player, uint32 Checksum);
-    void RequestEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim);
+    void RequestEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, uint8 Power=0, bool bProtectChest=false);
     // Server-only. The impact uses the first blocking surface; burial uses a fixed foot anchor.
     void QueueMudLanding(const FVector& Impact, const FVector& Normal, bool bWideFootprint, TFunction<void(bool)> Completion = {});
     void QueueBurialLayer(AVoxelCharacter& Victim, const FVector& FootAnchor, int32 Layer, TFunction<void(bool)> Completion = {});
@@ -45,7 +46,7 @@ protected:
     virtual void RoundSetupFailed(const FString& Error) {}
     virtual bool StopOnGuestExit() const { return true; }
     virtual bool PrepareRound(FString& Error) { return true; }
-    virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim);
+    virtual bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim, uint8 PunchPower, bool bProtectChest);
     virtual void OnRoundStarted() {}
     virtual void OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source) {}
     virtual void UpdateEnvironment();
@@ -55,6 +56,9 @@ protected:
     void FinishRound(const FString& Message);
     void EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFunction<void(bool)> Completion);
     bool CanStartEnvironmentFill(const TArray<FVector>& Centers) const;
+    void ClipProtectedMud(FVoxelEdit& Edit) const;
+    bool CheckMudOccupants(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts) const;
+    static void LiftMudOccupants(const TMap<AVoxelCharacter*, FVector>& Lifts);
 
 private:
     friend class AVoxelPlaygroundProbe;
@@ -70,12 +74,14 @@ private:
         TOptional<FIntVector> ProbeCenter;
         TOptional<FVoxelEdit> EnvironmentFill;
         TFunction<void(bool)> Completion;
+        uint8 PunchPower = 0;
+        bool bProtectChest = false;
     };
 
     void EnqueueMud(FVoxelEdit Edit, TFunction<void(bool)> Completion);
     bool MakeEnvironmentFill(const TArray<FVector>& Centers, FVoxelEdit& Fill) const;
     bool CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts = nullptr) const;
-    void EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, TOptional<FIntVector> ProbeCenter);
+    void EnqueueEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, TOptional<FIntVector> ProbeCenter, uint8 Power=0, bool bProtectChest=false);
     bool ResolveEdit(const FRequest& Request, AVoxelCharacter& Hero, FVoxelEdit& Edit) const;
     void StartNextEdit();
     void StartFrontRequest();

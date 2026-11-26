@@ -91,7 +91,8 @@ public:
     AIslandSceneryDamage();
     static bool RemoveAuthoredPiece(const FHitResult& Hit);
     static void PlayDebris(UWorld& World, FVector Point, FVector Normal, UMaterialInterface* Material,
-        UStaticMesh* FragmentShape=nullptr, FVector FragmentScale=FVector::OneVector, UMaterialInterface* AlternateFinish=nullptr);
+        UStaticMesh* FragmentShape=nullptr, FVector FragmentScale=FVector(.10,.08,.13), UMaterialInterface* AlternateFinish=nullptr,
+        bool bLightScraps=false);
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:

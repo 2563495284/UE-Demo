@@ -6,15 +6,27 @@
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
 #include "PartyVoxelArena.h"
+#include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
+#include "UnrealClient.h"
+#include "Misc/Paths.h"
 
 namespace
 {
-bool HasMazeWall(const APartyVoxelSession& Arena, FVector Midpoint, FVector Normal)
+double MazeWallDepth(const APartyVoxelSession& Arena, FVector Midpoint, FVector Normal)
 {
     FHitResult Hit;
     const FVector From = Midpoint - Normal * 45.;
-    return Arena.GetWorld()->LineTraceSingleByChannel(Hit, From, Midpoint + Normal * 45., ECC_Visibility)
+    FCollisionObjectQueryParams Objects(ECC_WorldStatic);
+    Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+    const bool bWall=Arena.GetWorld()->LineTraceSingleByObjectType(Hit, From, Midpoint + Normal * 45.,Objects)
         && Hit.GetComponent() && Hit.GetComponent()->ComponentHasTag(TEXT("MazeWall"));
+    return bWall ? Hit.Distance : -1.;
+}
+
+bool HasMazeWall(const APartyVoxelSession& Arena,FVector Midpoint,FVector Normal)
+{
+    return MazeWallDepth(Arena,Midpoint,Normal)>=0.;
 }
 
 // Read the actual collisions above player height so positions of moving pawns cannot affect the layout check.
@@ -64,7 +76,22 @@ void AIslandProbePeer::ClientCheckMaze_Implementation(int32 Round, int32 Stage, 
                 Round, Pawn->GetSeat(), Watching->GetSeat());
         }
     }
-    else if (HasMazeWall(*Game, Midpoint, Normal) != (Stage != 3)) return;
+    else
+    {
+        const FVector Tangent=FVector::CrossProduct(Normal,FVector::UpVector);
+        const FVector Center=Midpoint+(Stage==16 ? Tangent*195. : FVector::ZeroVector);
+        const double CenterDepth=MazeWallDepth(*Game,Center,Normal);
+        if ((CenterDepth>=0.)!=(Stage!=3 && Stage!=16) || (Stage==10 && CenterDepth<33.)) return;
+        uint32 Profile=0;
+        for (int32 Y=-144;Y<=144;Y+=24)
+            for (int32 Z=-72;Z<=120;Z+=24)
+            {
+                const double Depth=MazeWallDepth(*Game,Center+Tangent*Y+FVector(0,0,Z),Normal);
+                Profile=HashCombineFast(Profile,GetTypeHash(FMath::RoundToInt(Depth)));
+            }
+        UE_LOG(LogTemp,Display,TEXT("MAZE_COLLISION_PROFILE round=%d stage=%d hash=%08x rays=117"),
+            Round,Stage,Profile);
+    }
     if (Stage == 1)
     {
         uint32 Digest;
@@ -80,6 +107,38 @@ void AIslandProbePeer::ServerCheckedMaze_Implementation(int32 Round, int32 Stage
 {
     MazeObservedRound = Round;
     MazeObservedStage = Stage;
+}
+
+bool AIslandProbe::CaptureMazeStage(APartyVoxelSession& Arena,int32 Phase,const TCHAR* Label)
+{
+    if (GameCount!=0 || !FApp::CanEverRender() || FParse::Param(FCommandLine::Get(),TEXT("nullrhi"))) return true;
+    FString Directory;
+    if (!FParse::Value(FCommandLine::Get(),TEXT("FieldShotsDir="),Directory)) return true;
+    auto* PC=GetWorld()->GetFirstPlayerController();
+    if (!PC || !PC->IsLocalController()) return true;
+    if (!MazeProofCamera) MazeProofCamera=GetWorld()->SpawnActor<ACameraActor>();
+    if (!MazeProofCamera) return true;
+    if (MazePhotoStage!=Phase)
+    {
+        MazePhotoStage=Phase; MazePhotoFrame=GFrameCounter;
+        const FVector Side=FVector::CrossProduct(MazeWallNormal,FVector::UpVector);
+        const FVector Focus=MazeWallCenter+FVector(0,0,32);
+        // Look past the player's shoulder so the near rim, back wall and repaired patch stay in shot.
+        const FVector Eye=Focus-MazeWallNormal*350.+Side*244.+FVector(0,0,92.);
+        MazeProofCamera->SetActorLocationAndRotation(Eye,(Focus-Eye).Rotation());
+        MazeProofCamera->GetCameraComponent()->SetFieldOfView(68.f);
+        PC->SetViewTarget(MazeProofCamera);
+        return false;
+    }
+    if (GFrameCounter-MazePhotoFrame<10 || FScreenshotRequest::IsScreenshotRequested()) return false;
+    if (MazePhotoFrame!=0)
+    {
+        FScreenshotRequest::RequestScreenshot(FPaths::Combine(Directory,FString(Label)+TEXT(".png")),false,false);
+        MazePhotoFrame=0;
+        return false;
+    }
+    PC->SetViewTarget(PC->GetPawn());
+    return true;
 }
 
 void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
@@ -123,6 +182,8 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
         Pawn.ForceNetUpdate();
     };
     const auto Capture = [&](APartyVoxelPawn& Pawn) { Peer->ClientGameTool(Pawn.GetActorLocation(), true); };
+    const FVector AlongWall=FVector::CrossProduct(MazeWallNormal,FVector::UpVector);
+    const FVector NarrowHole=AlongWall*195.;
     switch (GameAction)
     {
     case 0:
@@ -132,7 +193,7 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
         { return Mesh->ComponentHasTag(TEXT("MazeWall")) && Mesh->IsVisible() && Mesh->IsCollisionEnabled(); });
         if (!Chosen) { Require(false, TEXT("the generated maze has a solid interior wall")); return; }
         MazeWallCenter = (*Chosen)->Bounds.Origin;
-        MazeWallCenter.Z = Arena.GetActorLocation().Z + 125.;
+        MazeWallCenter.Z = Arena.GetActorLocation().Z + 96.;
         const FVector Extent = (*Chosen)->Bounds.BoxExtent;
         MazeWallNormal = Extent.X < Extent.Y ? FVector::ForwardVector : FVector::RightVector;
         Position(*Hunter, -MazeWallNormal * 88.);
@@ -141,7 +202,7 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
         return;
     }
     case 1:
-        if (!Observe(GameAction)) return;
+        if (!Observe(GameAction) || !CaptureMazeStage(Arena,1,TEXT("MazePunchIntact"))) return;
         Capture(First);
         MazeBlockedAt = FPlatformTime::Seconds();
         ++GameAction;
@@ -151,21 +212,125 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
         Require(!Arena.IsCaught(First.GetSeat()) && HasMazeWall(Arena,MazeWallCenter,MazeWallNormal),
             TEXT("a close right click into a wall does not catch the runner behind it"));
         Position(First, MazeWallNormal * 110. + FVector::CrossProduct(MazeWallNormal, FVector::UpVector) * 210.);
-        Peer->ClientGameTool(MazeWallCenter, false);
-        ++GameAction;
+        Position(*Hunter,-MazeWallNormal*166.);
+        MazeLastEdit=Arena.GetAppliedEditCount();
+        Peer->ClientTryArenaPunch(GameCount+1,1,MazeWallCenter);
+        GameAction=17;
+        return;
+    case 17:
+        if (Peer->TriedPunchRound!=GameCount+1 || Peer->TriedPunchTrial!=1) return;
+        Require(Arena.GetAppliedEditCount()==MazeLastEdit,TEXT("cancelling a maze punch leaves the wall intact"));
+        Peer->ClientGameTool(MazeWallCenter,false,2.0f);
+        GameAction=10;
+        return;
+    case 10:
+        if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
+        Require(HasMazeWall(Arena,MazeWallCenter,MazeWallNormal),TEXT("first full punch retains a solid back wall"));
+        if (!Observe(10) || !CaptureMazeStage(Arena,10,TEXT("MazePunchDent"))) return;
+        MazeLastEdit=Arena.GetAppliedEditCount();
+        Peer->ClientTryArenaPunch(GameCount+1,4,MazeWallCenter);
+        GameAction=3;
         return;
     case 3:
-        if (HasMazeWall(Arena,MazeWallCenter,MazeWallNormal)) { Peer->ClientGameTool(MazeWallCenter, false); return; }
-        if (!Observe(GameAction)) return;
-        Peer->ClientGameTool(MazeWallCenter, true);
-        ++GameAction;
+        if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
+        Require(!HasMazeWall(Arena,MazeWallCenter,MazeWallNormal),TEXT("second full punch opens the wall"));
+        if (!Observe(GameAction) || !CaptureMazeStage(Arena,3,TEXT("MazePunchThrough"))) return;
+        {
+            Position(*Hunter,-AlongWall*190.-MazeWallNormal*158.);
+            Position(*Runners[1],AlongWall*190.-MazeWallNormal*158.);
+            Position(First,-MazeWallNormal*105.);
+            FHitResult Move;
+            const FVector Start=First.GetActorLocation();
+            First.SetActorLocation(Start+MazeWallNormal*210.,true,&Move);
+            const double Crossed=(First.GetActorLocation()-Start).Dot(MazeWallNormal);
+            Require(Crossed>200.,TEXT("the real runner capsule crosses the full-height hole"));
+            UE_LOG(LogTemp,Display,TEXT("MAZE_PUNCH_CROSSED first_blocked=1 full_hits=2 cm=%.0f"),Crossed);
+        }
+        Position(First,-MazeWallNormal*105.);
+        Peers[First.GetSeat()]->ClientGameWalk(MazeWallCenter+MazeWallNormal*112.);
+        MazeBlockedAt=FPlatformTime::Seconds();
+        GameAction=19;
+        return;
+    case 19:
+    {
+        const double Walked=(First.GetActorLocation()-MazeWallCenter).Dot(MazeWallNormal)+105.;
+        if (Walked<195. && FPlatformTime::Seconds()-MazeBlockedAt<7.) return;
+        Require(Walked>=195.,TEXT("the runner walked through the opening with character movement input"));
+        UE_LOG(LogTemp,Display,TEXT("MAZE_RUNNER_WALK cm=%.1f"),Walked);
+        Position(First,AlongWall*45.);
+        Position(*Runners[1],-MazeWallNormal*150.);
+        MazeLastEdit=Arena.GetAppliedEditCount();
+        MazeBlockedAt=FPlatformTime::Seconds();
+        GameAction=11;
+        return;
+    }
+    case 11:
+        if (FPlatformTime::Seconds()-MazeBlockedAt<1.8) return;
+        Peers[Runners[1]->GetSeat()]->ClientGameTool(MazeWallCenter,true);
+        MazeBlockedAt=FPlatformTime::Seconds();
+        GameAction=12;
+        return;
+    case 12:
+        if (FPlatformTime::Seconds()-MazeBlockedAt<1.3) return;
+        Require(Arena.GetAppliedEditCount()==MazeLastEdit,TEXT("repair does not seal an occupied hole"));
+        Position(First,MazeWallNormal*110.+FVector::CrossProduct(MazeWallNormal,FVector::UpVector)*210.);
+        Position(*Runners[1],FVector::CrossProduct(MazeWallNormal,FVector::UpVector)*230.-MazeWallNormal*160.);
+        Position(*Hunter,-MazeWallNormal*166.);
+        Peer->ClientGameTool(MazeWallCenter,true);
+        GameAction=4;
         return;
     case 4:
         if (!HasMazeWall(Arena,MazeWallCenter,MazeWallNormal)) { Peer->ClientGameTool(MazeWallCenter, true); return; }
-        if (!Observe(GameAction)) return;
-        Position(First, -MazeWallNormal * 230.);
+        if (!Observe(GameAction) || !CaptureMazeStage(Arena,4,TEXT("MazePunchRepair"))) return;
+        MazeLastEdit=Arena.GetAppliedEditCount();
+        Position(*Hunter,-NarrowHole-MazeWallNormal*150.);
+        Position(*Runners[1],AlongWall*160.-MazeWallNormal*180.);
+        Peer->ClientTryArenaPunch(GameCount+1,3,MazeWallCenter-NarrowHole);
+        GameAction=18;
+        return;
+    case 18:
+        if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
+        Require(HasMazeWall(Arena,MazeWallCenter-NarrowHole,MazeWallNormal),TEXT("half charge dents an untouched part of the wall"));
+        // Move to untouched stone on the same slab. A small through-hole should transmit a tag
+        // ray without allowing the actual character capsule to follow.
+        Position(*Hunter,NarrowHole-MazeWallNormal*165.);
+        Position(First,-AlongWall*175.+MazeWallNormal*110.);
+        Position(*Runners[1],-AlongWall*180.-MazeWallNormal*180.);
+        MazeBlockedAt=FPlatformTime::Seconds();
+        GameAction=13;
+        return;
+    case 13:
+    case 15:
+        if (FPlatformTime::Seconds()-MazeBlockedAt<1.) return;
+        MazeLastEdit=Arena.GetAppliedEditCount();
+        Peer->ClientGameTool(MazeWallCenter+NarrowHole,false,.10f);
         ++GameAction;
         return;
+    case 14:
+        if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
+        MazeBlockedAt=FPlatformTime::Seconds();
+        ++GameAction;
+        return;
+    case 16:
+    {
+        if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
+        if (!Observe(16)) return;
+        const bool bVisible=!HasMazeWall(Arena,MazeWallCenter+NarrowHole,MazeWallNormal);
+        Require(bVisible,TEXT("the narrow hole admits a sight ray"));
+        Position(*Hunter,-MazeWallNormal*160.);
+        Position(First,NarrowHole-MazeWallNormal*105.);
+        const FVector Start=First.GetActorLocation();
+        FHitResult Blocking;
+        First.SetActorLocation(Start+MazeWallNormal*210.,true,&Blocking);
+        const double Moved=(First.GetActorLocation()-Start).Dot(MazeWallNormal);
+        Require(Blocking.bBlockingHit && Moved<125.,TEXT("the real runner cannot fit through the narrow hole"));
+        UE_LOG(LogTemp,Display,TEXT("MAZE_PUNCH_NARROW light_hits=2 sight=%d capsule_blocked=%d moved_cm=%.1f"),
+            bVisible,Blocking.bBlockingHit,Moved);
+        Position(*Hunter,NarrowHole-MazeWallNormal*88.);
+        Position(First,NarrowHole+MazeWallNormal*88.);
+        GameAction=5;
+        return;
+    }
     case 5:
         if (!Arena.IsCaught(First.GetSeat())) { Capture(First); return; }
         Require(Arena.GetRemainingRunners() == 1 && First.GetCharacterMovement()->MovementMode == MOVE_None,
@@ -174,7 +339,7 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
         return;
     case 6:
         if (!Observe(GameAction)) return;
-        if (GameCount > 0) Position(*Runners[1], -MazeWallNormal * 230.);
+        if (GameCount > 0) Position(*Runners[1],NarrowHole-MazeWallNormal*230.);
         ++GameAction;
         return;
     default:

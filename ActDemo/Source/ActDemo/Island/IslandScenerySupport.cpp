@@ -65,7 +65,7 @@ namespace
 }
 
 void IslandScenerySupport::FindUnsupported(const FVoxelDensity& Ground, TConstArrayView<UIslandMeshVoxels*> Parts,
-    TMap<UIslandMeshVoxels*,TArray<int32>>& Removed, TFunctionRef<bool(const UIslandMeshVoxels&,int32,FVector)> ExtraAnchor)
+    TMap<UIslandMeshVoxels*,TArray<int32>>& Removed, TFunctionRef<bool(const UIslandMeshVoxels&,int32,FVector)> ExtraAnchor, TArray<FCellGroup>* Groups)
 {
     Removed.Reset();
     TArray<FSupportPart> Bodies;
@@ -142,20 +142,28 @@ void IslandScenerySupport::FindUnsupported(const FVoxelDensity& Ground, TConstAr
                 }
             }
             if (!bAnchored)
-                for (FIntPoint Cell : Queue) Removed.FindOrAdd(Bodies[Cell.X].Field).Add(Cell.Y);
+            {
+                FCellGroup* Group = Groups ? &Groups->AddDefaulted_GetRef() : nullptr;
+                for (FIntPoint Cell : Queue)
+                {
+                    auto* Field = Bodies[Cell.X].Field;
+                    Removed.FindOrAdd(Field).Add(Cell.Y);
+                    if (Group) Group->FindOrAdd(Field).Add(Cell.Y);
+                }
+            }
         }
     }
     for (auto& Loss : Removed) Loss.Value.Sort();
 }
 
 void IslandScenerySupport::FindUnsupported(const FVoxelDensity& Ground,TConstArrayView<UIslandMeshVoxels*> Parts,
-    TMap<UIslandMeshVoxels*,TArray<int32>>& Removed)
+    TMap<UIslandMeshVoxels*,TArray<int32>>& Removed, TArray<FCellGroup>* Groups)
 {
-    FindUnsupported(Ground, Parts, Removed, [](const UIslandMeshVoxels&,int32,FVector){return false;});
+    FindUnsupported(Ground, Parts, Removed, [](const UIslandMeshVoxels&,int32,FVector){return false;}, Groups);
 }
 
 void IslandScenerySupport::InspectActor(AActor& Actor, const AVoxelTerrain& Terrain,
-    TMap<UIslandMeshVoxels*,TArray<int32>>& Removed)
+    TMap<UIslandMeshVoxels*,TArray<int32>>& Removed, TArray<FCellGroup>* Groups)
 {
     Removed.Reset();
     const FVoxelDensity* Ground = Terrain.GetDensity();
@@ -174,7 +182,7 @@ void IslandScenerySupport::InspectActor(AActor& Actor, const AVoxelTerrain& Terr
         for (auto* Part : Parts)
             if (Part->SourcePart()->ComponentHasTag(TEXT("IslandPrizeCompass"))) CompassParts.Add(Part);
         for (auto* Part : CompassParts) Parts.RemoveSingle(Part);
-        FindUnsupported(*Ground, Parts, Removed);
+        FindUnsupported(*Ground, Parts, Removed, Groups);
         if (!CompassParts.IsEmpty())
         {
             // The prize rises independently of the chest. Its animated spindle carries
@@ -186,7 +194,7 @@ void IslandScenerySupport::InspectActor(AActor& Actor, const AVoxelTerrain& Terr
                 if (Source->GetFName() != TEXT("CompassRim")) return false;
                 const FVector Local = Source->GetComponentTransform().InverseTransformPosition(Center);
                 return FVector2D(Local).SizeSquared() <= FMath::Square(14.);
-            });
+            }, Groups);
             Removed.Append(MoveTemp(CompassLoss));
         }
         return;
@@ -196,7 +204,7 @@ void IslandScenerySupport::InspectActor(AActor& Actor, const AVoxelTerrain& Terr
     const auto* Neutral = Cast<AIslandNeutralProp>(&Actor);
     if (!IsJetty && !IsRescueRaft && (!Neutral || Neutral->GetKind() != EIslandNeutralKind::Ship))
     {
-        FindUnsupported(*Ground, Parts, Removed);
+        FindUnsupported(*Ground, Parts, Removed, Groups);
         return;
     }
     TMap<const UIslandMeshVoxels*, double> WaterContact;
@@ -229,5 +237,5 @@ void IslandScenerySupport::InspectActor(AActor& Actor, const AVoxelTerrain& Terr
         // A coast column excavated beneath sea level can admit water even where
         // the original two-dimensional shoreline is still inland.
         return Ground->SignedDistanceAt(FVector(Center.X,Center.Y,0.)) >= 0.;
-    });
+    }, Groups);
 }

@@ -17,10 +17,10 @@
 
 namespace
 {
-    // Two trail markers, the four clue landmarks, a landing, five working mechanisms and four route shapes.
-    constexpr int32 NumCases = 17, FirstRoute = 12, ChestCase = 16;
+    // Two trail markers, the four clue landmarks, a landing, four working mechanisms and four route shapes.
+    constexpr int32 NumCases = 16, FirstRoute = 11, ChestCase = 15;
     const TCHAR* CaseNames[] = {TEXT("Cairn"),TEXT("TrailBeacon"),TEXT("Arch"),TEXT("SignalNeedles"),
-        TEXT("Quarry"),TEXT("Fin"),TEXT("Dock"),TEXT("Tree"),TEXT("Ship"),TEXT("Hopper"),TEXT("Sail"),TEXT("Tide"),
+        TEXT("Quarry"),TEXT("Fin"),TEXT("Dock"),TEXT("Bridge"),TEXT("Dam"),TEXT("SandDepot"),TEXT("WindTower"),
         TEXT("FanPalm"),TEXT("Saltbush"),TEXT("SplitReef"),TEXT("CoralSpur"),TEXT("Chest")};
 
     int32 CaseFor(AActor& Owner)
@@ -28,7 +28,7 @@ namespace
         if (const auto* Route=Cast<AIslandRouteVoxel>(&Owner))
             return int32(Route->GetKind()) < 4 ? FirstRoute+int32(Route->GetKind()) : INDEX_NONE;
         if (Owner.IsA<AIslandChest>()) return ChestCase;
-        if (const auto* Prop=Cast<AIslandNeutralProp>(&Owner)) return 7+int32(Prop->GetKind());
+        if (const auto* Prop=Cast<AIslandNeutralProp>(&Owner)) return Prop->GetKind() >= EIslandNeutralKind::Bridge ? 7+int32(Prop->GetKind())-int32(EIslandNeutralKind::Bridge) : INDEX_NONE;
         if (Owner.IsA<AExpeditionDock>()) return 6;
         if (const auto* Mark=Cast<AExpeditionLandmark>(&Owner)) return 2+Mark->ClueIndex;
         if (const auto* Marker=Cast<AStaticMeshActor>(&Owner))

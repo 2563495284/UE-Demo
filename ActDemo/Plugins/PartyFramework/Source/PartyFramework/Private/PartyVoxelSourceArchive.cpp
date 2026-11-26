@@ -1,6 +1,6 @@
-#include "Island/IslandVoxelSourceArchive.h"
+#include "PartyVoxelSourceArchive.h"
 
-#include "Island/IslandMeshVoxelData.h"
+#include "PartyMeshVoxelData.h"
 #include "Engine/StaticMesh.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"

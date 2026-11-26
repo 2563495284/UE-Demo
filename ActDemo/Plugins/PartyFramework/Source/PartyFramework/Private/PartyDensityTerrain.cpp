@@ -1,6 +1,7 @@
 #include "PartyDensityTerrain.h"
 
 #include "PartyVoxelArena.h"
+#include "PartyPunch.h"
 #include "VoxelSurfaceKernel.h"
 #include "Materials/MaterialInterface.h"
 #include "ProceduralMeshComponent.h"
@@ -178,11 +179,12 @@ bool UPartyDensityTerrain::OwnsSurface(const UPrimitiveComponent* Component) con
 }
 
 bool UPartyDensityTerrain::ApplyBrush(FIntVector Center, FIntVector Normal, bool bFill,
-    const TArray<FIntVector>& ProtectedMin, const TArray<FIntVector>& ProtectedMax)
+    const TArray<FIntVector>& ProtectedMin, const TArray<FIntVector>& ProtectedMax, uint8 Power)
 {
     using namespace VoxelSurfaceKernel;
     if (Samples.IsEmpty() || ProtectedMin.Num()!=ProtectedMax.Num()) return false;
-    const FIntVector Extent(bFill ? 185 : 165);
+    const int32 Radius = FMath::RoundToInt(62.f * PartyPunch::RadiusScale(Power));
+    const FIntVector Extent(bFill ? 185 : Radius+Band+Spacing);
     const FIntVector Lo = FloorVector(FVector(Center-Extent-Origin)/Spacing).ComponentMax(FIntVector(1));
     const FIntVector Hi = FloorVector(FVector(Center+Extent-Origin)/Spacing).ComponentMin(Dimensions-FIntVector(2));
     FIntVector MinChanged=Dimensions, MaxChanged(-1);
@@ -204,7 +206,7 @@ bool UPartyDensityTerrain::ApplyBrush(FIntVector Center, FIntVector Normal, bool
             {
                 const FIntVector P(X,Y,Z);
                 const FIntVector World = Origin+P*Spacing;
-                int32 Distance = ToolDistance(World-Center,Normal,bFill);
+                int32 Distance = bFill ? ToolDistance(World-Center,Normal,true) : ToolDistanceWithRadius(World-Center,Normal,Radius);
                 if (bFill)
                     for (int32 B=0; B<ProtectedMin.Num(); ++B)
                         Distance = FMath::Max(Distance,-FMath::Max((ProtectedMin[B]-World).GetMax(),(World-ProtectedMax[B]).GetMax()));

@@ -20,7 +20,7 @@ class ACTDEMO_API AIslandGameMode : public AVoxelGameMode
 
 public:
     AIslandGameMode();
-    void TryOpen(AIslandPlayerController& Player);
+    void TryOpen(AIslandPlayerController& Player, const AIslandChest& Chest);
     void RallyCrew(AIslandPlayerController& Sender);
     void RestartIsland();
     void ChooseTeam(AIslandPlayerController& Player, int32 Team);
@@ -58,7 +58,7 @@ protected:
     void RoundSetupFailed(const FString& Error) override;
     bool StopOnGuestExit() const override { return false; }
     bool PrepareRound(FString& Error) override;
-    bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim) override;
+    bool TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim, uint8 PunchPower, bool bProtectChest) override;
     void OnRoundStarted() override;
     void OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source) override;
     void UpdateEnvironment() override;

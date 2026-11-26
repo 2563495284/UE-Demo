@@ -159,7 +159,12 @@ void AIslandChest::OnRep_ChallengeResolved()
 double AIslandChest::GetInteractionDistanceSquared(FVector Origin) const
 {
     const FVector Center = GetActorLocation();
-    return FMath::Min(FVector::DistSquared(Origin,Center), FVector::DistSquared(Origin,Center+FVector(0.,0.,DiscoveryRise)));
+    return FMath::Min(FVector::DistSquared(Origin,Center), FVector::DistSquared(Origin,GetDiscoveryPoint()));
+}
+
+bool AIslandChest::HasDiscoveryTarget() const
+{
+    return DiscoveryRise > 0. || (IslandSceneryVoxels::IsExhausted(BoxMesh) && IslandSceneryVoxels::IsExhausted(LidMesh));
 }
 
 bool AIslandChest::IsReachableFrom(const AVoxelCharacter& Hero) const

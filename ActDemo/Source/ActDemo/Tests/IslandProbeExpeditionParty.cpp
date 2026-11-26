@@ -53,7 +53,6 @@ uint8 ObservedEffects(const AIslandGameState& State, const AIslandPlayerControll
 }
 
 constexpr int32 VenueBuildingCount = 10;
-constexpr int32 AllVenueBuildings = (1 << VenueBuildingCount) - 1;
 
 int32 PartsPerBuilding(const FName Feature)
 {
@@ -89,26 +88,6 @@ bool MoveToVenuePose(APartyVoxelSession& Arena, APartyVoxelPawn& Pawn, FIntVecto
     Pawn.TeleportTo(VenueStandingPose(Arena, Pawn, Feet), Pawn.GetActorRotation(), false, false);
     Pawn.GetCharacterMovement()->StopMovementImmediately();
     Pawn.ForceNetUpdate();
-    return false;
-}
-
-bool VisibleVenuePart(const APartyVoxelSession& Arena, const APartyVoxelPawn& Pawn,
-    const TArray<UStaticMeshComponent*>& Parts, int32 Id, FVector Eye, FVector& Target)
-{
-    for (const auto* Part : Parts)
-    {
-        if (!Part) continue;
-        // Include the upper face of tall structures above low walls, and their silhouettes at eye height.
-        for (const double Height : {0., .75, -.40})
-        {
-            const FVector Point = Part->Bounds.Origin + FVector(0., 0., Part->Bounds.BoxExtent.Z * Height);
-            if (Arena.TraceVenueStructure(Eye, (Point - Eye).GetSafeNormal(), &Pawn) == Id)
-            {
-                Target = Point;
-                return true;
-            }
-        }
-    }
     return false;
 }
 
@@ -458,8 +437,41 @@ void AIslandProbePeer::TickArenaTerrainSample(AIslandPlayerController& Player)
 {
     auto* Pawn = Cast<APartyVoxelPawn>(Player.GetPawn());
     const auto* Arena = Pawn ? Pawn->GetSession() : nullptr;
+    if (!Arena && TerrainSampleGame==TEXT("MainIsland") && TerrainSampleStage>=10)
+    {
+        const auto* Terrain=AVoxelTerrain::Find(GetWorld());
+        if (!Terrain || Terrain->GetAppliedSequence()!=uint32(TerrainSampleSequence)) return;
+        TArray<FString> Heights;
+        for (int32 R=0; R<=160; R+=10)
+        {
+            const FVector P=TerrainSampleOrigin+FVector(0,R,0);
+            FHitResult Hit;
+            if (!Terrain->TraceRock(P+FVector(0,0,180),P-FVector(0,0,180),Player.GetHero(),Hit)) return;
+            Heights.Add(FString::FromInt(FMath::RoundToInt((Hit.ImpactPoint.Z-TerrainSampleOrigin.Z)*10.)));
+        }
+        UE_LOG(LogTemp,Display,TEXT("FIELD_PUNCH_PROFILE trial=%d after=%d seq=%d height_mm=%s"),
+            (TerrainSampleStage-10)/2,(TerrainSampleStage-10)%2,TerrainSampleSequence,*FString::Join(Heights,TEXT(",")));
+        ServerSampledArenaTerrain(TerrainSampleRound,TerrainSampleStage);
+        TerrainSampleStage=INDEX_NONE;
+        return;
+    }
     if (!Arena || Arena->GetAppliedEditCount() != TerrainSampleSequence || Player.GetViewTarget() != Pawn) return;
     if (Player.GetPartyTransitionView().Phase != EIslandPartyVeil::Clear) return;
+    if (TerrainSampleStage >= 4)
+    {
+        TArray<FString> Depths;
+        for (int32 R=0; R<=160; R+=10)
+        {
+            FHitResult Hit;
+            if (!SampleFloor(*Arena,TerrainSampleOrigin+FVector(0,R,0),Hit)) return;
+            Depths.Add(FString::FromInt(FMath::RoundToInt((TerrainSampleOrigin.Z-Hit.ImpactPoint.Z)*10.)));
+        }
+        UE_LOG(LogTemp,Display,TEXT("ARENA_PUNCH_PROFILE round=%d game=%s trial=%d seq=%d depth_mm=%s"),
+            TerrainSampleRound,*TerrainSampleGame.ToString(),TerrainSampleStage-4,TerrainSampleSequence,*FString::Join(Depths,TEXT(",")));
+        ServerSampledArenaTerrain(TerrainSampleRound,TerrainSampleStage);
+        TerrainSampleStage=INDEX_NONE;
+        return;
+    }
     const bool bPhotos = FParse::Param(FCommandLine::Get(),TEXT("IslandScreenshot"));
     const auto ToggleView = [&]()
     {
@@ -523,7 +535,7 @@ void AIslandProbePeer::TickArenaTerrainSample(AIslandPlayerController& Player)
 
 bool AIslandProbe::TickArenaTerrain(APartyVoxelSession& Arena)
 {
-    if (TerrainStage > 3) return true;
+    if (TerrainStage > 3) return TickArenaPunchTrials(Arena);
     const int32 Round = GameCount + 1;
     auto* Pawn = CastChecked<APartyVoxelPawn>(Mode->GetPlayers()[0]->GetPawn());
     if (!bTerrainSampleRequested)
@@ -531,7 +543,7 @@ bool AIslandProbe::TickArenaTerrain(APartyVoxelSession& Arena)
         if (TerrainStage == 0)
         {
             // A point off both authoring and sample grid centers, in reach of the normal camera.
-            const FVector Near = Pawn->GetActorLocation() + FVector(174.,13.,-Pawn->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+            const FVector Near = Pawn->GetActorLocation() + FVector(115.,13.,-Pawn->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
             FHitResult Surface;
             if (!SampleFloor(Arena, Near, Surface)) return false;
             TerrainSamplePoint = Surface.ImpactPoint;
@@ -554,7 +566,11 @@ bool AIslandProbe::TickArenaTerrain(APartyVoxelSession& Arena)
         else if (Arena.GetAppliedEditCount() == TerrainInputSequence)
         {
             FHitResult Surface;
-            if (SampleFloor(Arena,TerrainSamplePoint,Surface)) Peers[0]->ClientGameTool(Surface.ImpactPoint,TerrainStage != 1);
+            if (!bPunchTrialSent && SampleFloor(Arena,TerrainSamplePoint,Surface))
+            {
+                bPunchTrialSent=true;
+                Peers[0]->ClientGameTool(Surface.ImpactPoint,TerrainStage != 1,TerrainStage==1 ? .09f : -1.f);
+            }
             return false;
         }
         Require(Arena.GetAppliedEditCount() == TerrainStage,TEXT("one real mouse click applies one density edit"));
@@ -579,15 +595,17 @@ bool AIslandProbe::TickArenaTerrain(APartyVoxelSession& Arena)
             Observer->ForceNetUpdate();
         }
     TerrainInputSequence = Arena.GetAppliedEditCount();
+    bPunchTrialSent=false;
     ++TerrainStage;
     bTerrainSampleRequested = false;
-    return TerrainStage > 3;
+    return false;
 }
 
-void AIslandProbePeer::ClientGameTool_Implementation(FVector Target, bool bPlace)
+void AIslandProbePeer::ClientGameTool_Implementation(FVector Target, bool bPlace,float HoldSeconds)
 {
     GameToolTarget = Target;
     bGameToolPlaces = bPlace;
+    GameToolHoldSeconds=HoldSeconds;
 }
 
 void AIslandProbePeer::TickGameTool(AIslandPlayerController& Player)
@@ -599,7 +617,10 @@ void AIslandProbePeer::TickGameTool(AIslandPlayerController& Player)
         return;
     }
     if (Player.GetViewTarget()!=Pawn) return;
-    if (Pawn->GetSession()->IsChaseGame() && !Pawn->IsInFirstPersonView())
+    // A third-person camera can sit behind a raised bridge footing. Use the normal
+    // first-person view while aiming below it from the opposite bank.
+    const bool bBridgeFill=bGameToolPlaces && TerrainSampleGame==TEXT("PartyBridgeDash");
+    if ((Pawn->GetSession()->IsChaseGame() || bBridgeFill) && !Pawn->IsInFirstPersonView())
     {
         Player.InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V, IE_Pressed, 1.f));
         Player.InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V, IE_Released, 0.f));
@@ -628,8 +649,15 @@ void AIslandProbePeer::TickGameTool(AIslandPlayerController& Player)
             Aim == EPartyChaseAim::Runner ? TEXT("runner") : TEXT("none"));
     }
     HeldArenaKey = bGameToolPlaces ? EKeys::RightMouseButton : EKeys::LeftMouseButton;
-    ReleaseArenaKeyAt = FPlatformTime::Seconds() + .12;
+    ReleaseArenaKeyAt = FPlatformTime::Seconds() + GameToolHoldSeconds;
     Player.InputKey(FInputKeyEventArgs::CreateSimulated(HeldArenaKey, IE_Pressed, 1.f));
+    if (GameToolHoldSeconds < 0.f)
+    {
+        // A physical tap can begin and end within the same input frame. This also
+        // keeps a hitch from converting the single-click fill measurement into auto-repeat.
+        Player.InputKey(FInputKeyEventArgs::CreateSimulated(HeldArenaKey, IE_Released, 0.f));
+        HeldArenaKey=FKey();
+    }
     GameToolTarget.Reset();
 }
 
@@ -638,32 +666,27 @@ void AIslandProbePeer::ClientGameWalk_Implementation(FVector Destination)
     GameWalkTarget = Destination;
 }
 
-void AIslandProbePeer::ClientInspectVenue_Implementation(int32 Round, int32 ExpectedGone, int32 ExpectedParts)
+void AIslandProbePeer::ClientInspectVenue_Implementation(int32 Round,int32 ChangedMask,int32 ExpectedParts,uint32 Digest)
 {
-    const auto* PC = CastChecked<AIslandPlayerController>(GetOwner());
-    const auto* Pawn = Cast<APartyVoxelPawn>(PC->GetPawn());
-    const auto* Arena = Pawn ? Pawn->GetSession() : nullptr;
-    if (!Arena || Arena->GetVenueStructureCount() != VenueBuildingCount) return;
-    int32 Pieces = 0;
-    for (int32 Id = 0; Id < VenueBuildingCount; ++Id)
+    const auto* PC=CastChecked<AIslandPlayerController>(GetOwner());
+    const auto* Pawn=Cast<APartyVoxelPawn>(PC->GetPawn());
+    const auto* Arena=Pawn ? Pawn->GetSession() : nullptr;
+    if (!Arena || Arena->GetVenueStructureCount()!=VenueBuildingCount) return;
+    uint32 Actual=0;
+    int32 Pieces=0;
+    for (int32 I=0;I<VenueBuildingCount;++I)
     {
-        const bool bGone = (ExpectedGone & (1 << Id)) != 0;
-        if (Arena->IsVenueStructureDestroyed(Id) != bGone) return;
+        const uint32 Hash=Arena->VenueDamageDigest(I);
+        if ((Hash!=0)!=((ChangedMask&(1<<I))!=0)) return;
+        Actual=HashCombineFast(Actual,Hash);
         TArray<UStaticMeshComponent*> Parts;
-        Arena->GetVenueStructureParts(Id, Parts);
-        if (Parts.Num() != ExpectedParts) return;
-        for (const auto* Part : Parts)
-        {
-            if (!Part || !Part->IsRegistered() || !Part->GetStaticMesh() || Part->IsVisible() == bGone) return;
-            if (bGone ? Part->GetCollisionEnabled() != ECollisionEnabled::NoCollision :
-                Part->GetCollisionEnabled() != ECollisionEnabled::QueryOnly ||
-                Part->GetCollisionResponseToChannel(ECC_Visibility) != ECR_Block) return;
-        }
-        Pieces += Parts.Num();
+        Arena->GetVenueStructureParts(I,Parts);
+        if (Parts.Num()!=ExpectedParts) return;
+        Pieces+=Parts.Num();
     }
-    UE_LOG(LogTemp, Display, TEXT("EXPEDITION_VENUE_VIEW round=%d gone=%d pieces=%d seat=%d"),
-        Round, ExpectedGone, Pieces, Pawn->GetSeat());
-    ServerVenueReport(Round, ExpectedGone, Pieces);
+    if (Actual!=Digest) return;
+    UE_LOG(LogTemp,Display,TEXT("EXPEDITION_VENUE_VIEW round=%d changed=%d pieces=%d seat=%d digest=%08x"),Round,ChangedMask,Pieces,Pawn->GetSeat(),Actual);
+    ServerVenueReport(Round,ChangedMask,Pieces);
 }
 
 void AIslandProbePeer::ServerVenueReport_Implementation(int32 Round, int32 Gone, int32 Pieces)
@@ -685,8 +708,12 @@ bool AIslandProbe::CollectVenueReports(int32 Gone)
         ExpectedVenueGone = Gone;
         VenueReports.Reset();
     }
-    for (int32 Seat = 0; Seat < Mode->GetPlayers().Num(); ++Seat)
-        if (!VenueReports.Contains(Seat)) Peers[Seat]->ClientInspectVenue(GameCount + 1, Gone, PartsPerBuilding(Mode->CurrentPartyFeature));
+    auto* Arena=Cast<APartyVoxelSession>(Mode->PartySession);
+    if (!Arena) return false;
+    uint32 Digest=0;
+    for (int32 I=0;I<VenueBuildingCount;++I) Digest=HashCombineFast(Digest,Arena->VenueDamageDigest(I));
+    for (int32 Seat=0;Seat<Mode->GetPlayers().Num();++Seat)
+        if (!VenueReports.Contains(Seat)) Peers[Seat]->ClientInspectVenue(GameCount+1,Gone,PartsPerBuilding(Mode->CurrentPartyFeature),Digest);
     return VenueReports.Num() == Mode->GetPlayers().Num();
 }
 
@@ -966,10 +993,10 @@ void AIslandProbe::TickExpeditionGame(double Now)
         {
             if (!bGameStarted && Session->RoundSeconds == 180.f)
                 UE_LOG(LogTemp, Display, TEXT("MAZE_QA_DEFAULT limit=180"));
-            if (!(bMazeProof && bShots && GameCount == 0)) Session->RoundSeconds = bMazeProof ? 34.f : 8.f;
+            if (!(bMazeProof && bShots && GameCount == 0)) Session->RoundSeconds = bMazeProof ? 59.f : 8.f;
         }
         else if (bZeroScore) Session->RoundSeconds = 6.f;
-        else Session->RoundSeconds = bAllVenueBuildings || bTerrain ? 44.f : (bVenueProof || bViews) ? 26.f : 23.f;
+        else Session->RoundSeconds = bTerrain ? 74.f : bAllVenueBuildings ? 44.f : (bVenueProof || bViews) ? 26.f : 23.f;
     }
     if (Round->Phase == EIslandPhase::PartyPlaying && Session)
     {
@@ -1075,7 +1102,8 @@ void AIslandProbe::TickExpeditionGame(double Now)
                     Require(GameAction >= 7 && bSurvived == (GameCount == 0),
                         TEXT("maze finished by survival in round one and full capture in round two"));
             }
-            else if (bZeroScore)
+            // A solo hunt can progress on the opening crew's reward even when its minigame ends scoreless.
+            else if (bZeroScore || (!bGamesScenario && Players.Num() == 1 && Session->Score(0) == 0))
             {
                 Require(Session->GetWinningSeat() == INDEX_NONE && Session->GetWinningTeamMask() == 0,
                     TEXT("all zero scores produce no winning crew"));
@@ -1316,169 +1344,49 @@ void AIslandProbe::TickExpeditionGame(double Now)
     }
 }
 
-bool AIslandProbe::TickVenueProof(APartyVoxelSession& Arena, bool bShots)
+bool AIslandProbe::TickVenueProof(APartyVoxelSession& Arena,bool bShots)
 {
-    const FName Feature = Mode->CurrentPartyFeature;
-    const bool bReef = Feature == TEXT("PartyReefRun");
-    const bool bPhotograph = bAllVenueBuildings && bShots && Feature == TEXT("PartyBridgeDash") && VenueId == 0;
-    // The listen host supplies the screenshot and the synchronous occlusion control. Other arenas use their winner's client.
-    const int32 Seat = bReef || Feature == TEXT("PartyBridgeDash") ? 0 : GameWinnerSeat;
-    AVoxelPlayerController* PC = Mode->GetPlayers()[Seat];
-    auto* Pawn = CastChecked<APartyVoxelPawn>(PC->GetPawn());
-    auto* Peer = Peers[Seat].Get();
-    const auto Photo = [](const TCHAR* Name)
-    {
-        const FString Path = VenuePhotoPath(Name);
-        if (IFileManager::Get().FileExists(*Path)) IFileManager::Get().Delete(*Path);
-        FScreenshotRequest::RequestScreenshot(Path, false, false);
-    };
-    const auto PhotoSaved = [](const TCHAR* Name)
-    {
-        return !FScreenshotRequest::IsScreenshotRequested() && IFileManager::Get().FileSize(*VenuePhotoPath(Name)) > 0;
-    };
-    if (VenueStep == EVenueStep::Restored) return true;
-    if (VenueStep == EVenueStep::Entry)
+    const FName Feature=Mode->CurrentPartyFeature;
+    const int32 Seat=0;
+    auto* Pawn=CastChecked<APartyVoxelPawn>(Mode->GetPlayers()[Seat]->GetPawn());
+    auto* Peer=Peers[Seat].Get();
+    if (VenueStep==EVenueStep::Restored) return true;
+    if (VenueStep==EVenueStep::Entry)
     {
         if (!CollectVenueReports(0) || !Arena.IsGrounded(Seat)) return false;
-        VenueSpawn = Arena.FeetCell(Seat);
-        VenueStep = bReef ? EVenueStep::OccludedFar : EVenueStep::Strike;
+        Require(Arena.ReachableVenuePads(Seat)==10,TEXT("all ten building pads connect to a course berth"));
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_VENUE_PATH round=%d count=10"),GameCount+1);
+        VenueSpawn=Arena.FeetCell(Seat);
+        VenueStep=EVenueStep::Strike;
     }
-    if (VenueStep == EVenueStep::OccludedFar || VenueStep == EVenueStep::OccludedNear)
+    if (VenueStep==EVenueStep::Strike)
     {
-        const bool bFar = VenueStep == EVenueStep::OccludedFar;
-        if (!MoveToVenuePose(Arena, *Pawn, {bFar ? -1 : 3, 0, 1})) return false;
-        TArray<UStaticMeshComponent*> Parts;
-        Arena.GetVenueStructureParts(0, Parts);
-        for (const auto* Part : Parts)
-        {
-            if (!Part) continue;
-            const FVector Eye = Pawn->GetPawnViewLocation();
-            const FVector Point = Part->Bounds.Origin;
-            const FVector Direction = (Point - Eye).GetSafeNormal();
-            FHitResult Hit;
-            if (!GetWorld()->LineTraceSingleByChannel(Hit, Eye, Point, ECC_Visibility,
-                FCollisionQueryParams(SCENE_QUERY_STAT(VenueOcclusionProof), false, Pawn)) || Hit.GetActor() != &Arena) continue;
-            const FIntVector Cell = Arena.CellAt(Hit.ImpactPoint - 2.*Hit.ImpactNormal);
-            FHitResult ShortHit;
-            if (Cell.X != 5 || Arena.BlockAt(Cell) != EPartyBlock::Clay ||
-                Arena.TraceVenueStructure(Eye, Direction, Pawn) != INDEX_NONE ||
-                Arena.TraceTerrain(Eye, Direction, Pawn, ShortHit) == bFar) continue;
-            VenueWall = Cell;
-            VenueWallEditSequence = Arena.GetAppliedEditCount();
-            Peer->ClientGameTool(Point, false);
-            VenueStep = bFar ? EVenueStep::CheckFar : EVenueStep::CheckNear;
-            return false;
-        }
-        Require(false, TEXT("a reef wall lies between the standing player and the target structure"));
-        return false;
+        FVector Stand;
+        if (!Arena.VenueApproach(VenueId,*Pawn,Stand,VenueTarget))
+        { Require(false,TEXT("reachable structure needs an exposed face within fist reach")); return false; }
+        Pawn->TeleportTo(Stand,(VenueTarget-Stand).Rotation(),false,true);
+        Pawn->GetCharacterMovement()->StopMovementImmediately();
+        Pawn->ForceNetUpdate();
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_VENUE_AIM round=%d id=%d seat=%d range_cm=%d feet=%s"),GameCount+1,VenueId,Seat,
+            FMath::RoundToInt(FVector::Distance(Pawn->GetPawnViewLocation(),VenueTarget)),*Stand.ToString());
+        VenueStep=EVenueStep::CheckStrike;
+        if (bShots && Feature==TEXT("PartyBridgeDash") && !VenueId)
+            FScreenshotRequest::RequestScreenshot(VenuePhotoPath(TEXT("VenueBridgeBefore.png")),false,false);
     }
-    if (VenueStep == EVenueStep::CheckFar || VenueStep == EVenueStep::CheckNear)
+    if (VenueStep==EVenueStep::CheckStrike)
     {
-        const bool bFar = VenueStep == EVenueStep::CheckFar;
-        Require(!Arena.IsVenueStructureDestroyed(0) &&
-            Arena.GetAppliedEditCount()==VenueWallEditSequence+(bFar ? 0 : 1),
-            TEXT("a distant wall blocks the tool and a reachable wall receives exactly one cut"));
-        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_VENUE_OCCLUSION round=%d far=%d wall=%s structure=0"),
-            GameCount + 1, bFar, *VenueWall.ToString());
-        VenueStep = bFar ? EVenueStep::OccludedNear : EVenueStep::Strike;
-        return false;
+        if (!Arena.VenueDamageDigest(VenueId)) { Peer->ClientGameTool(VenueTarget,false); return false; }
+        Require(!Arena.IsVenueFullyCarved(VenueId),TEXT("one light punch leaves the rest of a large structure standing"));
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_VENUE_CUT round=%d feature=%s id=%d partial=1"),GameCount+1,*Feature.ToString(),VenueId);
+        VenueStep=EVenueStep::Final;
+        if (bShots && Feature==TEXT("PartyBridgeDash") && !VenueId)
+            FScreenshotRequest::RequestScreenshot(VenuePhotoPath(TEXT("VenueBridgeAfter.png")),false,false);
     }
-    if (VenueStep == EVenueStep::Strike)
-    {
-        TArray<UStaticMeshComponent*> Parts;
-        Arena.GetVenueStructureParts(VenueId, Parts);
-        if (!Arena.IsGrounded(Seat)) return false;
-        const FVector Eye = Pawn->GetPawnViewLocation();
-        if (!VisibleVenuePart(Arena, *Pawn, Parts, VenueId, Eye, VenueTarget))
-        {
-            const FVector ViewOffset = Eye - Pawn->GetActorLocation();
-            // Search supported two-cell-high stands around the starting bank, nearest first.
-            // Include the top of the course walls, but keep the probe away from scoring platforms and finish lines.
-            for (int32 Radius = 0; Radius <= 18; ++Radius)
-                for (int32 X = -Radius; X <= Radius; ++X)
-                    for (int32 Y = -Radius; Y <= Radius; ++Y)
-                    {
-                        if (FMath::Max(FMath::Abs(X), FMath::Abs(Y)) != Radius) continue;
-                        for (int32 Z : {1, 2, 3, 4})
-                        {
-                            const FIntVector Feet(VenueSpawn.X + X, VenueSpawn.Y + Y, Z);
-                            if ((bReef || Feature == TEXT("PartyBridgeDash")) && Feet.X > 4) continue;
-                            if (!bReef && Z != 1) continue;
-                            if (!CanStandOnBoard(Arena, Feet) || Feet == Arena.FeetCell(Seat)) continue;
-                            bool bOccupied = false;
-                            for (const AVoxelPlayerController* Other : Mode->GetPlayers())
-                                if (Other != PC && FVector::Dist2D(Other->GetPawn()->GetActorLocation(), Arena.CellCenter(Feet)) < 80.) bOccupied = true;
-                            if (bOccupied) continue;
-                            const FVector AtEye = VenueStandingPose(Arena, *Pawn, Feet) + ViewOffset;
-                            if (!VisibleVenuePart(Arena, *Pawn, Parts, VenueId, AtEye, VenueTarget)) continue;
-                            MoveToVenuePose(Arena, *Pawn, Feet);
-                            return false;
-                        }
-                    }
-            UE_LOG(LogTemp, Error, TEXT("Venue proof missing sightline feature=%s structure=%d"), *Feature.ToString(), VenueId);
-            Require(false, TEXT("a supported standing position on the starting bank can see the building"));
-            return false;
-        }
-        Require(CanStandOnBoard(Arena, Arena.FeetCell(Seat)), TEXT("venue shot was taken from a solid board floor"));
-        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_VENUE_AIM round=%d id=%d seat=%d range_cm=%d feet=%s"),
-            GameCount + 1, VenueId, Seat, FMath::RoundToInt(FVector::Dist(Eye, VenueTarget)), *Arena.FeetCell(Seat).ToString());
-        if (bPhotograph)
-        {
-            PC->SetControlRotation((VenueTarget - Eye).Rotation());
-            VenueStep = EVenueStep::BeforePhoto;
-            return false;
-        }
-        Peer->ClientGameTool(VenueTarget, false);
-        VenueStep = EVenueStep::CheckStrike;
-        return false;
-    }
-    if (VenueStep == EVenueStep::BeforePhoto)
-    {
-        Photo(TEXT("VenueBridgeBefore.png"));
-        VenueStep = EVenueStep::WaitBeforePhoto;
-        return false;
-    }
-    if (VenueStep == EVenueStep::WaitBeforePhoto)
-    {
-        if (!PhotoSaved(TEXT("VenueBridgeBefore.png"))) return false;
-        Peer->ClientGameTool(VenueTarget, false);
-        VenueStep = EVenueStep::CheckStrike;
-        return false;
-    }
-    if (VenueStep == EVenueStep::CheckStrike)
-    {
-        // On remote seats, movement correction may arrive after the tool RPC. Retry from the actual replicated eye.
-        if (!Arena.IsVenueStructureDestroyed(VenueId)) { Peer->ClientGameTool(VenueTarget, false); return false; }
-        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_VENUE_REMOVED round=%d feature=%s id=%d"),
-            GameCount + 1, *Feature.ToString(), VenueId);
-        VenueStep = bPhotograph ? EVenueStep::AfterPhoto : EVenueStep::Final;
-    }
-    if (VenueStep == EVenueStep::AfterPhoto)
-    {
-        Photo(TEXT("VenueBridgeAfter.png"));
-        VenueStep = EVenueStep::WaitAfterPhoto;
-        return false;
-    }
-    if (VenueStep == EVenueStep::WaitAfterPhoto)
-    {
-        if (!PhotoSaved(TEXT("VenueBridgeAfter.png"))) return false;
-        VenueStep = EVenueStep::Final;
-    }
-    if (VenueStep == EVenueStep::Final)
-    {
-        const int32 Gone = (1 << (VenueId + 1)) - 1;
-        if (!CollectVenueReports(Gone)) return false;
-        if (bAllVenueBuildings && Gone != AllVenueBuildings)
-        {
-            ++VenueId;
-            VenueStep = EVenueStep::Strike;
-            return false;
-        }
-        if (!MoveToVenuePose(Arena, *Pawn, VenueSpawn)) return false;
-        VenueStep = EVenueStep::Restored;
-        return true;
-    }
-    return false;
+    if (!CollectVenueReports((1<<(VenueId+1))-1)) return false;
+    if (bAllVenueBuildings && VenueId+1<10) { ++VenueId; VenueStep=EVenueStep::Strike; return false; }
+    if (!MoveToVenuePose(Arena,*Pawn,VenueSpawn)) return false;
+    VenueStep=EVenueStep::Restored;
+    return true;
 }
 
 void AIslandProbe::PlayExpeditionGame(APartyVoxelSession& Arena)
@@ -1538,7 +1446,7 @@ void AIslandProbe::PlayExpeditionGame(APartyVoxelSession& Arena)
     };
     if (Feature == TEXT("PartyReefRun"))
     {
-        if (GameAction == 0) { Stand({3,0,1}); return; }
+        if (GameAction == 0) { Stand({4,0,1},{-12.,0.,0.}); return; }
         const FVector Origin = Arena.GetActorLocation();
         const FVector Foot = Pawn->GetActorLocation()-Origin-FVector(0,0,Pawn->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
         const FCollisionQueryParams Query(SCENE_QUERY_STAT(PartyReefPassage),false,Pawn);
@@ -1585,6 +1493,17 @@ void AIslandProbe::PlayExpeditionGame(APartyVoxelSession& Arena)
         {
             const FVector Into = (Obstruction.ImpactPoint-Pawn->GetPawnViewLocation()).GetSafeNormal();
             Peer->ClientGameTool(Obstruction.ImpactPoint+Into*4.,false);
+        }
+        if (GameAction==3)
+        {
+            Peer->ClientPartySpace(false,false);
+            GameAction=2;
+        }
+        else if (bBlocked && Obstruction.ImpactPoint.Z<=Origin.Z+116. && Arena.IsGrounded(Seat) && Pawn->GetVelocity().Size2D()<20.)
+        {
+            // The floor can be lowered while the reef is carved. Step over the far lip using the player's jump.
+            Peer->ClientPartySpace(true,false);
+            GameAction=3;
         }
         Peer->ClientGameWalk(Arena.CellCenter({7,0,1}));
     }
@@ -1646,7 +1565,7 @@ void AIslandProbe::PlayExpeditionGame(APartyVoxelSession& Arena)
     else if (Feature == TEXT("PartyCrystalHunt"))
     {
         // Expose the seeded crystal from the side, then strike it through the opening.
-        if (GameAction == 0) { Stand({-9,-8,1}); return; }
+        if (GameAction == 0) { Stand({-8,-8,1},{5.,0.,0.}); return; }
         for (int32 Z=1; Z<=3; ++Z)
         {
             const FIntVector Crystal(-6,-8,Z);
@@ -1681,7 +1600,7 @@ void AIslandProbe::PlayExpeditionGame(APartyVoxelSession& Arena)
             const int32 Other = (Seat+1)%Peers.Num();
             PositionOnCell(*Pawn,{-3,Y+3,1},FVector::ZeroVector);
             auto* Rival = CastChecked<APartyVoxelPawn>(Mode->GetPlayers()[Other]->GetPawn());
-            PositionOnCell(*Rival,{-1,Y,1},FVector::ZeroVector);
+            PositionOnCell(*Rival,{0,Y,1},FVector::ZeroVector);
             FloodSealedSequence = Arena.GetAppliedEditCount();
             UE_LOG(LogTemp,Display,TEXT("ARENA_CHANNEL_SEALED owner=%d rival=%d score=%d seq=%d"),Seat,Other,Arena.Score(Seat),FloodSealedSequence);
             GameAction=2;

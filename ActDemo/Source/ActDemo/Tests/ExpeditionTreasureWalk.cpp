@@ -11,6 +11,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "UnrealClient.h"
+#include "TimerManager.h"
 
 namespace
 {
@@ -186,12 +187,20 @@ void AExpeditionWalk::TickTreasure(float DeltaSeconds)
             SetHuntStep(EHuntStep::Recall);
             return;
         }
-        Turn(*Player,(ChestTarget-Hero.GetAimOrigin()).Rotation(),DeltaSeconds);
-        if (Now-LastInput>.65)
+        if (!Hero.IsInFirstPersonView() && FVector::Dist2D(Hero.GetAimOrigin(),ChestTarget)<70.)
         {
-            // Same input event bound to E in the shipping player controller.
-            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E,IE_Pressed,1.f));
-            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E,IE_Released,0.f));
+            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Pressed,1.f));
+            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Released,0.f));
+        }
+        Turn(*Player,Hero.GetViewRotationForTarget(ChestTarget,Hero.GetActorLocation()),DeltaSeconds);
+        if (Now-LastInput>.65 && Player->GetAimedChest())
+        {
+            Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::LeftMouseButton,IE_Pressed,1.f));
+            FTimerHandle Release;
+            Player->GetWorldTimerManager().SetTimer(Release, FTimerDelegate::CreateWeakLambda(Player,[Player]()
+            {
+                Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::LeftMouseButton,IE_Released,0.f));
+            }), .15f, false);
             LastInput=Now;
         }
         return;

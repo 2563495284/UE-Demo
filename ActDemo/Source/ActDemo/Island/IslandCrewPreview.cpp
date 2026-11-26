@@ -1,10 +1,14 @@
 #include "Island/IslandHUD.h"
+#include "Island/IslandCrewPortrait.h"
 
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/RectLightComponent.h"
+#include "Engine/PostProcessVolume.h"
+#include "EngineUtils.h"
+#include "HAL/IConsoleManager.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandRoomPanel.h"
 #include "Island/IslandState.h"
@@ -33,7 +37,7 @@ namespace
         const float HorizontalFOV = FMath::RadiansToDegrees(2. * FMath::Atan(HorizontalTangent));
         const FVector Feet = Hero.GetActorLocation() - FVector::UpVector * Hero.GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
         const FVector Mid = Feet + FVector(0., 0., 86.);
-        const FVector Eye = Mid + Hero.GetActorForwardVector() * 303. - Hero.GetActorRightVector() * 86. + FVector(0., 0., 58.);
+        const FVector Eye = Mid + Hero.GetActorForwardVector() * 284. - Hero.GetActorRightVector() * 132. + FVector(0., 0., 94.);
         FRotator Look = (Mid - Eye).Rotation();
         // Aim left of the actor, keeping the lens physically in front of the face.
         Look.Yaw -= FMath::RadiansToDegrees(FMath::Atan(Menu * HorizontalTangent));
@@ -41,26 +45,54 @@ namespace
         Camera.GetCameraComponent()->SetFieldOfView(HorizontalFOV);
     }
 
-    void AddPortraitFill(ACameraActor& Camera, const AVoxelCharacter& Hero)
+}
+
+void IslandCrewPortrait::Light(ACameraActor& Camera,const AVoxelCharacter& Hero,bool bComparisonReference)
+{
+    const auto Bounce=[&](FVector Offset,FLinearColor Tint,float Lumens,float Width,float Specular)
     {
-        // Face paint otherwise falls into deep shadow at the west-facing landing.
-        auto* Fill = NewObject<URectLightComponent>(&Camera);
-        Fill->SetupAttachment(Camera.GetRootComponent());
-        Fill->SetMobility(EComponentMobility::Movable);
-        Fill->SetCastShadows(false);
-        Fill->SetIntensityUnits(ELightUnits::Lumens);
-        Fill->SetIntensity(24.f);
-        Fill->SetSpecularScale(.25f);
-        Fill->SetSourceWidth(140.f);
-        Fill->SetSourceHeight(95.f);
-        Fill->SetAttenuationRadius(440.f);
-        Fill->SetLightColor(FLinearColor(1.f,.95f,.88f));
-        Camera.AddInstanceComponent(Fill);
-        Fill->RegisterComponent();
-        const FVector Face = Hero.GetActorLocation() + FVector(0., 0., 18.);
-        const FVector Position = Face + Hero.GetActorForwardVector() * 158. - Hero.GetActorRightVector() * 52. + FVector(0., 0., 94.);
-        Fill->SetWorldLocationAndRotation(Position, (Face - Position).Rotation());
+        auto* Lamp=NewObject<URectLightComponent>(&Camera);
+        Lamp->SetupAttachment(Hero.GetRootComponent());
+        Lamp->SetMobility(EComponentMobility::Movable);
+        Lamp->SetCastShadows(false);
+        Lamp->SetIntensityUnits(ELightUnits::Lumens);
+        Lamp->SetIntensity(Lumens);
+        Lamp->SetSpecularScale(Specular);
+        Lamp->SetSourceWidth(Width);
+        Lamp->SetSourceHeight(Width*.78f);
+        Lamp->SetAttenuationRadius(430.f);
+        Lamp->SetLightColor(Tint);
+        const FVector Face(8.,0.,32.);
+        Lamp->SetRelativeLocationAndRotation(Face+Offset,(-Offset).Rotation());
+        Camera.AddInstanceComponent(Lamp);
+        Lamp->RegisterComponent();
+    };
+    if (bComparisonReference)
+    {
+        Bounce({128.,-128.,96.},{1.f,.88f,.72f},82.f,105.f,.48f);
+        Bounce({104.,151.,55.},{.70f,.85f,1.f},43.f,172.f,.19f);
+        return;
     }
+    // Retain the island's metering range. Its authored (or project-default)
+    // exposure is the base for this close view of pale canvas and peach skin.
+    const auto* DefaultBias=IConsoleManager::Get().FindConsoleVariable(TEXT("r.DefaultFeature.AutoExposure.Bias"));
+    float Bias=DefaultBias ? DefaultBias->GetFloat() : 0.f;
+    float Priority=-MAX_flt;
+    for (TActorIterator<APostProcessVolume> It(Camera.GetWorld());It;++It)
+    {
+        if (It->bEnabled && It->bUnbound && It->Priority>=Priority && It->Settings.bOverride_AutoExposureBias)
+        {
+            Bias=It->Settings.AutoExposureBias;
+            Priority=It->Priority;
+        }
+    }
+    auto& Post=Camera.GetCameraComponent()->PostProcessSettings;
+    Post.bOverride_AutoExposureBias=true;
+    Post.AutoExposureBias=Bias-.72f;
+    // The physical sun remains the broad key. Light the rim and lift the far
+    // cheek just enough for its small printed eye instead of flooding the front.
+    Bounce({43.,-169.,78.},{1.f,.84f,.68f},32.f,113.f,.47f);
+    Bounce({72.,148.,42.},{.67f,.81f,1.f},16.f,175.f,.17f);
 }
 
 bool AIslandHUD::UpdateCrewPreview(AIslandPlayerController& Player, bool bShow)
@@ -92,7 +124,7 @@ bool AIslandHUD::UpdateCrewPreview(AIslandPlayerController& Player, bool bShow)
         Lens->PostProcessSettings.bOverride_MotionBlurAmount = true;
         Lens->PostProcessSettings.MotionBlurAmount = 0.f;
         FrameCrew(*Camera, *Hero, Player, MenuFraction(*Panel));
-        AddPortraitFill(*Camera, *Hero);
+        IslandCrewPortrait::Light(*Camera,*Hero);
         if (DockCamera.IsValid()) DockCamera->SetLifeSpan(.35f);
         DockCamera = Camera;
         CameraDock = INDEX_NONE;

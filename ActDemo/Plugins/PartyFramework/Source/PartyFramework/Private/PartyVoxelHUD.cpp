@@ -1,4 +1,5 @@
 #include "PartyVoxelArena.h"
+#include "PartyPunchHUD.h"
 #include "ExpeditionText.h"
 #include "Engine/Engine.h"
 #include "Engine/Canvas.h"
@@ -100,6 +101,7 @@ void APartyVoxelPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, boo
             Label(FString::Format(EXPEDITION_TEXT("逃跑队  ·  第 {0} 队", "Runner crew  ·  Team {0}"), {RunnerTeam+1}),23*S,57*S,.91f,Ink);
         if (bRunner || HeadStart<=0.f)
         {
+            PartyPunch::DrawChargeRing(HUD,W*.5f,H*.5f,S,GetPunchChargeAlpha());
             const auto Aim = Game->GetChaseAim(*this,GetPawnViewLocation(),GetToolAimDirection());
             const bool bCanCatch = Aim == EPartyChaseAim::Runner;
             const auto MarkerColor = bCanCatch ? FLinearColor(FColor(247,174,70)) : Ink;
@@ -114,10 +116,10 @@ void APartyVoxelPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, boo
             }
             if (bCanCatch) Center(EXPEDITION_TEXT("右键  砸晕", "RMB  Catch"),H*.5f+19*S,.93f,MarkerColor);
             else if (Aim==EPartyChaseAim::Gap) Center(EXPEDITION_TEXT("右键  补墙", "RMB  Repair wall"),H*.5f+19*S,.88f,Ink);
-            else if (Aim==EPartyChaseAim::Wall) Center(EXPEDITION_TEXT("左键  拆墙", "LMB  Break wall"),H*.5f+19*S,.88f,Ink);
+            else if (Aim==EPartyChaseAim::Wall) Center(EXPEDITION_TEXT("松开左键出拳", "Release LMB to punch"),H*.5f+19*S,.88f,Ink);
         }
-        Center(bRunner ? EXPEDITION_TEXT("坚持到时间结束    左键拆墙    右键补墙", "Survive until time runs out    LMB break wall    RMB repair wall")
-            : EXPEDITION_TEXT("近身对准逃跑方，右键砸晕    左键拆墙    右键补墙", "Aim at a nearby runner and RMB to catch    LMB break wall    RMB repair wall"),H-43*S,.86f,Ink);
+        Center(bRunner ? EXPEDITION_TEXT("坚持到时间结束    左键蓄力打孔    右键补墙", "Survive until time runs out    Hold / release LMB to punch    RMB repair wall")
+            : EXPEDITION_TEXT("近身对准逃跑方，右键砸晕    左键蓄力打孔    右键补墙", "Aim at a nearby runner and RMB to catch    Hold / release LMB to punch    RMB repair wall"),H-43*S,.86f,Ink);
         return;
     }
     Label(bEnglish && !Game->EnglishTitle.IsEmpty() ? Game->EnglishTitle : Game->Title,23*S,18*S,1.25f,Ink);
@@ -156,10 +158,11 @@ void APartyVoxelPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, boo
             Seconds<=10 ? FLinearColor(1.f,.70f,.36f) : Ink,true);
         const FVector Reticle = SurfaceAimPoint.IsSet() ? HUD.Project(*SurfaceAimPoint) : FVector(W*.5f,H*.5f,0.);
         const float X=Reticle.X, Y=Reticle.Y;
+        PartyPunch::DrawChargeRing(HUD,X,Y,S,GetPunchChargeAlpha());
         HUD.DrawRect(Back,X-3*S,Y-3*S,6*S,6*S);
         HUD.DrawRect(bAimingAtVenue ? FLinearColor(1.f,.78f,.37f) : Ink,X-1.5f*S,Y-1.5f*S,3*S,3*S);
         if (bAimingAtVenue)
-            Center(EXPEDITION_TEXT("左键  拆除建筑", "LMB  Demolish structure"),Y+19*S,.88f,Ink);
+            Center(EXPEDITION_TEXT("左键  击打建筑", "LMB  Punch structure"),Y+19*S,.88f,Ink);
         const FPartyVoxelStanding* Leader=nullptr;
         for (const auto& Row : Game->GetStandings())
             if (!Leader || Row.Points>Leader->Points) Leader=&Row;
@@ -177,6 +180,6 @@ void APartyVoxelPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, boo
         Center(Result,H*.38f,1.55f,Ink);
         Center(EXPEDITION_TEXT("回到海岛揭晓宝箱", "The chest will be revealed back on the island"),H*.48f,.93f,Ink);
     }
-    else Center(EXPEDITION_TEXT("WASD 移动    V 切换视角    长按左键挖 / 拆建筑    长按右键堆土    空格跳跃", "WASD move    V change view    Hold LMB to dig / demolish    Hold RMB to pile soil    Space jump"),H-43*S,.86f,Ink);
+    else Center(EXPEDITION_TEXT("WASD 移动    V 切换视角    左键蓄力，松开出拳    长按右键堆土    空格跳跃", "WASD move    V change view    Hold LMB to charge, release to punch    Hold RMB to pile soil    Space jump"),H-43*S,.86f,Ink);
     HUD.DrawRect(Accent,13*S,15*S,3*S,31*S);
 }

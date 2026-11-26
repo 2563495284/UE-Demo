@@ -6,6 +6,7 @@
 #include "IslandRouteVoxel.generated.h"
 
 class AVoxelTerrain;
+struct FIslandLooseSamples;
 
 struct FRouteVoxelSample
 {
@@ -26,7 +27,11 @@ public:
         TFunctionRef<FRouteVoxelSample(FVector)> SampleShape);
     bool ApplyWorldCut(FVector Point, FVector OutwardNormal, double Radius = 62.);
     // Test each occupied local sample against the owner's real attachment/support.
-    bool CullUnsupported(TFunctionRef<bool(FVector)> IsLocalAnchor);
+    bool CullUnsupported(TFunctionRef<bool(FVector)> IsLocalAnchor, TArray<FIslandLooseSamples>* Loose = nullptr);
+    double SignedDistanceLocal(FVector Local) const;
+    bool SubtractVolume(TFunctionRef<double(FVector)> LocalDistance);
+    void VisitSolidSamples(TFunctionRef<void(FVector)> Visit) const;
+    bool FallingSection(const TArray<uint8>& Shape, FProcMeshSection& Out) const;
     bool IsSolidLocal(FVector Local) const;
     bool IsSolidWorld(FVector World) const;
     int32 RemainingCount() const { return SolidCount; }
@@ -50,6 +55,8 @@ private:
     int8 At(FIntVector P) const;
     FColor SurfaceColor(FVector Local) const;
     void UpdateSurface();
+    void BuildSurface(FIntVector Low, FIntVector High, TFunctionRef<int8(FIntVector)> SampleAt, FProcMeshSection& Out) const;
+    void CaptureLoose(TConstArrayView<int32> Cells, FIslandLooseSamples& Out) const;
 };
 
 USTRUCT()
@@ -70,7 +77,7 @@ public:
     AIslandRouteVoxel();
     static AIslandRouteVoxel* Spawn(UWorld& World, IslandRouteFlora::EShape Kind, FVector Location,
         int32 Yaw, int32 Variant);
-    bool Strike(const FHitResult& Hit, bool bWide = false);
+    bool Strike(const FHitResult& Hit, float RadiusScale = 1.f);
     UIslandRouteVoxelComponent* Field() const { return Voxels; }
     IslandRouteFlora::EShape GetKind() const { return static_cast<IslandRouteFlora::EShape>(State.Kind); }
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const override;

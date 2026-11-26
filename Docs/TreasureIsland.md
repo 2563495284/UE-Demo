@@ -18,7 +18,7 @@ open -n "$PWD/远征岛.app" --args '/Game/TreasureIsland/L_TreasureIsland?liste
 open -n "$PWD/远征岛.app" --args '192.168.1.42:7777' -windowed -ResX=1280 -ResY=720
 ```
 
-WASD 移动，鼠标控制镜头，空格跳，左键凿岩，右键挖脚下，Q 回填，按住 Shift 攀爬。按住 Tab 看藏宝图，靠近已露出的箱子按 E，长按 R 两秒回本队码头。角色在岛外水面下连续三秒会溺亡，一秒后回码头，已获得的队内线索和全场地形保留。结算后由房主按 Enter 重开，重新生成宝箱并恢复原始地形。
+WASD 移动，鼠标控制镜头，空格跳，左键凿岩，右键挖脚下，Q 回填，按住 Shift 攀爬。按住 Tab 看藏宝图，靠近并瞄准已露出的箱盖，单击左键，长按 R 两秒回本队码头。角色在岛外水面下连续三秒会溺亡，一秒后回码头，已获得的队内线索和全场地形保留。结算后由房主按 Enter 重开，重新生成宝箱并恢复原始地形。
 
 四个搜索圈公开。每只线索箱可被红、蓝、黄三队各开一次，精确平面坐标只下发给开过箱子的队伍。集齐才显示 A–C 与 B–D 的交点。大奖须挖露并打开，最先满足条件的队伍获胜。挖露的实体箱与地形变化对六端可见。
 
@@ -43,7 +43,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 Scripts/island_qa.py --editor --map /Game/Trea
 
 ## 假箱与派对玩法
 
-房主读 `ActDemo/Config/DefaultGame.ini` 的 `[/Script/ActDemo.IslandGameMode]`。将 `DecoyChestCount` 设为 0–24，默认四个。假箱分散在各线索箱的搜索圈内，外观与线索箱相同，按 E 打开后触发全房间派对。成功开局后该假箱消失。小玩法期间按提示用空格确认，结束后全员返回海岛。已挖地形和队内线索会保留。Mac Development 包也可以用房主启动参数 `-ini:Game:[/Script/ActDemo.IslandGameMode]:DecoyChestCount=0` 临时关闭假箱。
+房主读 `ActDemo/Config/DefaultGame.ini` 的 `[/Script/ActDemo.IslandGameMode]`。将 `DecoyChestCount` 设为 0–24，默认四个。假箱分散在各线索箱的搜索圈内，外观与线索箱相同，瞄准箱盖单击左键打开后触发全房间派对。成功开局后该假箱消失。小玩法期间按提示用空格确认，结束后全员返回海岛。已挖地形和队内线索会保留。Mac Development 包也可以用房主启动参数 `-ini:Game:[/Script/ActDemo.IslandGameMode]:DecoyChestCount=0` 临时关闭假箱。
 
 `DecoyMinigameFeature` 选择小玩法插件，默认 `PartyButtonChallenge`。每个插件在 `Plugins/GameFeatures` 中声明 `ExplicitlyLoaded` 和初始状态 `Installed`，使用与插件同名的 `UPartyMinigameFeatureData` 资源指定会话类。会话提供自己的 Pawn，输入、视角和 HUD 随该 Pawn 启停。房主与客户端各自激活插件，所有在线玩家准备好后开局，返回海岛后卸载资源。新增玩法时，将插件和资源一同打包到所有端。
 

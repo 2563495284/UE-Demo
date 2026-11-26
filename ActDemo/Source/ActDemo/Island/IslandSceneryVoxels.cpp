@@ -1,9 +1,13 @@
 #include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandMeshVoxelData.h"
 #include "Island/IslandScenerySupport.h"
+#include "Island/IslandFallingScenery.h"
+#include "Island/IslandAttachedMud.h"
 #include "Island/IslandBreakable.h"
 #include "Island/ExpeditionDock.h"
+#include "Island/ExpeditionWreckArt.h"
 #include "Island/IslandNeutralProp.h"
+#include "Island/IslandPlayerController.h"
 #include "Island/IslandWorld.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -15,6 +19,8 @@
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Voxel/VoxelTerrain.h"
+#include "Voxel/ExpeditionImpact.h"
+#include "RHIGlobals.h"
 
 namespace
 {
@@ -141,6 +147,23 @@ double UIslandMeshVoxels::CellRadius() const
     return Field ? (Field->Step*GetComponentScale()).Size()*.5 : 0.;
 }
 
+FVector UIslandMeshVoxels::CellFoot(int32 Index) const
+{
+    FVector A, B, C;
+    GetCellAxes(A, B, C);
+    return GetComponentTransform().TransformPosition(Field->Center(Index))
+        - FVector::UpVector * (FMath::Abs(A.Z) + FMath::Abs(B.Z) + FMath::Abs(C.Z));
+}
+
+bool UIslandMeshVoxels::FallingSections(TConstArrayView<uint8> Shape, TArray<FProcMeshSection>& Sections) const
+{
+    if (!Field) return false;
+    TArray<int32> Cells;
+    if (!AIslandFallingScenery::UnpackCells(Shape, Field->Filled.Num(), Cells)) return false;
+    Field->MeshSubset(Cells, Sections);
+    return true;
+}
+
 void UIslandMeshVoxels::ForEachSolid(TFunctionRef<void(int32,FVector)> Visit) const
 {
     if (!Field) return;
@@ -201,12 +224,12 @@ bool UIslandMeshVoxels::RemoveCells(TConstArrayView<int32> Ids)
     return true;
 }
 
-bool UIslandMeshVoxels::Cut(FVector World,FVector Normal,bool bWide)
+bool UIslandMeshVoxels::Cut(FVector World,FVector Normal,float RadiusScale)
 {
     if (!RemainingCount()) return false;
     const FVector Probe=World-Normal.GetSafeNormal()*1.;
-    const double Rad=bWide?90.:57.;
-    const double Depth=bWide?70.:43.;
+    const double Rad=57.*RadiusScale;
+    constexpr double Depth=43.;
     const FVector Local=GetComponentTransform().InverseTransformPosition(Probe);
     const FVector Scale=GetComponentScale().GetAbs().ComponentMax(FVector(.00001));
     const double Half=CellRadius();
@@ -406,12 +429,30 @@ namespace
         TInlineComponentArray<UIslandMeshVoxels*> Fields(&Actor);
         if(Fields.IsEmpty()) return;
         TMap<UIslandMeshVoxels*,TArray<int32>> Removed;
-        IslandScenerySupport::InspectActor(Actor,Terrain,Removed);
+        TArray<IslandScenerySupport::FCellGroup> Groups;
+        IslandScenerySupport::InspectActor(Actor,Terrain,Removed,&Groups);
         for(auto& Pair:Removed)
             if(Pair.Key->RemoveCells(Pair.Value)) AIslandVoxelEdits::Record(*Pair.Key);
+        AIslandFallingScenery::Release(Actor, Groups);
+        AIslandAttachedMud::RefreshFor(Actor);
         if(auto* Prop=Cast<AIslandNeutralProp>(&Actor)) Prop->RefreshVoxelMechanism();
         UpdateSign(Actor);
     }
+}
+
+EIslandChipSurface UIslandMeshVoxels::CellSurface(int32 Index) const
+{
+    if (!Field || !Original || !Field->CellPaint.IsValidIndex(Index) || !Field->Skin.IsValidIndex(Field->CellPaint[Index]))
+        return EIslandChipSurface::Rock;
+    const auto& Face=Field->Skin[Field->CellPaint[Index]];
+    FColor Color=Face.V[0].Color;
+    const auto* Prop=Cast<AIslandNeutralProp>(GetOwner());
+    if (Prop && Prop->GetKind()==EIslandNeutralKind::Ship)
+    {
+        FColor Alternate=FColor::Transparent;
+        return ExpeditionWreckArt::GetChipFinish(Original->GetFName(),Face.Material,Color,Alternate);
+    }
+    return ImpactFinish(*GetOwner(),*Original,Face.Material,Color);
 }
 
 void IslandSceneryVoxels::CheckFoundations(UWorld& World,const FBox& Area)
@@ -425,7 +466,7 @@ void IslandSceneryVoxels::CheckFoundations(UWorld& World,const FBox& Area)
     }
 }
 
-bool IslandSceneryVoxels::Strike(const FHitResult& Hit,bool Wide)
+bool IslandSceneryVoxels::Strike(const FHitResult& Hit,float RadiusScale)
 {
     auto* Grid=FieldFor(Hit.GetComponent());
     AActor* Owner=Grid ? Grid->GetOwner():nullptr;
@@ -435,18 +476,50 @@ bool IslandSceneryVoxels::Strike(const FHitResult& Hit,bool Wide)
     // Cutting rebuilds the collision sections and changes their face indices.
     FColor Pigment;
     const int32 Finish=Grid->GetImpactPaint(Hit,Pigment);
-    if(!Grid->Cut(Hit.ImpactPoint,Hit.ImpactNormal,Wide)) return false;
-    AIslandVoxelEdits::Record(*Grid);
+    // A wider fist can span timbers / stone sections of this structure. Select
+    // touching sections before rebuilding them; other actors keep their own hits.
+    TArray<UIslandMeshVoxels*> Struck {Grid};
+    if (RadiusScale>1.f)
+    {
+        TInlineComponentArray<UIslandMeshVoxels*> Candidates(Owner);
+        const FBox Area=FBox::BuildAABB(Hit.ImpactPoint,FVector(57.*RadiusScale+50.));
+        for (int32 I=0;I<Struck.Num();++I)
+        {
+            const FBox Touch=Struck[I]->Bounds.GetBox().ExpandBy(3.);
+            for (auto* Part:Candidates)
+                if (Part->IsVisible() && Part->RemainingCount()>0 && !Struck.Contains(Part) &&
+                    Area.Intersect(Part->Bounds.GetBox()) && Touch.Intersect(Part->Bounds.GetBox()))
+                    Struck.Add(Part);
+        }
+    }
+    bool bChanged=false;
+    for (auto* Part:Struck)
+    {
+        if (!Part->Cut(Hit.ImpactPoint,Hit.ImpactNormal,RadiusScale)) continue;
+        AIslandVoxelEdits::Record(*Part);
+        bChanged=true;
+    }
+    if (!bChanged) return false;
+    if (Grid->SourcePart())
+    {
+        FColor Alternate = FColor::Transparent;
+        const auto Surface = Wreck ? ExpeditionWreckArt::GetChipFinish(Grid->SourcePart()->GetFName(),Finish,Pigment,Alternate)
+            : ImpactFinish(*Owner,*Grid->SourcePart(),Finish,Pigment);
+        AIslandVoxelEdits::EmitChips(*Owner->GetWorld(), Hit, Surface, Pigment, Alternate);
+    }
     if(auto* Terrain=AVoxelTerrain::Find(Owner->GetWorld())) GroundActor(*Owner,*Terrain);
     UpdateSign(*Owner);
-    if (Wreck && Grid->SourcePart())
-        Prop->MulticastWreckChips(Grid->SourcePart()->GetFName(),Finish,Hit.ImpactPoint,Hit.ImpactNormal);
-    else if (Grid->SourcePart())
-    {
-        const EIslandChipSurface Surface=ImpactFinish(*Owner,*Grid->SourcePart(),Finish,Pigment);
-        AIslandVoxelEdits::EmitChips(*Owner->GetWorld(),Hit,Surface,Pigment);
-    }
     return true;
+}
+
+void IslandSceneryVoxels::PlayMechanismStrike(const FHitResult& Hit)
+{
+    auto* Grid = FieldFor(Hit.GetComponent());
+    if (!Grid || !Grid->SourcePart()) return;
+    FColor Color;
+    const int32 Finish = Grid->GetImpactPaint(Hit, Color);
+    const auto Surface = ImpactFinish(*Grid->GetOwner(), *Grid->SourcePart(), Finish, Color);
+    AIslandVoxelEdits::EmitChips(*Grid->GetWorld(), Hit, Surface, Color);
 }
 
 AIslandVoxelEdits::AIslandVoxelEdits()
@@ -462,36 +535,64 @@ AIslandVoxelEdits::AIslandVoxelEdits()
     ChipFinish=Finish.Object;
 }
 
-void AIslandVoxelEdits::EmitChips(UWorld& World,const FHitResult& Hit,EIslandChipSurface Surface,FColor Color)
+void AIslandPlayerController::ForSceneryViewers(UWorld& World, TFunctionRef<void(AIslandPlayerController&)> Visit)
 {
-    if (auto* Journal=Edits(&World); Journal && Journal->HasAuthority())
-        Journal->MulticastChips(Hit.ImpactPoint,Hit.ImpactNormal,Surface,Color);
+    if (World.GetNetMode() == NM_Client) return;
+    // A connected player's own channel remains addressable during a frame stall, even
+    // when the net driver temporarily clears the replication view used for multicasts.
+    for (auto It = World.GetPlayerControllerIterator(); It; ++It)
+        if (auto* Viewer = Cast<AIslandPlayerController>(It->Get())) Visit(*Viewer);
 }
 
-void AIslandVoxelEdits::MulticastChips_Implementation(FVector_NetQuantize Point,FVector_NetQuantizeNormal Normal,
-    EIslandChipSurface Surface,FColor Color)
+void AIslandVoxelEdits::EmitChips(UWorld& World,const FHitResult& Hit,EIslandChipSurface Surface,FColor Color,FColor Alternate)
+{
+    const FVector TowardTool = (Hit.TraceStart - Hit.ImpactPoint).GetSafeNormal();
+    FVector Normal = Hit.ImpactNormal.GetSafeNormal(UE_SMALL_NUMBER, TowardTool);
+    if (FVector::DotProduct(TowardTool, Normal) < 0.) Normal = -Normal;
+    AIslandPlayerController::ForSceneryViewers(World,[&](AIslandPlayerController& Viewer)
+    {
+        Viewer.ClientSceneryChips(Hit.ImpactPoint,Normal,Surface,Color,Alternate);
+    });
+}
+
+void AIslandPlayerController::ClientSceneryChips_Implementation(FVector_NetQuantize Point,FVector_NetQuantizeNormal Normal,
+    EIslandChipSurface Surface,FColor Color,FColor Alternate)
+{
+    GetDefault<AIslandVoxelEdits>()->PlayChips(*this,Point,Normal,Surface,Color,Alternate);
+}
+
+void AIslandVoxelEdits::PlayChips(AIslandPlayerController& Viewer,FVector Point,FVector Normal,
+    EIslandChipSurface Surface,FColor Color,FColor Alternate) const
 {
     if (FParse::Param(FCommandLine::Get(),TEXT("NeutralDemolitionQA")))
         UE_LOG(LogTemp, Display, TEXT("SCENERY_CHIPS_RECEIVED surface=%d tint=%s"), int32(Surface), *Color.ToHex());
-    if (GetNetMode()==NM_DedicatedServer || !FApp::CanEverRender() || !ChipFinish) return;
+    if (!Viewer.IsLocalController()) return;
     UStaticMesh* Shape=StoneChip;
-    FVector Scale(.105,.082,.115);
-    float Roughness=.87f,Metallic=0.f;
+    FVector Scale(.13,.10,.14);
+    float Roughness=.87f,Metallic=0.f,Volume=.76f,Pitch=.91f,Shake=.47f;
     switch (Surface)
     {
-        case EIslandChipSurface::Timber: Shape=Splinter; Scale={.043,.035,.18}; break;
+        case EIslandChipSurface::Timber: Shape=Splinter; Scale={.074,.055,.235}; Pitch=.78f; Shake=.40f; break;
         case EIslandChipSurface::Rock: break;
-        case EIslandChipSurface::Metal: Shape=Splinter; Scale={.070,.025,.108}; Roughness=.40f; Metallic=.65f; break;
-        case EIslandChipSurface::Canvas: Shape=Scrap; Scale={.016,.066,.13}; Roughness=.96f; break;
-        case EIslandChipSurface::Sand: Scale={.065,.060,.073}; Roughness=.96f; break;
-        case EIslandChipSurface::Leaf: Shape=Splinter; Scale={.085,.022,.15}; Roughness=.64f; break;
+        case EIslandChipSurface::Metal: Shape=Splinter; Scale={.115,.054,.17}; Roughness=.40f; Metallic=.65f; Pitch=1.26f; break;
+        case EIslandChipSurface::Canvas: Shape=Scrap; Scale={.040,.13,.20}; Roughness=.96f; Volume=.27f; Pitch=.76f; Shake=.17f; break;
+        case EIslandChipSurface::Sand: Scale={.095,.088,.11}; Roughness=.96f; Volume=.49f; Pitch=.72f; Shake=.26f; break;
+        case EIslandChipSurface::Leaf: Shape=Scrap; Scale={.035,.10,.21}; Roughness=.64f; Volume=.25f; Pitch=1.14f; Shake=.15f; break;
     }
-    if (!Shape) return;
-    auto* Paint=UMaterialInstanceDynamic::Create(ChipFinish,this);
-    Paint->SetVectorParameterValue(TEXT("Color"),FLinearColor(Color));
-    Paint->SetScalarParameterValue(TEXT("Roughness"),Roughness);
-    Paint->SetScalarParameterValue(TEXT("Metallic"),Metallic);
-    AIslandSceneryDamage::PlayDebris(*GetWorld(),Point,Normal,Paint,Shape,Scale);
+    AExpeditionImpactCamera::PlayAt(*Viewer.GetWorld(),Point,Volume,Pitch,Shake);
+    if (!FApp::CanEverRender() || GUsingNullRHI) return;
+    const auto MakePaint = [&](FColor Tint) -> UMaterialInstanceDynamic*
+    {
+        if (!ChipFinish) return nullptr;
+        auto* Paint = UMaterialInstanceDynamic::Create(ChipFinish,&Viewer);
+        Paint->SetVectorParameterValue(TEXT("Color"), FLinearColor(Tint));
+        Paint->SetScalarParameterValue(TEXT("Roughness"), Roughness);
+        Paint->SetScalarParameterValue(TEXT("Metallic"), Metallic);
+        return Paint;
+    };
+    const bool bLight = Surface == EIslandChipSurface::Leaf || Surface == EIslandChipSurface::Canvas;
+    AIslandSceneryDamage::PlayDebris(*Viewer.GetWorld(),Point,Normal,MakePaint(Color),Shape,Scale,
+        Alternate.A ? MakePaint(Alternate) : nullptr,bLight);
 }
 
 void AIslandVoxelEdits::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

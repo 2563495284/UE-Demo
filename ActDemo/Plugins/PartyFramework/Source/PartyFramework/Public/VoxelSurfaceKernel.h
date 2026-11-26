@@ -41,15 +41,20 @@ namespace VoxelSurfaceKernel
         return Low;
     }
 
+    inline int32 ToolDistanceWithRadius(FIntVector Local,FIntVector N,int32 RadiusCm,int32 DepthCm=40)
+    {
+        const int32 Along=(Local.X*N.X+Local.Y*N.Y+Local.Z*N.Z)/1000;
+        const int32 Radial=IntegerSqrt(FMath::Max(0,(Local.X*Local.X+Local.Y*Local.Y+Local.Z*Local.Z)-Along*Along));
+        return FMath::Max3(Radial-RadiusCm,-DepthCm-Along,Along-DepthCm);
+    }
+
     inline int32 ToolDistance(FIntVector Local, FIntVector N, bool bFill, int32 FootprintScale = 1)
     {
         const int32 Along = (Local.X * N.X + Local.Y * N.Y + Local.Z * N.Z) / 1000;
         int32 Distance;
         if (!bFill)
         {
-            const int32 Radius = IntegerSqrt(FMath::Max(0, (Local.X*Local.X + Local.Y*Local.Y + Local.Z*Local.Z) - Along * Along));
-            // Flat-bottomed scoop normal to the contacted floor, wall or ceiling.
-            Distance = FMath::Max3(Radius - 62 * FootprintScale, -40 - Along, Along - 40);
+            Distance = ToolDistanceWithRadius(Local,N,62*FootprintScale);
         }
         else
         {

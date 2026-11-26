@@ -16,6 +16,8 @@ public:
     AIslandChest();
     void SeatAtReveal(const AVoxelTerrain& Terrain);
     double GetInteractionDistanceSquared(FVector Origin) const;
+    FVector GetDiscoveryPoint() const { return GetActorLocation() + FVector(0., 0., DiscoveryRise); }
+    bool HasDiscoveryTarget() const;
     void SetPrize(bool bValue);
     bool IsPrize() const { return bPrize; }
     void MarkChallengeResolved();

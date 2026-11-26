@@ -7,8 +7,10 @@
 #include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
 #include "Island/IslandState.h"
+#include "Island/IslandNeutralProp.h"
 #include "Island/IslandClientSettings.h"
 #include "PartyVoxelArena.h"
+#include "PartyPunch.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "TimerManager.h"
@@ -60,6 +62,7 @@ void AVoxelPlayerController::SetVoxelInputEnabled(bool bEnabled)
     if (!bEnabled)
     {
         if (IsLocalController()) ReleaseHeldExpeditionInputs();
+        else if (HasAuthority()) ClearServerPunch();
         StopRecover();
         if (IsLocalController()) StopClimb();
         GetWorldTimerManager().ClearTimer(RecoverTimer);
@@ -101,12 +104,7 @@ void AVoxelPlayerController::SetupInputComponent()
     Super::SetupInputComponent();
 #if !UE_BUILD_SHIPPING
     // Drive the same controller actions from the test probe without desktop mouse input.
-    if (FParse::Param(FCommandLine::Get(), TEXT("VoxelQA"))
-        || (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")) && !FParse::Param(FCommandLine::Get(), TEXT("IslandPartyQA"))
-            && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA"))
-            && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMudQA"))
-            && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionGamesQA"))
-            && !FParse::Param(FCommandLine::Get(), TEXT("ExpeditionNeutralQA"))))
+    if (FParse::Param(FCommandLine::Get(), TEXT("VoxelQA")))
     {
         return;
     }
@@ -125,7 +123,7 @@ void AVoxelPlayerController::SetupInputComponent()
     Input->BindAction(InputConfig->Dig, ETriggerEvent::Started, this, &AVoxelPlayerController::Punch);
     Input->BindAction(InputConfig->SecondaryTool, ETriggerEvent::Started, this, &AVoxelPlayerController::DigDown);
     Input->BindAction(InputConfig->Dig, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopDig);
-    Input->BindAction(InputConfig->Dig, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopDig);
+    Input->BindAction(InputConfig->Dig, ETriggerEvent::Canceled, this, &AVoxelPlayerController::CancelPunchCharge);
     Input->BindAction(InputConfig->SecondaryTool, ETriggerEvent::Completed, this, &AVoxelPlayerController::StopThrow);
     Input->BindAction(InputConfig->SecondaryTool, ETriggerEvent::Canceled, this, &AVoxelPlayerController::StopThrow);
     Input->BindAction(InputConfig->Fill, ETriggerEvent::Started, this, &AVoxelPlayerController::Fill);
@@ -144,7 +142,7 @@ void AVoxelPlayerController::PlayerTick(float DeltaTime)
     {
         return;
     }
-    if (bPlaying && IsVoxelInputEnabled() && (bDigHeld || bThrowHeld))
+    if (bPlaying && IsVoxelInputEnabled() && bThrowHeld)
         SendHeldExpeditionAim();
     if (!Terrain.IsValid())
     {
@@ -235,10 +233,82 @@ void AVoxelPlayerController::StopThrow() { SetExpeditionThrowHeld(false); }
 void AVoxelPlayerController::SetExpeditionDigHeld(bool bHeld)
 {
     if (bDigHeld == bHeld) return;
-    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !GetHero())) return;
+    auto* Hero = GetHero();
+    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !Hero || Hero->IsMudStunned())) return;
     bDigHeld = bHeld;
-    if (bHeld) DispatchExpeditionAction(EExpeditionAction::Dig, true, GetExcavationAim(*GetHero()));
-    else ServerReleaseExpeditionAction(EExpeditionAction::Dig);
+    if (Hero) Hero->SetPunchChargePresentation(bHeld);
+    if (bHeld)
+    {
+        LocalPunchStarted = FPlatformTime::Seconds();
+        DispatchExpeditionAction(EExpeditionAction::Dig, true, GetExcavationAim(*Hero));
+    }
+    else
+    {
+        const bool bCanPunch = Hero && bPlaying && IsVoxelInputEnabled() && !Hero->IsMudStunned();
+        ServerFinishPunch(bCanPunch,bCanPunch ? GetExcavationAim(*Hero) : FVector::ForwardVector,float(FPlatformTime::Seconds()-LocalPunchStarted));
+    }
+}
+
+float AVoxelPlayerController::GetPunchChargeAlpha() const
+{
+    if (!bDigHeld) return 0.f;
+    return PartyPunch::Alpha(PartyPunch::Quantize(FPlatformTime::Seconds()-LocalPunchStarted));
+}
+
+void AVoxelPlayerController::CancelPunchCharge()
+{
+    if (bDigHeld)
+    {
+        bDigHeld = false;
+        if (auto* Hero = GetHero()) Hero->SetPunchChargePresentation(false);
+        ServerFinishPunch(false,FVector::ForwardVector,0.f);
+    }
+    if (HasAuthority()) ClearServerPunch();
+}
+
+void AVoxelPlayerController::FlushPressedKeys()
+{
+    CancelPunchCharge();
+    if (auto* ArenaPawn=Cast<APartyVoxelPawn>(GetPawn())) ArenaPawn->CancelPunchInput();
+    Super::FlushPressedKeys();
+}
+
+void AVoxelPlayerController::SetPawn(APawn* InPawn)
+{
+    if (InPawn != GetPawn()) CancelPunchCharge();
+    Super::SetPawn(InPawn);
+}
+
+void AVoxelPlayerController::ClearServerPunch()
+{
+    if (!bServerDigHeld) return;
+    bServerDigHeld = false;
+    if (auto* Hero = GetHero())
+    {
+        Hero->SetPunchChargePresentation(false);
+        const FGameplayTagContainer Tags(ExpeditionAbilities::ActionTag(EExpeditionAction::Dig));
+        Hero->GetAbilitySystemComponent()->CancelAbilities(&Tags);
+    }
+}
+
+void AVoxelPlayerController::ServerFinishPunch_Implementation(bool bStrike,FVector_NetQuantizeNormal Aim,float ReportedHoldSeconds)
+{
+    if (!bServerDigHeld) return;
+    const double Held = FPlatformTime::Seconds()-ServerPunchStarted;
+    ClearServerPunch();
+    auto* Mode = GetWorld()->GetAuthGameMode<AVoxelGameMode>();
+    auto* Hero = GetHero();
+    if (!bStrike || !Hero || !Mode || !Mode->CanPlayerAct(*this) || Hero->IsMudStunned()
+        || Aim.ContainsNaN() || Aim.IsNearlyZero()) return;
+    DigAim = Aim.GetSafeNormal();
+    const float Ping=PlayerState && !IsLocalController() ? PlayerState->GetPingInMilliseconds() : -1.f;
+    TGuardValue<uint8> Strength(ReleasedPunchPower,PartyPunch::ResolvePower(Held,ReportedHoldSeconds,Ping));
+    TGuardValue<bool> FromPress(bResolvingPunchRelease,true);
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_PUNCH_RELEASE seconds=%.3f power=%u client_seconds=%.3f ping_ms=%.1f"),Held,ReleasedPunchPower,ReportedHoldSeconds,Ping);
+#endif
+    TriggerExpeditionEvent(EExpeditionAction::Dig,false);
 }
 
 void AVoxelPlayerController::SetExpeditionThrowHeld(bool bHeld)
@@ -252,7 +322,7 @@ void AVoxelPlayerController::SetExpeditionThrowHeld(bool bHeld)
 
 void AVoxelPlayerController::ReleaseHeldExpeditionInputs()
 {
-    SetExpeditionDigHeld(false);
+    CancelPunchCharge();
     SetExpeditionThrowHeld(false);
 }
 
@@ -278,7 +348,9 @@ FVector AVoxelPlayerController::GetExcavationAim(const AVoxelCharacter& Hero) co
     const FVector End = CameraLocation + CameraRotation.Vector() * 1000.0;
     FCollisionQueryParams Params(SCENE_QUERY_STAT(VoxelCrosshair), false, &Hero);
     FHitResult Hit;
-    const FVector Target = GetWorld()->LineTraceSingleByChannel(Hit, CameraLocation, End, ECC_Visibility, Params) ? Hit.ImpactPoint : End;
+    const bool bHit = UsesExpeditionAbilities() ? AIslandNeutralProp::TraceShovel(*GetWorld(),Hit,CameraLocation,End,Params)
+        : GetWorld()->LineTraceSingleByChannel(Hit, CameraLocation, End, ECC_Visibility, Params);
+    const FVector Target = bHit ? Hit.ImpactPoint : End;
     return (Target - Hero.GetAimOrigin()).GetSafeNormal();
 }
 
@@ -301,7 +373,7 @@ FVector AVoxelPlayerController::GetExpeditionThrowAim(const AVoxelCharacter& Her
     const FVector Far = Eye + View.Vector() * 1400.;
     FHitResult WorldHit;
     const FCollisionQueryParams Params(SCENE_QUERY_STAT(ExpeditionThrowCrosshair), false, &Hero);
-    FVector Target = GetWorld()->LineTraceSingleByChannel(WorldHit, Eye, Far, ECC_Visibility, Params) ? WorldHit.ImpactPoint : Far;
+    FVector Target = AIslandNeutralProp::TraceShovel(*GetWorld(),WorldHit,Eye,Far,Params) ? WorldHit.ImpactPoint : Far;
     // Pawn visibility deliberately ignores other players so chest traces stay clear.
     // Intersect the actual capsules separately, clipped by the first scene obstruction.
     for (TActorIterator<AVoxelCharacter> It(GetWorld()); It; ++It)
@@ -336,14 +408,12 @@ void AVoxelPlayerController::SendHeldExpeditionAim()
     auto* Hero = GetHero();
     if (!Hero || Now < NextAimUpdate) return;
     NextAimUpdate = Now + .05;
-    if (bDigHeld) ServerUpdateExpeditionAim(EExpeditionAction::Dig, GetExcavationAim(*Hero));
     if (bThrowHeld) ServerUpdateExpeditionAim(EExpeditionAction::Throw, GetExpeditionThrowAim(*Hero));
 }
 
 void AVoxelPlayerController::ServerUpdateExpeditionAim_Implementation(EExpeditionAction Action, FVector_NetQuantizeNormal Aim)
 {
     if (Aim.ContainsNaN() || Aim.IsNearlyZero()) return;
-    if (Action == EExpeditionAction::Dig && bServerDigHeld) DigAim = Aim.GetSafeNormal();
     if (Action == EExpeditionAction::Throw && bServerThrowHeld) ThrowAim = Aim.GetSafeNormal();
 }
 
@@ -351,17 +421,29 @@ void AVoxelPlayerController::ServerExpeditionAction_Implementation(EExpeditionAc
 {
     auto* Hero = GetHero();
     const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
-    if (!Hero || !Round || !Round->bRoomLobby || Round->Phase != EIslandPhase::Hunting || Action > EExpeditionAction::Recall) return;
+    if (!Hero || !Round || !Round->bRoomLobby || Round->Phase != EIslandPhase::Hunting || Action > EExpeditionAction::Recall
+        || Action == EExpeditionAction::Interact) return;
     if (Action == EExpeditionAction::Dig || Action == EExpeditionAction::Throw)
     {
         if (Aim.ContainsNaN() || Aim.IsNearlyZero()) return;
-        if (Action == EExpeditionAction::Dig) { DigAim = Aim.GetSafeNormal(); if (bHeld) bServerDigHeld = true; }
+        if (Action == EExpeditionAction::Dig)
+        {
+            auto* Mode = GetWorld()->GetAuthGameMode<AVoxelGameMode>();
+            if (bServerDigHeld || !Mode || !Mode->CanPlayerAct(*this) || Hero->IsMudStunned()) return;
+            DigAim = Aim.GetSafeNormal();
+            if (bHeld)
+            {
+                bServerDigHeld = true;
+                ServerPunchStarted = FPlatformTime::Seconds();
+                Hero->SetPunchChargePresentation(true);
+            }
+        }
         else { ThrowAim = Aim.GetSafeNormal(); if (bHeld) bServerThrowHeld = true; }
     }
     if (Action != EExpeditionAction::Jump) TriggerExpeditionEvent(Action, bHeld);
 }
 
-void AVoxelPlayerController::TriggerExpeditionEvent(EExpeditionAction Action, bool bHeld)
+void AVoxelPlayerController::TriggerExpeditionEvent(EExpeditionAction Action, bool bHeld, AActor* Target)
 {
     auto* Hero = GetHero();
     if (!Hero) return;
@@ -369,7 +451,7 @@ void AVoxelPlayerController::TriggerExpeditionEvent(EExpeditionAction Action, bo
     FGameplayEventData Data;
     Data.EventTag = ExpeditionAbilities::ActionTag(Action);
     Data.Instigator = Hero;
-    Data.Target = Hero;
+    Data.Target = Target ? Target : Hero;
     Data.EventMagnitude = bHeld ? 1.f : 0.f;
     Hero->GetAbilitySystemComponent()->HandleGameplayEvent(Data.EventTag, &Data);
 }
@@ -377,7 +459,7 @@ void AVoxelPlayerController::TriggerExpeditionEvent(EExpeditionAction Action, bo
 void AVoxelPlayerController::ServerReleaseExpeditionAction_Implementation(EExpeditionAction Action)
 {
     if (Action != EExpeditionAction::Dig && Action != EExpeditionAction::Throw && Action != EExpeditionAction::Recall) return;
-    if (Action == EExpeditionAction::Dig) bServerDigHeld = false;
+    if (Action == EExpeditionAction::Dig) { ClearServerPunch(); return; }
     if (Action == EExpeditionAction::Throw) bServerThrowHeld = false;
     if (auto* Hero = GetHero())
     {
@@ -388,10 +470,13 @@ void AVoxelPlayerController::ServerReleaseExpeditionAction_Implementation(EExped
 
 void AVoxelPlayerController::OnMudStunChanged(bool bStunned)
 {
-    if (bStunned) RecoverStartedAt = -1.;
+    if (bStunned)
+    {
+        RecoverStartedAt = -1.;
+        CancelPunchCharge();
+    }
     if (!bStunned && HasAuthority() && UsesExpeditionAbilities())
     {
-        if (bServerDigHeld) TriggerExpeditionEvent(EExpeditionAction::Dig, true);
         if (bServerThrowHeld) TriggerExpeditionEvent(EExpeditionAction::Throw, true);
     }
 }

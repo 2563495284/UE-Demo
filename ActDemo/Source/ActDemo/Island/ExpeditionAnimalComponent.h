@@ -1,12 +1,15 @@
 #pragma once
 
 #include "Components/ActorComponent.h"
+#include "PartyCrewMotion.h"
 #include "ExpeditionAnimalComponent.generated.h"
 
 class AVoxelCharacter;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class USceneComponent;
+class UPartyCrewRig;
+class USkeletalMesh;
 class UStaticMesh;
 class UStaticMeshComponent;
 
@@ -20,11 +23,15 @@ public:
     void TickComponent(float Delta, ELevelTick TickType, FActorComponentTickFunction* Tick) override;
     // Pig, monkey, fox and calf share the same origin at their feet.
     UStaticMesh* GetCharacterMesh(int32 ModelIndex) const;
-    void PlayDig();
+    USkeletalMesh* GetCharacterRig(int32 ModelIndex) const;
+    UStaticMesh* GetFirstPersonFist(int32 ModelIndex) const;
+    void SetPunchCharge(bool bHeld,float HeldSeconds=0.f);
+    void PlayPunch(float Strength);
     void PlayThrow();
     void SetMarks(int32 Count);
 #if !UE_BUILD_SHIPPING
     bool ShowsOutfit(bool bDisguised) const;
+    const FPartyCrewPose& GetVisiblePose() const { return LastPose; }
 #endif
 private:
     void Build();
@@ -39,6 +46,9 @@ private:
     UPROPERTY() TObjectPtr<USceneComponent> Body;
     UPROPERTY() TObjectPtr<USceneComponent> AnimalFeatures;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> Sculpture;
+    UPROPERTY() TArray<TObjectPtr<USkeletalMesh>> Rigs;
+    UPROPERTY() TArray<TObjectPtr<UStaticMesh>> Fists;
+    UPROPERTY() TObjectPtr<UPartyCrewRig> Rig;
     int32 DisplayedModel = INDEX_NONE;
     UPROPERTY() TObjectPtr<USceneComponent> FogSuit;
     bool bFogged = false;
@@ -51,6 +61,7 @@ private:
     UPROPERTY() TMap<uint32,TObjectPtr<UMaterialInstanceDynamic>> Paints;
     int32 Team = INDEX_NONE;
     int32 MudSpots = 0;
-    bool bThrow = false;
-    float Swing = 0.f, MarkSeconds = 0.f, Stride = 0.f;
+    FPartyCrewMotion Motion;
+    FPartyCrewPose LastPose;
+    float MarkSeconds = 0.f;
 };

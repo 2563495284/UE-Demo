@@ -6,6 +6,7 @@
 #include "IslandProbe.generated.h"
 
 class AIslandGameMode;
+class AIslandChest;
 class AIslandNeutralProp;
 class AIslandPlayerController;
 
@@ -23,6 +24,8 @@ public:
 
     UFUNCTION(Client, Reliable) void ClientInspect(int32 Epoch, bool bDigest);
     UFUNCTION(Client, Reliable) void ClientOpenChest();
+    UFUNCTION(Client, Reliable) void ClientWatchHeldLid();
+    UFUNCTION(Server, Reliable) void ServerHeldLidObserved();
     UFUNCTION(Client, Reliable) void ClientJoinCrew(int32 Team, bool bReady);
     UFUNCTION(Client, Reliable) void ClientCharacterInput(int32 Model, int32 Team, int32 Ready, bool bModelLast = false);
     UFUNCTION(Client, Reliable) void ClientCharacterInspect(int32 Stage, EIslandPhase Phase, FIntVector Host, FIntVector Guest, int32 Members);
@@ -41,8 +44,11 @@ public:
     UFUNCTION(Client, Reliable) void ClientFieldRally();
     UFUNCTION(Client, Reliable) void ClientNeutralInspect(int32 Stage);
     UFUNCTION(Client, Reliable) void ClientSceneryInspect(int32 Stage, AActor* Subject, FName Part, FVector Eye, FVector Aim);
+    UFUNCTION(Client, Reliable) void ClientSceneryCamera(FName Clip, FVector View, FVector Focus, bool bUsePlayer);
+    UFUNCTION(Client, Reliable) void ClientSceneryRay(int32 Stage, FVector From, FVector To, AActor* Ignore, bool bMud);
     UFUNCTION(Server, Reliable) void ServerNeutralReport(int32 Stage, const FString& Digest);
     UFUNCTION(Client, Reliable) void ClientNeutralInput(uint8 Action, FVector Target);
+    static constexpr uint8 NeutralJumpButton = 4;
     UFUNCTION(Client, Reliable) void ClientWalkToDig(FVector Target);
     UFUNCTION(Client, Reliable) void ClientInspectDig(FVector OriginalFloor, FVector ReferenceFloor, uint32 Sequence);
     UFUNCTION(Server, Reliable) void ServerReportDig(uint32 Sequence, uint32 Checksum, int32 Drop, int32 ReferenceDelta);
@@ -50,14 +56,17 @@ public:
     UFUNCTION(Client, Reliable) void ClientInspectArenaView(int32 Round, FName Feature);
     UFUNCTION(Server, Reliable) void ServerArenaViewReady(int32 Round);
     int32 ReadyArenaViewRound = 0;
+    UFUNCTION(Client, Reliable) void ClientTryArenaPunch(int32 Round, int32 Trial, FVector Target);
+    UFUNCTION(Server, Reliable) void ServerTriedArenaPunch(int32 Round, int32 Trial);
+    int32 TriedPunchRound = 0, TriedPunchTrial = INDEX_NONE;
     UFUNCTION(Client, Reliable) void ClientSampleArenaTerrain(int32 Round, FName Feature, int32 Stage, FVector Surface, int32 Sequence);
     UFUNCTION(Server, Reliable) void ServerSampledArenaTerrain(int32 Round, int32 Stage);
     int32 SampledTerrainRound = 0, SampledTerrainStage = INDEX_NONE;
-    UFUNCTION(Client, Reliable) void ClientGameTool(FVector Target, bool bPlace);
+    UFUNCTION(Client, Reliable) void ClientGameTool(FVector Target, bool bPlace,float HoldSeconds=.12f);
     UFUNCTION(Client, Reliable) void ClientCheckMaze(int32 Round, int32 Stage, FVector Midpoint, FVector Normal);
     UFUNCTION(Server, Reliable) void ServerCheckedMaze(int32 Round, int32 Stage);
     int32 MazeObservedRound = 0, MazeObservedStage = INDEX_NONE;
-    UFUNCTION(Client, Reliable) void ClientInspectVenue(int32 Round, int32 ExpectedGone, int32 ExpectedParts);
+    UFUNCTION(Client, Reliable) void ClientInspectVenue(int32 Round, int32 ExpectedGone, int32 ExpectedParts,uint32 Digest);
     UFUNCTION(Server, Reliable) void ServerVenueReport(int32 Round, int32 Gone, int32 Pieces);
     UFUNCTION(Client, Reliable) void ClientGameWalk(FVector Destination);
     UFUNCTION(Client, Reliable) void ClientGameReceipt(int32 Round, bool bVerifyRepeatedClaim = false);
@@ -75,8 +84,13 @@ public:
         FVector Target, FVector2D SpentChest, uint32 Sequence, uint32 Checksum, const TArray<FIntVector>& Sails);
     UFUNCTION(Server, Reliable) void ServerObservedDecoyWorld(int32 Round, int32 Stage);
     int32 DecoyObservedRound = 0, DecoyObservedStage = INDEX_NONE;
+    bool bHeldLidObserved = false;
 
 private:
+    FName SceneryClip;
+    double SceneryClipStarted = 0., NextSceneryFrame = 0.;
+    TWeakObjectPtr<class ACameraActor> SceneryCamera;
+    void CaptureSceneryFrame();
     int32 StressStage = 0;
     double NextRequestAt = 0.0;
     double ObserveJumpUntil = 0.0;
@@ -88,6 +102,12 @@ private:
     void TickGameTool(AIslandPlayerController& Player);
     TOptional<FVector> GameToolTarget;
     bool bGameToolPlaces = false;
+    float GameToolHoldSeconds=.12f;
+    double AimAtChestUntil = 0.;
+    uint8 AimedLidFrames = 0;
+    bool bWatchHeldLid = false;
+    double HeldLidSince = -1.;
+    uint64 ReleaseChestClickFrame = 0;
     FKey HeldArenaKey;
     double ReleaseArenaKeyAt = 0.;
     int32 TerrainSampleRound = 0, TerrainSampleStage = INDEX_NONE, TerrainSampleSequence = 0;
@@ -97,6 +117,11 @@ private:
     bool bTerrainOriginallyFirst = false, bTerrainPhotoRequested = false;
     FString TerrainPhotoFile;
     void TickArenaTerrainSample(AIslandPlayerController& Player);
+    void TickArenaPunchInput(AIslandPlayerController& Player);
+    int32 ArenaPunchRound = 0, ArenaPunchTrial = INDEX_NONE;
+    double ArenaPunchPressedAt = -1.;
+    FVector ArenaPunchTarget = FVector::ZeroVector;
+    bool bPunchViewWasFirst = false;
     void TickArenaViews(AIslandPlayerController& Player);
     enum class EViewStep : uint8 { Idle, Photo, LookAtFloor, Aim, Toggle, Return };
     EViewStep ViewStep = EViewStep::Idle;
@@ -130,6 +155,7 @@ class AIslandProbe : public AActor
 
 public:
     AIslandProbe();
+    static AIslandChest* PrepareFilmPrize(AIslandGameMode&, AIslandPlayerController&, FVector Center);
     static bool TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FVector& Target, bool& Exposed);
     void Tick(float DeltaSeconds) override;
     void Record(int32 Seat, int32 Epoch, const FIslandClues& Clues, int32 Boxes, int32 Winner, uint32 Sequence, const FString& Digest);
@@ -162,8 +188,18 @@ private:
     int32 GameWinnerMask = 0;
     FVector MazeWallCenter = FVector::ZeroVector, MazeWallNormal = FVector::ZeroVector;
     double MazeBlockedAt = 0.;
+    int32 MazeLastEdit=0;
+    UPROPERTY() TObjectPtr<class ACameraActor> MazeProofCamera;
+    uint64 MazePhotoFrame=0;
+    int32 MazePhotoStage=INDEX_NONE;
+    bool CaptureMazeStage(class APartyVoxelSession& Arena,int32 Phase,const TCHAR* Label);
     bool TickArenaTerrain(class APartyVoxelSession& Arena);
+    bool TickArenaPunchTrials(APartyVoxelSession& Arena);
+    bool FindArenaPunchSite(APartyVoxelSession& Arena, class APartyVoxelPawn& Pawn, FVector& Point);
     FVector TerrainSamplePoint = FVector::ZeroVector;
+    TArray<FVector> PunchSites;
+    FTransform PunchOriginalPose;
+    bool bPunchTrialSent = false;
     int32 TerrainStage = 0, TerrainInputSequence = INDEX_NONE;
     bool bTerrainSampleRequested = false;
     TMap<int32,FTransform> TerrainObserverPoses;
@@ -194,7 +230,6 @@ private:
     TSet<int32> UnsafeReturnSeats;
     void SnapshotDecoyWorld();
     bool TickDecoyWorld(EIslandDecoyEvent Event, double Now);
-    void AimDecoyRope(AIslandNeutralProp& Sail);
     uint32 DecoyTerrainSequence = 0;
     int32 DecoyWorldMask = 0, DecoyWorldStage = 0;
     double DecoyWorldInputAt = 0.;
@@ -222,7 +257,15 @@ private:
     void StartFieldCheck(double Now);
     void StartNeutralCheck(double Now);
     void TickNeutralCheck(double Now);
+    void TickWindChain(AIslandNeutralProp& Tower, double Now);
+    bool bWindChainDone = false;
     void TickSceneryCheck(double Now);
+    void TickSceneryReplay(double Now);
+    TWeakObjectPtr<class AExpeditionLandmark> ReplayArch;
+    TWeakObjectPtr<class UIslandMeshVoxels> WestPier, EastPier, ArchBeam;
+    int32 ReplayHits = 0;
+    FVector ReplayTarget = FVector::ZeroVector;
+    FVector ReplayRayStart = FVector::ZeroVector, ReplayRayEnd = FVector::ZeroVector;
     int32 SceneryCase = 0, SceneryHits = 0, SceneryCuts = 0;
     int32 SceneryInitial = 0, SceneryAttempts = 0;
     TWeakObjectPtr<class UProceduralMeshComponent> SceneryField;
@@ -237,7 +280,6 @@ private:
     void NeutralWalk(int32 Seat, const FVector& Start, const FVector& End);
     bool NeutralWalkArrived(int32 Seat) const;
     void NeutralDigLane(int32 Seat, const FVector& Point);
-    bool NeutralRampPair(const AIslandNeutralProp& Prop, FVector& Start, FVector& End) const;
     void TickMudCheck(double Now);
     void SetMudStep(int32 Next, double Now);
     bool bMudScenario = false;
@@ -253,14 +295,12 @@ private:
     double NeutralSendAt = 0., NeutralBase = 0., NeutralPeak = 0.;
     FVector NeutralAimPoint = FVector::ZeroVector;
     FVector NeutralWalkFrom = FVector::ZeroVector, NeutralWalkTo = FVector::ZeroVector;
-    TArray<FVector> NeutralSampleLocations;
-    TArray<double> NeutralSurfaceBefore;
     TArray<TWeakObjectPtr<AIslandNeutralProp>> NeutralProps;
     FString NeutralExpected;
     TWeakObjectPtr<class ACameraActor> NeutralCamera;
     void TickFieldCheck(double Now);
     void BeginLockCheck(double Now);
-    enum class EFieldStep : uint8 { Aim, Strike, InspectDig, WalkToDig, EchoApproach, HearEcho, Gather, Open, Assist, Defend, TakeOver, Seize, PreventReseize, Award, Cancel, Reset, Verify, AimHeldDig, HoldFirst, HoldSecond, Released };
+    enum class EFieldStep : uint8 { Aim, Strike, InspectDig, WalkToDig, EchoApproach, HearEcho, Gather, Open, Assist, Defend, TakeOver, Seize, PreventReseize, Award, Cancel, Reset, Verify, AimHeldDig, HoldFirst, HoldSecond, Released, HoldThroughReveal, ChargeInterrupted, ChargeIdle, PunchTrials };
     void SetFieldStage(EFieldStep Stage, double Now);
     bool bFieldScenario = false;
     EFieldStep FieldStage = EFieldStep::Aim;
@@ -307,4 +347,5 @@ private:
     uint32 DrownSequence = 0;
     double StepAt = 0.0, LastAction = 0.0, LastFrame = 0.0;
     bool bIssued = false, bSawDrown = false, bReopened = false, bFailed = false;
+    bool TickFieldPunchTrials();
 };

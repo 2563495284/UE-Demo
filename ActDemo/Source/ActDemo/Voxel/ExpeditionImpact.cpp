@@ -140,17 +140,21 @@ void AExpeditionImpactCamera::UpdateCamera(float DeltaTime)
 void AExpeditionImpactCamera::Play(AActor& Terrain, const FVoxelEdit& Edit)
 {
     if (Edit.Action == EVoxelAction::Fill) return;
-    auto* Player = Terrain.GetWorld()->GetFirstPlayerController();
+    PlayAt(*Terrain.GetWorld(), FVector(Edit.Center), .62f, 1.f, .34f);
+}
+
+void AExpeditionImpactCamera::PlayAt(UWorld& World, FVector Point, float Volume, float Pitch, float Shake)
+{
+    auto* Player = World.GetFirstPlayerController();
     auto* Camera = Player && Player->IsLocalController() ? Cast<AExpeditionImpactCamera>(Player->PlayerCameraManager) : nullptr;
     if (!Camera || !Player->GetPawn()) return;
-    const FVector Point(Edit.Center);
     const double Distance = FVector::Distance(Player->GetPawn()->GetActorLocation(), Point);
     if (Distance > 2300.) return;
-    UGameplayStatics::PlaySoundAtLocation(Camera, Camera->Chip, Point, .62f, FMath::FRandRange(.93f,1.08f), 0.f, Camera->Attenuation);
+    UGameplayStatics::PlaySoundAtLocation(Camera, Camera->Chip, Point, Volume, Pitch * FMath::FRandRange(.93f,1.08f), 0.f, Camera->Attenuation);
 
     // A short local impulse follows the actual collision commit. Distant drilling is audible only.
     constexpr float Range = 310.f;
-    const float Strength = .34f * FMath::Clamp(1.f - float(Distance) / Range, 0.f, 1.f);
+    const float Strength = Shake * FMath::Clamp(1.f - float(Distance) / Range, 0.f, 1.f);
     const float Remaining = FMath::Max(0.f, 1.f - Camera->ImpactAge / ImpactDuration);
     if (Strength > Camera->ImpactStrength * Remaining)
     {
