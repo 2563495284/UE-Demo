@@ -16,11 +16,11 @@
 
 namespace
 {
-    constexpr double Radius = UExpeditionBodyMudComponent::ClodRadius;
+    constexpr double BodyMudRadius = UExpeditionBodyMudComponent::ClodRadius;
     // Quantization and collision contact offsets can separate two touching surfaces slightly.
     constexpr double Seam = .75;
-    constexpr double LinkSpan = Radius * 2. + Seam;
-    const FColor Clay(163,102,64);
+    constexpr double LinkSpan = BodyMudRadius * 2. + Seam;
+    const FColor BodyMudColor(163,102,64);
     DECLARE_MULTICAST_DELEGATE_OneParam(FClaySupportChanged,UWorld*);
     FClaySupportChanged SupportChanges;
 
@@ -92,8 +92,8 @@ namespace
         // within the clod, including vertical overhangs and previously player-built mud platforms.
         if (Soil.SignedDistanceAt(Center) >= VoxelSurfaceKernel::Band) return false;
         Normal = SoilNormal(Soil,Center);
-        FVector Air = Center + Normal*(Radius + Seam);
-        FVector Solid = Center - Normal*(Radius + Seam);
+        FVector Air = Center + Normal*(BodyMudRadius + Seam);
+        FVector Solid = Center - Normal*(BodyMudRadius + Seam);
         if (Soil.SignedDistanceAt(Solid) > 0.) return false;
         if (Soil.SignedDistanceAt(Air) < 0.)
         {
@@ -113,7 +113,7 @@ namespace
 
     bool FindStructureFoot(UWorld& World, const AVoxelCharacter& Hero, FVector Center, FVector& Point, FVector& Normal)
     {
-        const FCollisionShape Sphere = FCollisionShape::MakeSphere(Radius + Seam);
+        const FCollisionShape Sphere = FCollisionShape::MakeSphere(BodyMudRadius + Seam);
         FCollisionQueryParams Query(SCENE_QUERY_STAT(ExpeditionClayFoot), false, &Hero);
         TArray<FOverlapResult> Parts;
         World.OverlapMultiByChannel(Parts, Center, FQuat::Identity, ECC_Visibility, Sphere, Query);
@@ -128,8 +128,8 @@ namespace
             for (FVector Axis : Directions)
             {
                 FHitResult Hit;
-                if (!Part->SweepComponent(Hit, Center + Axis*(Radius*3.), Center, FQuat::Identity,Sphere)
-                    || Hit.bStartPenetrating || FVector::DistSquared(Hit.ImpactPoint,Center) > FMath::Square(Radius+Seam+0.1))
+                if (!Part->SweepComponent(Hit, Center + Axis*(BodyMudRadius*3.), Center, FQuat::Identity,Sphere)
+                    || Hit.bStartPenetrating || FVector::DistSquared(Hit.ImpactPoint,Center) > FMath::Square(BodyMudRadius+Seam+0.1))
                     continue;
                 Point = Hit.ImpactPoint;
                 Normal = Hit.ImpactNormal.GetSafeNormal(UE_SMALL_NUMBER,Axis);
@@ -139,7 +139,7 @@ namespace
             // the contact even when all the inward probes started inside.
             const FVector FromPart = Center - Part->Bounds.Origin;
             Normal = FromPart.GetSafeNormal(UE_SMALL_NUMBER,FVector::UpVector);
-            Point = Center - Normal*Radius;
+            Point = Center - Normal*BodyMudRadius;
             return true;
         }
         return false;
@@ -209,7 +209,7 @@ bool UExpeditionBodyMudComponent::Trace(const FVector& Start, const FVector& End
     const FTransform Frame = Hero->GetActorTransform();
     const FVector LocalStart = Frame.InverseTransformPosition(Start);
     const FVector Travel = Frame.InverseTransformVectorNoScale(End - Start);
-    const double Reach = Radius + SweepRadius;
+    const double Reach = BodyMudRadius + SweepRadius;
     const double TravelSquared = Travel.SizeSquared();
     double Best = 2.;
     int32 BestIndex = INDEX_NONE;
@@ -237,7 +237,7 @@ bool UExpeditionBodyMudComponent::Trace(const FVector& Start, const FVector& End
     const FVector Location = FMath::Lerp(Start,End,Best);
     const FVector Normal = (Location - Center).GetSafeNormal(UE_SMALL_NUMBER,
         Frame.TransformVectorNoScale(Clods[BestIndex].LocalNormal));
-    OutHit = FHitResult(GetOwner(), Hero->GetCapsuleComponent(), Center + Normal*Radius, Normal);
+    OutHit = FHitResult(GetOwner(), Hero->GetCapsuleComponent(), Center + Normal*BodyMudRadius, Normal);
     OutHit.TraceStart = Start;
     OutHit.TraceEnd = End;
     OutHit.Time = Best;
@@ -260,7 +260,7 @@ bool UExpeditionBodyMudComponent::AddHit(const FHitResult& Hit)
         (Hit.TraceStart-Hit.ImpactPoint).GetSafeNormal(UE_SMALL_NUMBER,FVector::UpVector));
     // Each new clod overlaps the struck surface. Successive throws grow outward from
     // that actual point, regardless of which side of the pawn the thrower stands on.
-    const FVector Center = Hit.ImpactPoint + SurfaceNormal * (OnClod ? Radius-5. : 2.);
+    const FVector Center = Hit.ImpactPoint + SurfaceNormal * (OnClod ? BodyMudRadius-5. : 2.);
     const FTransform Frame = Hero->GetActorTransform();
     FExpeditionClod& Clod = Clods.AddDefaulted_GetRef();
     Clod.LocalCenter = Frame.InverseTransformPosition(Center);
@@ -268,7 +268,7 @@ bool UExpeditionBodyMudComponent::AddHit(const FHitResult& Hit)
     const UCapsuleComponent* Capsule = Hero->GetCapsuleComponent();
     const double R = Capsule->GetScaledCapsuleRadius(), Stem = Capsule->GetScaledCapsuleHalfHeight()-R;
     const FVector BodyAxis(0.,0.,FMath::Clamp(Clod.LocalCenter.Z,-Stem,Stem));
-    Clod.bOnBody = !OnClod || FVector::DistSquared(BodyAxis,Clod.LocalCenter) <= FMath::Square(R+Radius+Seam);
+    Clod.bOnBody = !OnClod || FVector::DistSquared(BodyAxis,Clod.LocalCenter) <= FMath::Square(R+BodyMudRadius+Seam);
     RefreshContacts();
     RefreshVisuals();
     Hero->ForceNetUpdate();
@@ -297,10 +297,10 @@ bool UExpeditionBodyMudComponent::Strike(int32 Index)
     const FTransform Frame = GetOwner()->GetActorTransform();
     const FExpeditionClod Removed = Clods[Index];
     const FVector Normal = Frame.TransformVectorNoScale(Removed.LocalNormal);
-    const FVector Impact = Frame.TransformPosition(Removed.LocalCenter) + Normal*Radius;
+    const FVector Impact = Frame.TransformPosition(Removed.LocalCenter) + Normal*BodyMudRadius;
     FHitResult Hit(GetOwner(), nullptr, Impact, Normal);
-    Hit.TraceStart = Impact + Normal*Radius;
-    AIslandVoxelEdits::EmitChips(*GetWorld(),Hit,EIslandChipSurface::Sand,Clay);
+    Hit.TraceStart = Impact + Normal*BodyMudRadius;
+    AIslandVoxelEdits::EmitChips(*GetWorld(),Hit,EIslandChipSurface::Sand,BodyMudColor);
     Clods.RemoveAt(Index,1,EAllowShrinking::No);
     DropLooseClods();
     if (Clods.IsEmpty()) Clear();
@@ -469,7 +469,7 @@ void UExpeditionBodyMudComponent::RefreshVisuals()
         Visuals->SetReceivesDecals(false);
         if (UMaterialInstanceDynamic* Finish = UMaterialInstanceDynamic::Create(ClayMaterial,this))
         {
-            Finish->SetVectorParameterValue(TEXT("Color"),FLinearColor(Clay));
+            Finish->SetVectorParameterValue(TEXT("Color"),FLinearColor(BodyMudColor));
             Visuals->SetMaterial(0,Finish);
         }
         GetOwner()->AddInstanceComponent(Visuals);
@@ -492,10 +492,10 @@ void UExpeditionBodyMudComponent::RefreshVisuals()
         Instances.Emplace(Rotation,LocalCenter - Rotation.RotateVector(Source.GetCenter()*Scale),Scale);
     };
     for (const FExpeditionClod& Clod : Clods)
-        Add(Clod.LocalCenter,Clod.LocalNormal,FVector(Radius,Radius,Radius));
+        Add(Clod.LocalCenter,Clod.LocalNormal,FVector(BodyMudRadius,BodyMudRadius,BodyMudRadius));
     for (const auto& Foot : Feet)
         if (Clods.IsValidIndex(Foot.Index))
-            Add(Foot.LocalPoint,Foot.LocalNormal,FVector(Radius*1.13,Radius*1.05,4.));
+            Add(Foot.LocalPoint,Foot.LocalNormal,FVector(BodyMudRadius*1.13,BodyMudRadius*1.05,4.));
     Visuals->ClearInstances();
     Visuals->AddInstances(Instances,false,false,false);
 }

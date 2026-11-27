@@ -57,10 +57,10 @@ AMazeChaseSession::AMazeChaseSession()
     RoundSeconds = 180.f;
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Shape(TEXT("/Engine/BasicShapes/Cube"));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Stone(TEXT("/Game/TreasureIsland/Art/Neutral/SM_HewnBlock"));
-    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Material(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> BasePaintAsset(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
     Cube = Shape.Object;
     HewnWall = Stone.Object;
-    BasePaint = Material.Object;
+    BasePaint = BasePaintAsset.Object;
 }
 
 void AMazeChaseSession::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

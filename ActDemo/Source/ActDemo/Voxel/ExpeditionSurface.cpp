@@ -36,10 +36,10 @@ FProcMeshSection ExpeditionSurface::BuildTile(const FVoxelGrid& Grid, int32 Tile
     const int32 SamplesHigh = FMath::Min(TileColumns, CY - Y0) * Side / SampleStep + 1;
     TArray<int32> Vertices;
     Vertices.Init(INDEX_NONE, SamplesWide * SamplesHigh);
-    const auto VertexAt = [&](int32 I, int32 J)
+    const auto VertexAt = [&](int32 I, int32 J) -> uint32
     {
         int32& VertexIndex = Vertices[I + J * SamplesWide];
-        if (VertexIndex != INDEX_NONE) return VertexIndex;
+        if (VertexIndex != INDEX_NONE) return static_cast<uint32>(VertexIndex);
         const int32 X = Grid.Origin.X + X0 * Side + I * SampleStep;
         const int32 Y = Grid.Origin.Y + Y0 * Side + J * SampleStep;
         FProcMeshVertex Vertex;
@@ -50,7 +50,7 @@ FProcMeshSection ExpeditionSurface::BuildTile(const FVoxelGrid& Grid, int32 Tile
         Vertex.UV0 = FVector2D(X,Y) / 100.;
         Mesh.SectionLocalBox += Vertex.Position;
         VertexIndex = Mesh.ProcVertexBuffer.Add(Vertex);
-        return VertexIndex;
+        return static_cast<uint32>(VertexIndex);
     };
     for (int32 CYi=Y0; CYi<FMath::Min(Y0+TileColumns,CY); ++CYi)
     {
@@ -64,7 +64,7 @@ FProcMeshSection ExpeditionSurface::BuildTile(const FVoxelGrid& Grid, int32 Tile
             {
                 for (int32 I=I0; I<I0+Side/SampleStep; ++I)
                 {
-                    const int32 A=VertexAt(I,J), B=VertexAt(I+1,J), C=VertexAt(I+1,J+1), D=VertexAt(I,J+1);
+                    const uint32 A=VertexAt(I,J), B=VertexAt(I+1,J), C=VertexAt(I+1,J+1), D=VertexAt(I,J+1);
                     Mesh.ProcIndexBuffer.Append({A,C,B,A,D,C});
                 }
             }

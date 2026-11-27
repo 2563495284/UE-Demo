@@ -183,20 +183,20 @@ void AIslandGameMode::PublishLockViews()
                 const FChestLock& Lock = Pair.Value;
                 AIslandChest* Chest = Exposed[Pair.Key];
                 if (!Chest || !Chest->IsReachableFrom(Hero)) continue;
-                EIslandLockRole Role = EIslandLockRole::Observer;
-                if (Lock.Leader.Get() == Player) Role = EIslandLockRole::Leader;
-                else if (Lock.Helper.Get() == Player) Role = EIslandLockRole::Helper;
+                EIslandLockRole PlayerRole = EIslandLockRole::Observer;
+                if (Lock.Leader.Get() == Player) PlayerRole = EIslandLockRole::Leader;
+                else if (Lock.Helper.Get() == Player) PlayerRole = EIslandLockRole::Helper;
                 const double Distance = Chest->GetInteractionDistanceSquared(Hero.GetAimOrigin());
-                if (Role == EIslandLockRole::Observer && Distance >= Nearest) continue;
+                if (PlayerRole == EIslandLockRole::Observer && Distance >= Nearest) continue;
                 Next.Chest = Chest;
                 Next.Team = Lock.Team;
-                Next.Role = Role;
+                Next.Role = PlayerRole;
                 Next.bAssisted = Lock.bAssisted;
                 Next.bSeized = Lock.bSeized;
                 Next.bEligible = CanClaimChest(Member->Team, Pair.Key);
                 Next.FinishAt = Lock.FinishAt;
                 Nearest = Distance;
-                if (Role != EIslandLockRole::Observer) break;
+                if (PlayerRole != EIslandLockRole::Observer) break;
             }
         }
         const FIslandLockView& Old = Member->LockView;

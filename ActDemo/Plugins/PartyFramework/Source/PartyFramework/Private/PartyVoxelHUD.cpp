@@ -47,9 +47,9 @@ void APartyVoxelPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, boo
         if (bCaught && !bWatching) HUD.DrawRect(FLinearColor(.025f,.045f,.055f,1.f),0,0,W,H);
 
         const FString Title = bEnglish ? Game->EnglishTitle : Game->Title;
-        const FString Role = bRunner ? EXPEDITION_TEXT("逃跑方", "Runner") : EXPEDITION_TEXT("追捕方", "Hunter");
+        const FString RoleLabel = bRunner ? EXPEDITION_TEXT("逃跑方", "Runner") : EXPEDITION_TEXT("追捕方", "Hunter");
         const FLinearColor RoleColor = FLinearColor(bRunner ? FColor(247,174,70) : FColor(98,209,227));
-        Label(bAssigned ? Title + TEXT("  ·  ") + Role : Title,23*S,18*S,1.15f,Ink);
+        Label(bAssigned ? Title + TEXT("  ·  ") + RoleLabel : Title,23*S,18*S,1.15f,Ink);
         HUD.DrawRect(bAssigned ? RoleColor : Accent,13*S,15*S,3*S,31*S);
 
         const auto Phase = Game->GetPhase();

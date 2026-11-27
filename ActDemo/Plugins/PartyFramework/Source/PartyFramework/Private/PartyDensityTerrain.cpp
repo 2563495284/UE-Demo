@@ -17,7 +17,7 @@ namespace
 
     FIntVector FloorVector(FVector P)
     {
-        return {FMath::FloorToInt(P.X),FMath::FloorToInt(P.Y),FMath::FloorToInt(P.Z)};
+        return {FMath::FloorToInt32(P.X),FMath::FloorToInt32(P.Y),FMath::FloorToInt32(P.Z)};
     }
 
     uint32 HashSample(int32 Index, int16 Density, uint8 Kind)

@@ -23,7 +23,7 @@ class ACTDEMO_API UIslandRouteVoxelComponent : public UProceduralMeshComponent
 
 public:
     UIslandRouteVoxelComponent(const FObjectInitializer& Initializer = FObjectInitializer::Get());
-    bool InitializeField(const FBox& LocalBounds, double Spacing,
+    bool InitializeField(const FBox& FieldBounds, double Spacing,
         TFunctionRef<FRouteVoxelSample(FVector)> SampleShape);
     bool ApplyWorldCut(FVector Point, FVector OutwardNormal, double Radius = 62., float DepthScale = 1.f);
     // Test each occupied local sample against the owner's real attachment/support.

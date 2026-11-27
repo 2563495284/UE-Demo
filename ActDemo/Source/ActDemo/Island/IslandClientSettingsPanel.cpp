@@ -116,12 +116,12 @@ FReply SIslandClientSettingsPanel::OnPreviewKeyDown(const FGeometry& Geometry, c
     return SCompoundWidget::OnPreviewKeyDown(Geometry, Event);
 }
 
-TSharedRef<SWidget> SIslandClientSettingsPanel::Button(FName Tag, TAttribute<FText> Caption,
+TSharedRef<SWidget> SIslandClientSettingsPanel::Button(FName WidgetTag, TAttribute<FText> Caption,
     TFunction<void()> Action, bool bStrong, TAttribute<bool> Enabled, TAttribute<FText> AccessibleName)
 {
     static const FButtonStyle Plain = IslandMenuStyle::MakeButtonStyle(false);
     static const FButtonStyle Strong = IslandMenuStyle::MakeButtonStyle(true);
-    return SNew(SButton).Tag(Tag).ButtonStyle(bStrong ? &Strong : &Plain)
+    return SNew(SButton).Tag(WidgetTag).ButtonStyle(bStrong ? &Strong : &Plain)
         .IsEnabled(Enabled).AccessibleText(AccessibleName.IsSet() ? AccessibleName : Caption)
         .HAlign(HAlign_Center).VAlign(VAlign_Center)
         .OnClicked_Lambda([this, Press = MoveTemp(Action)]
@@ -187,9 +187,9 @@ void SIslandClientSettingsPanel::Build()
         return;
     }
 
-    auto Tab = [this](FName Tag, FText Name, bool bDisplay)
+    auto Tab = [this](FName WidgetTag, FText Name, bool bDisplay)
     {
-        auto Item = Button(Tag, Name, [this, bDisplay]{ SelectTab(bDisplay); });
+        auto Item = Button(WidgetTag, Name, [this, bDisplay]{ SelectTab(bDisplay); });
         const bool bSelected = bDisplay == bDisplayTab;
         if (bSelected) FirstFocus = Item;
         return SNew(SVerticalBox)
@@ -259,32 +259,32 @@ void SIslandClientSettingsPanel::Row(const FText& Name, TSharedRef<SWidget> Cont
     ];
 }
 
-void SIslandClientSettingsPanel::Choice(FName Tag, const FText& Name, TAttribute<FText> Value,
+void SIslandClientSettingsPanel::Choice(FName WidgetTag, const FText& Name, TAttribute<FText> Value,
     TFunction<void(int32)> Step, TAttribute<bool> Enabled)
 {
     const FText Previous = FText::Format(FText::FromString(EXPEDITION_TEXT("上一个{0}选项", "Previous {0} option")), Name);
     const FText Next = FText::Format(FText::FromString(EXPEDITION_TEXT("下一个{0}选项", "Next {0} option")), Name);
-    auto PreviousButton = Button(FName(*(Tag.ToString() + TEXT(".Previous"))), Copy(TEXT("‹")), [Step]{ Step(-1); }, false, Enabled, Previous);
+    auto PreviousButton = Button(FName(*(WidgetTag.ToString() + TEXT(".Previous"))), Copy(TEXT("‹")), [Step]{ Step(-1); }, false, Enabled, Previous);
     PreviousButton->SetToolTipText(Previous);
     // The value is a forward control too, so both hit targets remain easy to reach in a small window.
     auto Caption = TAttribute<FText>::CreateLambda([Value]
     {
         return FText::Format(FText::FromString(TEXT("{0}   ›")), Value.Get());
     });
-    auto NextButton = Button(Tag, Caption, [Step]{ Step(1); }, false, Enabled, IslandClientPanel::NameAndValue(Next, Value));
+    auto NextButton = Button(WidgetTag, Caption, [Step]{ Step(1); }, false, Enabled, IslandClientPanel::NameAndValue(Next, Value));
     NextButton->SetToolTipText(Next);
     Row(Name, SNew(SHorizontalBox)
         + SHorizontalBox::Slot().AutoWidth().Padding(0,0,2,0)[PreviousButton]
         + SHorizontalBox::Slot().FillWidth(1)[NextButton]);
 }
 
-void SIslandClientSettingsPanel::Toggle(FName Tag, const FText& Name, bool FIslandSettingsDraft::* Field)
+void SIslandClientSettingsPanel::Toggle(FName WidgetTag, const FText& Name, bool FIslandSettingsDraft::* Field)
 {
     auto Value = TAttribute<FText>::CreateLambda([this, Field]
     {
         return Copy(Draft.*Field ? EXPEDITION_TEXT("开启", "On") : EXPEDITION_TEXT("关闭", "Off"));
     });
-    Row(Name, Button(Tag, Value, [this, Field]{ Draft.*Field = !(Draft.*Field); }, false, true,
+    Row(Name, Button(WidgetTag, Value, [this, Field]{ Draft.*Field = !(Draft.*Field); }, false, true,
         IslandClientPanel::NameAndValue(Name, Value)));
 }
 
@@ -363,7 +363,7 @@ void SIslandClientSettingsPanel::BuildDisplay()
     Toggle("Island.Client.VSync", Copy(EXPEDITION_TEXT("垂直同步", "Vertical sync")), &FIslandSettingsDraft::bVSync);
 }
 
-void SIslandClientSettingsPanel::Slider(FName Tag, const FText& Name, float FIslandSettingsDraft::* Field,
+void SIslandClientSettingsPanel::Slider(FName WidgetTag, const FText& Name, float FIslandSettingsDraft::* Field,
     float Minimum, float Maximum, float Increment, TAttribute<FText> Readout)
 {
     static const FSliderStyle Style = []
@@ -380,7 +380,7 @@ void SIslandClientSettingsPanel::Slider(FName Tag, const FText& Name, float FIsl
         [
             SNew(SHorizontalBox)
             + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center).Padding(4,0,8,0)
-                [SNew(SSlider).Tag(Tag).AccessibleText(Name).MinValue(Minimum).MaxValue(Maximum).StepSize(Increment)
+                [SNew(SSlider).Tag(WidgetTag).AccessibleText(Name).MinValue(Minimum).MaxValue(Maximum).StepSize(Increment)
                     .MouseUsesStep(true).RequiresControllerLock(false)
                     .Style(&Style)
                     .Value_Lambda([this, Field]{ return Draft.*Field; })

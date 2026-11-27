@@ -10,7 +10,7 @@
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
 
-namespace
+namespace NeutralRouteDetail
 {
     const FColor Timber(148,95,59), Tar(63,76,71), Canvas(224,189,133);
     const FColor Sand(224,166,89), Mud(157,100,62), Sea(48,155,169), FoamWhite(207,237,224);
@@ -103,7 +103,7 @@ TOptional<FVector> AIslandNeutralProp::WindJumpVelocity(const AVoxelCharacter& H
     {
         if (!IsSectionComplete(FMath::Min(GetRouteSectionCount()-1, I*GetRouteSectionCount()/2))) continue;
         const FVector Mouth = GetWindJumpStart(I);
-        if (FVector::DistSquared2D(Foot,Mouth) > FMath::Square(WindMouthRadius) || FMath::Abs(Foot.Z-Mouth.Z)>125.) continue;
+        if (FVector::DistSquared2D(Foot,Mouth) > FMath::Square(NeutralRouteDetail::WindMouthRadius) || FMath::Abs(Foot.Z-Mouth.Z)>125.) continue;
         const FVector Delta = GetWindJumpLanding(I) - Foot;
         const double Gravity = FMath::Max(1., double(-Hero.GetCharacterMovement()->GetGravityZ()));
         const double SpeedZ = I == 2 ? 670. : 1260.;
@@ -126,7 +126,7 @@ float AIslandNeutralProp::CurrentWalkSpeed(const AVoxelCharacter& Hero, FVector 
         const auto* Volume = Cast<UBoxComponent>(Overlap.OverlapInfo.GetComponent());
         if (!Volume || !Volume->ComponentHasTag(TEXT("NeutralCurrent"))) continue;
         const FVector Local = Volume->GetComponentTransform().InverseTransformPosition(Foot);
-        if (FMath::Abs(Local.Y) <= ChannelHalfWidth && Local.Z >= -140. && Local.Z <= 70. &&
+        if (FMath::Abs(Local.Y) <= NeutralRouteDetail::ChannelHalfWidth && Local.Z >= -140. && Local.Z <= 70. &&
             FVector::DotProduct(Direction,Volume->GetForwardVector().GetSafeNormal2D()) >= .55)
             return BaseSpeed * 2.45f;
     }
@@ -142,7 +142,7 @@ void AIslandNeutralProp::PrepareSandSections()
     {
         auto& Centers = SandSections.AddDefaulted_GetRef();
         const FVector A = State.RouteNodes[I], B = State.RouteNodes[I+1];
-        const FVector Side = Across(B-A);
+        const FVector Side = NeutralRouteDetail::Across(B-A);
         // Row/lane spacing is less than the 75 cm fill radius. Capture each bed just once,
         // so retries cannot repeatedly raise a section already deposited by its neighbour.
         const int32 Rows = FMath::Clamp(FMath::CeilToInt(FVector::Dist2D(A,B)/52.), 1, 11);
@@ -187,7 +187,7 @@ void AIslandNeutralProp::AdvanceRoute(double Now)
         return;
     }
     const int32 Next = GetCompletedRouteSections();
-    if (Now-State.ChangedAt < (Next+1)*SectionInterval + (State.Kind == EIslandNeutralKind::Bridge ? PanelFall : 0.)) return;
+    if (Now-State.ChangedAt < (Next+1)*NeutralRouteDetail::SectionInterval + (State.Kind == EIslandNeutralKind::Bridge ? NeutralRouteDetail::PanelFall : 0.)) return;
     if (State.Kind == EIslandNeutralKind::Bridge)
     {
         const FTransform End = BridgePanelPose(Next,1.);
@@ -204,6 +204,7 @@ void AIslandNeutralProp::AdvanceRoute(double Now)
 
 void AIslandNeutralProp::BuildRouteStation()
 {
+    using namespace NeutralRouteDetail;
     switch (State.Kind)
     {
         case EIslandNeutralKind::Bridge:
@@ -253,6 +254,7 @@ void AIslandNeutralProp::BuildRouteStation()
 
 void AIslandNeutralProp::BuildRoute()
 {
+    using namespace NeutralRouteDetail;
     if (GetRouteSectionCount() == 0) return;
     BuildRouteStation();
     const FTransform Frame = GetActorTransform();
@@ -352,7 +354,7 @@ void AIslandNeutralProp::UpdateRouteVisuals(double Now)
     const bool bStarted = State.Phase == 3;
     const bool bBreak = State.Kind == EIslandNeutralKind::Bridge || State.Kind == EIslandNeutralKind::Dam;
     for (int32 I=0; I<StationMarkers.Num(); ++I)
-        ShowPart(*StationMarkers[I], bBreak ? I >= State.Phase : I < State.Phase);
+        NeutralRouteDetail::ShowPart(*StationMarkers[I], bBreak ? I >= State.Phase : I < State.Phase);
     if (State.Kind == EIslandNeutralKind::Bridge)
     {
         AnimateSail(Now);
@@ -361,7 +363,7 @@ void AIslandNeutralProp::UpdateRouteVisuals(double Now)
             const uint32 Bit = 1u << I;
             if (CollisionSections & Bit) continue;
             const bool bSettled = IsSectionComplete(I);
-            const double T = bStarted ? FMath::Clamp((Now-State.ChangedAt-I*SectionInterval)/PanelFall,0.,.96) : 0.;
+            const double T = bStarted ? FMath::Clamp((Now-State.ChangedAt-I*NeutralRouteDetail::SectionInterval)/NeutralRouteDetail::PanelFall,0.,.96) : 0.;
             const FTransform Pose = BridgePanelPose(I,bSettled ? 1. : FMath::Square(T));
             RoutePanels[I]->SetWorldLocationAndRotation(Pose.GetLocation(),Pose.GetRotation());
             if (bSettled)
@@ -413,7 +415,7 @@ void AIslandNeutralProp::UpdateRouteVisuals(double Now)
     {
         for (int32 I=0; I<RouteCrests.Num(); ++I)
         {
-            const double Age = Now-State.ChangedAt-I*SectionInterval;
+            const double Age = Now-State.ChangedAt-I*NeutralRouteDetail::SectionInterval;
             const bool bPour = bStarted && !IsSectionComplete(I) && Age>=0. && Age<2.;
             RouteCrests[I]->SetVisibility(bPour);
             if (bPour) RouteCrests[I]->SetWorldLocation(State.RouteNodes[I]+FVector(0,0,160.-125.*FMath::Frac(Age*2.3)));

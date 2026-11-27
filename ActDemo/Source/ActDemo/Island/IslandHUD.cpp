@@ -262,13 +262,13 @@ void AIslandHUD::UpdateDockCamera(AIslandPlayerController& Player,bool bRoom)
             Player.PlayerCameraManager->StartCameraFade(0.f,1.f,.09f,HarbourGray,false,true);
             FTimerHandle Switch;
             const TWeakObjectPtr<ACameraActor> Destination=Camera;
-            const TWeakObjectPtr<AIslandPlayerController> Owner=&Player;
-            GetWorldTimerManager().SetTimer(Switch,FTimerDelegate::CreateWeakLambda(this,[this,Destination,Owner,HarbourGray]
+            const TWeakObjectPtr<AIslandPlayerController> WeakPlayer=&Player;
+            GetWorldTimerManager().SetTimer(Switch,FTimerDelegate::CreateWeakLambda(this,[this,Destination,WeakPlayer,HarbourGray]
             {
-                if (bRoomCamera && Destination.IsValid() && DockCamera==Destination && Owner.IsValid() && Owner->PlayerCameraManager)
+                if (bRoomCamera && Destination.IsValid() && DockCamera==Destination && WeakPlayer.IsValid() && WeakPlayer->PlayerCameraManager)
                 {
-                    Owner->SetViewTarget(Destination.Get());
-                    Owner->PlayerCameraManager->StartCameraFade(1.f,0.f,.14f,HarbourGray,false,false);
+                    WeakPlayer->SetViewTarget(Destination.Get());
+                    WeakPlayer->PlayerCameraManager->StartCameraFade(1.f,0.f,.14f,HarbourGray,false,false);
                 }
             }),.09f,false);
         }
@@ -437,14 +437,14 @@ void AIslandHUD::UpdateResultCamera(AIslandPlayerController& Player)
     {
         const FLinearColor Gray(.15f,.20f,.21f);
         Player.PlayerCameraManager->StartCameraFade(0.f,1.f,.12f,Gray,false,true);
-        const TWeakObjectPtr<AIslandPlayerController> Owner=&Player;
+        const TWeakObjectPtr<AIslandPlayerController> WeakPlayer=&Player;
         FTimerHandle Switch;
-        GetWorldTimerManager().SetTimer(Switch,FTimerDelegate::CreateWeakLambda(this,[this,Owner,Gray]
+        GetWorldTimerManager().SetTimer(Switch,FTimerDelegate::CreateWeakLambda(this,[this,WeakPlayer,Gray]
         {
-            if (Owner.IsValid() && Owner->PlayerCameraManager && ResultCamera.IsValid())
+            if (WeakPlayer.IsValid() && WeakPlayer->PlayerCameraManager && ResultCamera.IsValid())
             {
-                Owner->SetViewTarget(ResultCamera.Get());
-                Owner->PlayerCameraManager->StartCameraFade(1.f,0.f,.18f,Gray,false,false);
+                WeakPlayer->SetViewTarget(ResultCamera.Get());
+                WeakPlayer->PlayerCameraManager->StartCameraFade(1.f,0.f,.18f,Gray,false,false);
             }
         }),.12f,false);
     }
@@ -829,9 +829,9 @@ void AIslandHUD::DrawNearbyCrews(const AIslandPlayerController& PC, float S)
         if (bTruncated) Name=Name.Left(20)+TEXT("…");
         if (Name.IsEmpty()) Name=EXPEDITION_TEXT("水手","Sailor");
         if (bDuplicate || bTruncated) Name+=FString::Printf(TEXT(" #%d"),Crew->GetPlayerId());
-        const FString Role = bAlly ? EXPEDITION_TEXT("队友","Ally")
+        const FString RoleLabel = bAlly ? EXPEDITION_TEXT("队友","Ally")
             : FString::Format(EXPEDITION_TEXT("敌队 {0}","Rival {0}"),{Crew->Team+1});
-        const FString Label = Name+TEXT("  ·  ")+Role;
+        const FString Label = Name+TEXT("  ·  ")+RoleLabel;
         const FLinearColor Accent = bAlly ? IslandHudColors::Ally : IslandHudColors::Alert;
         float W,H;
         GetTextSize(Label,W,H,GEngine->GetMediumFont(),.85f*S);

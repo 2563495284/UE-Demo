@@ -101,7 +101,7 @@ bool IslandRules::AuditSearchAreas(int32 DecoyCount, TConstArrayView<FIslandSear
         const FVector2D Delta = First.Crossing - FVector2D(Guess);
         Misses.Add(Delta.Size());
         ++PrizeQuadrants[Quadrant(Delta)];
-        MeterCells.Add({FMath::FloorToInt(Delta.X / 100.), FMath::FloorToInt(Delta.Y / 100.)});
+        MeterCells.Add({FMath::FloorToInt32(Delta.X / 100.), FMath::FloorToInt32(Delta.Y / 100.)});
     }
 
     Misses.Sort();

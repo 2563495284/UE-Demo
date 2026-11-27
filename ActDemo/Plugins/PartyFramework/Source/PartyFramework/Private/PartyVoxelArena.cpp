@@ -74,7 +74,7 @@ FVector APartyVoxelSession::CellCenter(FIntVector P) const
 FIntVector APartyVoxelSession::CellAt(FVector WorldPoint) const
 {
     const FVector P=(WorldPoint-GetActorLocation())/PartyGrid::Size;
-    return {FMath::FloorToInt(P.X),FMath::FloorToInt(P.Y),FMath::FloorToInt(P.Z)};
+    return {FMath::FloorToInt32(P.X),FMath::FloorToInt32(P.Y),FMath::FloorToInt32(P.Z)};
 }
 
 EPartyBlock APartyVoxelSession::BlockAt(FIntVector Cell) const

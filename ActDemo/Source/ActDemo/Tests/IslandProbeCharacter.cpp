@@ -1,5 +1,6 @@
 #include "Tests/IslandProbe.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/SkinnedAsset.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Island/ExpeditionAnimalComponent.h"
@@ -19,8 +20,8 @@ namespace
         Initial, BothFox, GuestReady, ReadyStillSet, InvalidAndTeamChange, BeforeCountdown,
         GuestCancelled, PickAfterCancel, Island, Arena, IslandAgain, NewLobby, PickInNewLobby, Disguised, Revealed
     };
-    const FName StaticBodies[] = {TEXT("SM_Pig"), TEXT("SM_Monkey"), TEXT("SM_Fox"), TEXT("SM_Calf")};
-    const FName Skins[] = {TEXT("SK_ExpeditionPig"), TEXT("SK_ExpeditionMonkey"), TEXT("SK_ExpeditionFox"), TEXT("SK_ExpeditionCalf")};
+    const FName LegacyCharacterMeshNames[] = {TEXT("SM_Pig"), TEXT("SM_Monkey"), TEXT("SM_Fox"), TEXT("SM_Calf")};
+    const FName CharacterSkinNames[] = {TEXT("SK_ExpeditionPig"), TEXT("SK_ExpeditionMonkey"), TEXT("SK_ExpeditionFox"), TEXT("SK_ExpeditionCalf")};
 
     bool OnOtherShore(const AIslandGameState& Round, const AIslandPlayerState* Observer, const AIslandPlayerState& Member)
     {
@@ -51,14 +52,14 @@ namespace
         for (const auto* Part : Components)
         {
             if (!Part->GetStaticMesh() || !Part->IsVisible()) continue;
-            for (FName Legacy : StaticBodies)
+            for (FName Legacy : LegacyCharacterMeshNames)
                 if (Part->GetStaticMesh()->GetFName()==Legacy) return INDEX_NONE;
         }
         const auto* Rig=Pawn->FindComponentByClass<UPartyCrewRig>();
         const int32 Selected=Member.GetCharacterModel();
-        if (!Rig || Selected<0 || Selected>=UE_ARRAY_COUNT(Skins)) return INDEX_NONE;
+        if (!Rig || Selected<0 || Selected>=UE_ARRAY_COUNT(CharacterSkinNames)) return INDEX_NONE;
         if (bDisguised && !Rig->IsVisible() && bParty && !Rig->GetSkinnedAsset()) return Selected;
-        if (!Rig->GetSkinnedAsset() || Rig->GetSkinnedAsset()->GetFName()!=Skins[Selected]) return INDEX_NONE;
+        if (!Rig->GetSkinnedAsset() || Rig->GetSkinnedAsset()->GetFName()!=CharacterSkinNames[Selected]) return INDEX_NONE;
         if (bDisguised ? Rig->IsVisible() : (!bLocal && !Rig->IsVisible())) return INDEX_NONE;
         return Selected;
     }

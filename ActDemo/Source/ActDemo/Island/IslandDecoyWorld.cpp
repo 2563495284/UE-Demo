@@ -28,20 +28,20 @@ AIslandGameMode::FDecoyWorldPlan AIslandGameMode::PlanDecoyWorldEvents() const
 
 void AIslandGameMode::PlanRallyLandings(FDecoyWorldPlan& Plan) const
 {
-    TArray<AIslandPlayerController*> Players;
-    Players.SetNumZeroed(RoomCapacity());
+    TArray<AIslandPlayerController*> SeatedPlayers;
+    SeatedPlayers.SetNumZeroed(RoomCapacity());
     TArray<FVector> Reserved;
     for (const auto& Pair : PartyPlayers)
     {
-        if (!Pair.Key.IsValid() || !Pair.Value.Original.IsValid() || !Players.IsValidIndex(Pair.Value.Seat)) continue;
-        Players[Pair.Value.Seat] = Pair.Key.Get();
+        if (!Pair.Key.IsValid() || !Pair.Value.Original.IsValid() || !SeatedPlayers.IsValidIndex(Pair.Value.Seat)) continue;
+        SeatedPlayers[Pair.Value.Seat] = Pair.Key.Get();
         Reserved.Add(Pair.Value.Original->GetActorLocation());
     }
-    Players.Remove(nullptr);
+    SeatedPlayers.Remove(nullptr);
 
     for (int32 Team = 0; Team < TeamClues.Num(); ++Team)
     {
-        for (AIslandPlayerController* Anchor : Players)
+        for (AIslandPlayerController* Anchor : SeatedPlayers)
         {
             if (Anchor->GetTeam() != Team) continue;
             const FPartyPlayer& Entry = PartyPlayers.FindChecked(Anchor);
@@ -52,7 +52,7 @@ void AIslandGameMode::PlanRallyLandings(FDecoyWorldPlan& Plan) const
             if (!Ground || FMath::Abs(Ground->Z - Origin.Z) > 60.) continue;
 
             const int32 Before = Plan.RallyLandings.Num();
-            for (AIslandPlayerController* Member : Players)
+            for (AIslandPlayerController* Member : SeatedPlayers)
             {
                 if (Member == Anchor || Member->GetTeam() != Team) continue;
                 const auto Landing = FindRallyLanding(PartyPlayers.FindChecked(Member), Origin, Reserved);
@@ -97,11 +97,11 @@ TOptional<FTransform> AIslandGameMode::FindRallyLanding(const FPartyPlayer& Entr
 
 TArray<FVector> AIslandGameMode::FindDecoySandRamp() const
 {
-    const AVoxelTerrain* Terrain = GetTerrain();
-    const FVoxelDensity* Density = Terrain ? Terrain->GetDensity() : nullptr;
-    if (!Density || !Terrain->IsReady() || Terrain->IsBusy()) return {};
+    const AVoxelTerrain* IslandTerrain = GetTerrain();
+    const FVoxelDensity* Density = IslandTerrain ? IslandTerrain->GetDensity() : nullptr;
+    if (!Density || !IslandTerrain->IsReady() || IslandTerrain->IsBusy()) return {};
     const FVector Chest = HiddenLayout.GetCenter(PartyChestIndex);
-    FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandDecoyRamp), false, Terrain);
+    FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandDecoyRamp), false, IslandTerrain);
     for (double Distance : {320., 600., 880.})
     {
         for (int32 Step = 0; Step < 12; ++Step)

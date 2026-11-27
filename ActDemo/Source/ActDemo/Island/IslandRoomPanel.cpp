@@ -91,10 +91,10 @@ TSharedRef<SWidget> SIslandRoomPanel::FocusTarget()
 }
 
 TSharedRef<SWidget> SIslandRoomPanel::Button(TAttribute<FText> Value, TFunction<void()> Press,
-    TAttribute<bool> Enabled, bool bPrimary, FName Tag)
+    TAttribute<bool> Enabled, bool bPrimary, FName WidgetTag)
 {
     static const FButtonStyle Plain = IslandMenuStyle::MakeButtonStyle(false), Strong = IslandMenuStyle::MakeButtonStyle(true);
-    return SNew(SButton).Tag(Tag).ButtonStyle(bPrimary ? &Strong : &Plain).IsEnabled(Enabled)
+    return SNew(SButton).Tag(WidgetTag).ButtonStyle(bPrimary ? &Strong : &Plain).IsEnabled(Enabled)
         .OnClicked_Lambda([this,Action = MoveTemp(Press)]
         {
             if (const auto* Room = Session(); Room && Room->IsTravelInputBlocked()) return FReply::Handled();
@@ -333,12 +333,12 @@ void SIslandRoomPanel::BuildForm()
     Add(Label(Txt(EXPEDITION_TEXT("房间名称", "Room name")),15,IslandMenuStyle::Muted),2);
     Add(SAssignNew(NameField, SEditableTextBox).Tag("Island.RoomName").IsEnabled(CanEdit).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).Text(Txt(Draft.RoomName))
         .OnTextChanged_Lambda([this](const FText& Value){ Draft.RoomName = Value.ToString(); }));
-    const auto Number = [this, CanEdit](const TCHAR* Caption, int32 FIslandRoomSettings::* Member, FName Tag, int32 Minimum=1, int32 Maximum=8)
+    const auto Number = [this, CanEdit](const TCHAR* Caption, int32 FIslandRoomSettings::* Member, FName WidgetTag, int32 Minimum=1, int32 Maximum=8)
     {
         Add(SNew(SHorizontalBox)
             + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)[Label(Txt(Caption),16,IslandMenuStyle::Ink)]
             + SHorizontalBox::Slot().AutoWidth()[ SNew(SBox).WidthOverride(106)
-                [SNew(SSpinBox<int32>).Tag(Tag).IsEnabled(CanEdit).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).MinValue(Minimum).MaxValue(Maximum)
+                [SNew(SSpinBox<int32>).Tag(WidgetTag).IsEnabled(CanEdit).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).MinValue(Minimum).MaxValue(Maximum)
                  .Value_Lambda([this,Member]{return Draft.*Member;})
                  .OnValueChanged_Lambda([this,Member](int32 Value){ Draft.*Member = Value; })] ]);
     };

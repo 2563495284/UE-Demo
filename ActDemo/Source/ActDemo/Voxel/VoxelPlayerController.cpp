@@ -515,8 +515,8 @@ void AVoxelPlayerController::ServerReleaseExpeditionAction_Implementation(EExped
     if (Action == EExpeditionAction::Throw) bServerThrowHeld = false;
     if (auto* Hero = GetHero())
     {
-        const FGameplayTagContainer Tags(ExpeditionAbilities::ActionTag(Action));
-        Hero->GetAbilitySystemComponent()->CancelAbilities(&Tags);
+        const FGameplayTagContainer ActionTags(ExpeditionAbilities::ActionTag(Action));
+        Hero->GetAbilitySystemComponent()->CancelAbilities(&ActionTags);
     }
 }
 

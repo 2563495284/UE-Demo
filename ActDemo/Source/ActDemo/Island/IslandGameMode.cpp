@@ -211,9 +211,9 @@ bool AIslandGameMode::PlanIslandLayout(FString& Error)
     {
         UE_LOG(LogTemp, Warning, TEXT("DecoyChestCount %d clamped to %d"), DecoyChestCount, Decoys);
     }
-    const AVoxelTerrain* Terrain = GetTerrain();
-    const auto& Circles = Terrain->GetSearchCircles();
-    const auto& Density = *Terrain->GetDensity();
+    const AVoxelTerrain* IslandTerrain = GetTerrain();
+    const auto& Circles = IslandTerrain->GetSearchCircles();
+    const auto& Density = *IslandTerrain->GetDensity();
     const auto& Survey = DockSurface;
     const auto CanReachDecoy = [&Survey](FVector2D XY){ return IslandNeutral::CanReachDigSite(Survey,XY); };
     const TArray<FBox2D> SearchObstacles = bExpeditionRoom ? IslandRules::CollectSearchObstacles(*GetWorld()) : TArray<FBox2D>();
@@ -279,7 +279,7 @@ bool AIslandGameMode::PlanIslandLayout(FString& Error)
         }
 #endif
         IslandNeutral::Generate(Survey, LayoutSeed, HiddenLayout, DepartureScenery->Facilities);
-        DepartureScenery->Sites = IslandRouteLayout::Build(*GetWorld(), *Terrain, Survey, HiddenLayout, DepartureScenery->Facilities);
+        DepartureScenery->Sites = IslandRouteLayout::Build(*GetWorld(), *IslandTerrain, Survey, HiddenLayout, DepartureScenery->Facilities);
     }
     return true;
 }
@@ -699,16 +699,16 @@ void AIslandGameMode::TryRevealChest(int32 Index)
         return;
 
     const FVector Center = HiddenLayout.GetCenter(Index);
-    const AVoxelTerrain* Terrain = GetTerrain();
+    const AVoxelTerrain* IslandTerrain = GetTerrain();
     if (bExpeditionRoom)
     {
-        const FVoxelDensity* Soil = Terrain->GetDensity();
+        const FVoxelDensity* Soil = IslandTerrain->GetDensity();
         if (!Soil || !AIslandChest::IsLidExposed(*Soil, Center)) return;
     }
-    else if (!Terrain->IsVolumeClear(FBox::BuildAABB(Center, IslandRules::ChestExtent))) return;
+    else if (!IslandTerrain->IsVolumeClear(FBox::BuildAABB(Center, IslandRules::ChestExtent))) return;
     if (AIslandChest* Chest = GetWorld()->SpawnActor<AIslandChest>(Center, FRotator::ZeroRotator))
     {
-        if (bExpeditionRoom) Chest->SeatAtReveal(*Terrain);
+        if (bExpeditionRoom) Chest->SeatAtReveal(*IslandTerrain);
         Chest->SetPrize(bPrize);
         Exposed[Index] = Chest;
     }

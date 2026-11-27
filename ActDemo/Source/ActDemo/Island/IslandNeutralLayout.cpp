@@ -27,9 +27,9 @@ namespace NeutralLayoutDetail
 {
     // A path connects neighbouring floor samples. A blocker is expanded by the pawn
     // radius plus half an edge, so a graph edge can never jump across a narrow post.
-    constexpr int32 Step = 200;
+    constexpr int32 LayoutGridStep = 200;
     constexpr double PawnRadius = 40.;
-    constexpr double EdgeClearance = PawnRadius + Step * .5;
+    constexpr double EdgeClearance = PawnRadius + LayoutGridStep * .5;
     constexpr EIslandNeutralKind RouteKinds[] = {EIslandNeutralKind::Bridge, EIslandNeutralKind::Dam,
         EIslandNeutralKind::SandDepot, EIslandNeutralKind::WindTower};
     constexpr int32 RouteCount = UE_ARRAY_COUNT(RouteKinds);
@@ -120,8 +120,8 @@ namespace NeutralLayoutDetail
 
         FIslandSurface(UWorld& World, const AVoxelTerrain& InTerrain)
             : Terrain(InTerrain), Density(*Terrain.GetDensity()), Min(Density.Grid.Origin.X,Density.Grid.Origin.Y),
-              Width(Density.Grid.Cells.X * VoxelPlayground::Spacing / Step + 1),
-              Height(Density.Grid.Cells.Y * VoxelPlayground::Spacing / Step + 1)
+              Width(Density.Grid.Cells.X * VoxelPlayground::Spacing / LayoutGridStep + 1),
+              Height(Density.Grid.Cells.Y * VoxelPlayground::Spacing / LayoutGridStep + 1)
         {
             const double Begin = FPlatformTime::Seconds();
             TArray<AExpeditionDock*> Landings;
@@ -193,7 +193,7 @@ namespace NeutralLayoutDetail
             Cells.SetNum(Width*Height);
             for (int32 Y=0; Y<Height; ++Y) for (int32 X=0; X<Width; ++X)
             {
-                const FVector2D P = Min + FVector2D(X*Step,Y*Step);
+                const FVector2D P = Min + FVector2D(X*LayoutGridStep,Y*LayoutGridStep);
                 FCell& Cell = Cells[X+Y*Width];
                 Cell.Point = FVector(P,NoGround);
                 if (Density.ShoreDistance(P.X,P.Y)>-int32(PawnRadius)) continue;
@@ -218,7 +218,7 @@ namespace NeutralLayoutDetail
                 for (int32 D=0; D<2; ++D)
                 {
                     FCell& B = Cells[X+Neighbours[D].X+(Y+Neighbours[D].Y)*Width];
-                    if (!B.bOpen || FMath::Abs(A.Point.Z-B.Point.Z)>Step*.85) continue;
+                    if (!B.bOpen || FMath::Abs(A.Point.Z-B.Point.Z)>LayoutGridStep*.85) continue;
                     if (!FloorSupportsEdge(A.Point,B.Point)) continue;
                     A.Links |= 1<<D;
                     B.Links |= 1<<Opposite[D];
@@ -228,7 +228,7 @@ namespace NeutralLayoutDetail
 
         bool FloorSupportsEdge(const FVector& A, const FVector& B) const
         {
-            const FVector2D Axis = (FVector2D(B)-FVector2D(A))/Step;
+            const FVector2D Axis = (FVector2D(B)-FVector2D(A))/LayoutGridStep;
             const FVector2D Side(-Axis.Y,Axis.X);
             for (int32 Lane=-1; Lane<=1; ++Lane)
             {
@@ -236,7 +236,7 @@ namespace NeutralLayoutDetail
                 double Last = Lane==0 ? A.Z : Density.SurfaceAt(FVector2D(A)+Offset).Get(NoGround);
                 for (int32 K=1; K<=4; ++K)
                 {
-                    const FVector2D XY=FVector2D(A)+Offset+Axis*(Step*K/4.);
+                    const FVector2D XY=FVector2D(A)+Offset+Axis*(LayoutGridStep*K/4.);
                     const double H=Lane==0 && K==4 ? B.Z : Density.SurfaceAt(XY).Get(NoGround);
                     if (H < -25. || FMath::Abs(H-Last)>48.) return false;
                     Last=H;
@@ -247,8 +247,8 @@ namespace NeutralLayoutDetail
 
         int32 NearestCell(FVector2D P, double Range, bool bFromDock = false) const
         {
-            const int32 CX=FMath::RoundToInt((P.X-Min.X)/Step), CY=FMath::RoundToInt((P.Y-Min.Y)/Step);
-            const int32 Radius=FMath::CeilToInt(Range/Step);
+            const int32 CX=FMath::RoundToInt((P.X-Min.X)/LayoutGridStep), CY=FMath::RoundToInt((P.Y-Min.Y)/LayoutGridStep);
+            const int32 Radius=FMath::CeilToInt(Range/LayoutGridStep);
             int32 Best=INDEX_NONE;
             double BestDS=Range*Range;
             for (int32 Y=FMath::Max(0,CY-Radius); Y<=FMath::Min(Height-1,CY+Radius); ++Y)
@@ -263,7 +263,7 @@ namespace NeutralLayoutDetail
 
         double HeightAt(FVector2D P) const
         {
-            const FVector2D Grid=(P-Min)/Step;
+            const FVector2D Grid=(P-Min)/LayoutGridStep;
             const int32 X=FMath::FloorToInt(Grid.X),Y=FMath::FloorToInt(Grid.Y);
             if (X<0 || X+1>=Width || Y<0 || Y+1>=Height) return NoGround;
             const int32 Id=X+Y*Width;
@@ -412,10 +412,10 @@ namespace NeutralLayoutDetail
             for (const FBox2D& Footprint : Taken)
             {
                 const FBox2D R=Footprint.ExpandBy(EdgeClearance);
-                const FIntPoint A(FMath::Max(0,FMath::CeilToInt((R.Min.X-Min.X)/Step)),
-                    FMath::Max(0,FMath::CeilToInt((R.Min.Y-Min.Y)/Step)));
-                const FIntPoint B(FMath::Min(Width-1,FMath::FloorToInt((R.Max.X-Min.X)/Step)),
-                    FMath::Min(Height-1,FMath::FloorToInt((R.Max.Y-Min.Y)/Step)));
+                const FIntPoint A(FMath::Max(0,FMath::CeilToInt((R.Min.X-Min.X)/LayoutGridStep)),
+                    FMath::Max(0,FMath::CeilToInt((R.Min.Y-Min.Y)/LayoutGridStep)));
+                const FIntPoint B(FMath::Min(Width-1,FMath::FloorToInt((R.Max.X-Min.X)/LayoutGridStep)),
+                    FMath::Min(Height-1,FMath::FloorToInt((R.Max.Y-Min.Y)/LayoutGridStep)));
                 for (int32 Y=A.Y; Y<=B.Y; ++Y) for (int32 X=A.X; X<=B.X; ++X) Blocked[X+Y*Width]=true;
             }
             for (int32 Id : Destinations) if (Blocked[Id]) return false;

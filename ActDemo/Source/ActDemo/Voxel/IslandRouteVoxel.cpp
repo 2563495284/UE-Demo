@@ -17,12 +17,11 @@
 
 namespace
 {
-    constexpr int32 Band = VoxelSurfaceKernel::Band;
     constexpr int32 ChunkSide = VoxelSurfaceKernel::CellsPerChunk;
 
     FIntVector Rounded(FVector V)
     {
-        return {FMath::RoundToInt(V.X), FMath::RoundToInt(V.Y), FMath::RoundToInt(V.Z)};
+        return {FMath::RoundToInt32(V.X), FMath::RoundToInt32(V.Y), FMath::RoundToInt32(V.Z)};
     }
 
     void WriteVarUInt(TArray<uint8>& Out, uint32 N)
@@ -69,7 +68,7 @@ bool UIslandRouteVoxelComponent::Inside(FIntVector P) const
 
 int8 UIslandRouteVoxelComponent::At(FIntVector P) const
 {
-    return Inside(P) ? Samples[Index(P)] : int8(Band);
+    return Inside(P) ? Samples[Index(P)] : int8(VoxelSurfaceKernel::Band);
 }
 
 FBox UIslandRouteVoxelComponent::GetFieldLocalBounds() const
@@ -77,18 +76,18 @@ FBox UIslandRouteVoxelComponent::GetFieldLocalBounds() const
     return Samples.IsEmpty() ? FBox(ForceInit) : FBox(GridStart, GridStart + FVector(Size - FIntVector(1)) * Step);
 }
 
-bool UIslandRouteVoxelComponent::InitializeField(const FBox& LocalBounds, double Spacing,
+bool UIslandRouteVoxelComponent::InitializeField(const FBox& FieldBounds, double Spacing,
     TFunctionRef<FRouteVoxelSample(FVector)> SampleShape)
 {
-    if (!LocalBounds.IsValid || !FMath::IsFinite(Spacing) || Spacing <= 0.) return false;
-    const FVector Span = LocalBounds.GetSize() / Spacing;
+    if (!FieldBounds.IsValid || !FMath::IsFinite(Spacing) || Spacing <= 0.) return false;
+    const FVector Span = FieldBounds.GetSize() / Spacing;
     if (Span.GetMax() > 2048.) return false;
     const FIntVector Points(FMath::CeilToInt(Span.X) + 5, FMath::CeilToInt(Span.Y) + 5, FMath::CeilToInt(Span.Z) + 5);
     const int64 Num = int64(Points.X) * Points.Y * Points.Z;
     if (Num > 2000000) return false;
     Size = Points;
     Step = Spacing;
-    GridStart = LocalBounds.Min - FVector(2. * Step);
+    GridStart = FieldBounds.Min - FVector(2. * Step);
     Samples.SetNumUninitialized(Num);
     Pigments.SetNumUninitialized(Num);
     SolidCount = 0;
@@ -96,7 +95,7 @@ bool UIslandRouteVoxelComponent::InitializeField(const FBox& LocalBounds, double
     {
         const FRouteVoxelSample Value = SampleShape(GridStart + FVector(Coordinates(I)) * Step);
         const double D = Value.Distance * VoxelSurfaceKernel::Spacing / Step;
-        int32 Signed = FMath::RoundToInt(FMath::Clamp(D, -double(Band), double(Band)));
+        int32 Signed = FMath::RoundToInt(FMath::Clamp(D, -double(VoxelSurfaceKernel::Band), double(VoxelSurfaceKernel::Band)));
         if (Value.Distance < 0. && Signed == 0) Signed = -1;
         Samples[I] = Signed;
         // Procedural mesh vertex colors are uploaded as unorm bytes and read as linear pigment.
@@ -119,7 +118,7 @@ double UIslandRouteVoxelComponent::SignedDistanceLocal(FVector Local) const
     if (Step <= 0.) return BIG_NUMBER;
     const FVector P = (Local - GridStart) / Step;
     const FIntVector Low(FMath::FloorToInt(P.X), FMath::FloorToInt(P.Y), FMath::FloorToInt(P.Z));
-    if (!Inside(Low)) return double(Band)*Step/VoxelSurfaceKernel::Spacing;
+    if (!Inside(Low)) return double(VoxelSurfaceKernel::Band)*Step/VoxelSurfaceKernel::Spacing;
     const FVector T = P - FVector(Low);
     const auto Plane = [&](int32 Z)
     {
@@ -199,9 +198,9 @@ bool UIslandRouteVoxelComponent::ApplyWorldCut(FVector Point, FVector OutwardNor
     const double ExtraDepth = (LightHalfDepth + LightInset) * (DepthScale - 1.f);
     const FVector Center = Point - N * (LightInset + .5 * ExtraDepth);
     const double Depth = LightHalfDepth + .5 * ExtraDepth;
-    const FBox Bounds = FBox::BuildAABB(Center, FVector(Radius + Depth + Step * 2.)).TransformBy(Transform.Inverse());
-    const FIntVector Low = Rounded((Bounds.Min - GridStart)/Step).ComponentMax(FIntVector(0));
-    const FIntVector High = Rounded((Bounds.Max - GridStart)/Step).ComponentMin(Size - FIntVector(1));
+    const FBox EditBounds = FBox::BuildAABB(Center, FVector(Radius + Depth + Step * 2.)).TransformBy(Transform.Inverse());
+    const FIntVector Low = Rounded((EditBounds.Min - GridStart)/Step).ComponentMax(FIntVector(0));
+    const FIntVector High = Rounded((EditBounds.Max - GridStart)/Step).ComponentMin(Size - FIntVector(1));
     bool bChanged = false;
     for (int32 Z = Low.Z; Z <= High.Z; ++Z)
     for (int32 Y = Low.Y; Y <= High.Y; ++Y)
@@ -213,7 +212,7 @@ bool UIslandRouteVoxelComponent::ApplyWorldCut(FVector Point, FVector OutwardNor
         const double Across = (Delta - N * Along).Size();
         const double Tool = FMath::Max(Across - Radius, FMath::Abs(Along) - Depth);
         int8& Previous = Samples[Index(P)];
-        const int8 Value = FMath::RoundToInt(FMath::Clamp(-Tool * VoxelSurfaceKernel::Spacing / Step, -double(Band), double(Band)));
+        const int8 Value = FMath::RoundToInt(FMath::Clamp(-Tool * VoxelSurfaceKernel::Spacing / Step, -double(VoxelSurfaceKernel::Band), double(VoxelSurfaceKernel::Band)));
         if (Value <= Previous) continue;
         if (Previous < 0 && Value >= 0) --SolidCount;
         Previous = Value;
@@ -244,7 +243,7 @@ void UIslandRouteVoxelComponent::CaptureLoose(TConstArrayView<int32> Cells, FIsl
             for (int32 X=Lo.X; X<=Hi.X; ++X)
             {
                 const int8 Sample=At({X,Y,Z});
-                Patch.Add(Sample>=0 ? Sample : int8(Band));
+                Patch.Add(Sample>=0 ? Sample : int8(VoxelSurfaceKernel::Band));
             }
     for (int32 I : Cells) Patch[Offset(Coordinates(I))] = Samples[I];
 
@@ -273,7 +272,7 @@ bool UIslandRouteVoxelComponent::FallingSection(const TArray<uint8>& Shape, FPro
     BuildSurface(Lo, Lo+Span-FIntVector(1), [&](FIntVector P) -> int8
     {
         P-=Lo;
-        return P.GetMin()>=0 && P.X<Span.X && P.Y<Span.Y && P.Z<Span.Z ? Patch[P.X+Span.X*(P.Y+Span.Y*P.Z)] : int8(Band);
+        return P.GetMin()>=0 && P.X<Span.X && P.Y<Span.Y && P.Z<Span.Z ? Patch[P.X+Span.X*(P.Y+Span.Y*P.Z)] : int8(VoxelSurfaceKernel::Band);
     }, Out);
     Out.bEnableCollision = false;
     return !Out.ProcIndexBuffer.IsEmpty();
@@ -306,7 +305,7 @@ bool UIslandRouteVoxelComponent::CullUnsupported(TFunctionRef<bool(FVector)> IsL
         }
         if (bAnchored) continue;
         if (Loose) CaptureLoose(Group, Loose->AddDefaulted_GetRef());
-        for (int32 I : Group) Samples[I]=Band;
+        for (int32 I : Group) Samples[I]=VoxelSurfaceKernel::Band;
         SolidCount-=Group.Num();
     }
     if (Before==SolidCount) return false;

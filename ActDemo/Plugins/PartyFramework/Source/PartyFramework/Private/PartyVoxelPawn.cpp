@@ -137,9 +137,9 @@ void APartyVoxelPawn::UpdateCrewModel()
 {
     const auto* Appearance=Cast<IPartyCrewAppearance>(GetPlayerState());
     bool bLongPaws=false;
-    UStaticMesh* Mesh=Appearance ? Appearance->GetPartyCharacterMesh(bLongPaws) : nullptr;
+    UStaticMesh* SculptureMesh=Appearance ? Appearance->GetPartyCharacterMesh(bLongPaws) : nullptr;
     USkeletalMesh* Skin=Appearance ? Appearance->GetPartyCharacterRig() : nullptr;
-    if (CrewSculpture->GetStaticMesh()==Mesh && CrewRig->GetSkinnedAsset()==Skin) return;
+    if (CrewSculpture->GetStaticMesh()==SculptureMesh && CrewRig->GetSkinnedAsset()==Skin) return;
     CrewRig->SetSkinnedAssetAndUpdate(Skin);
     CrewRig->SetVisibility(Skin!=nullptr);
     CrewBadge->SetRelativeLocationAndRotation(Skin ? Appearance->GetCrewBadgeAnchor()+FVector(-2.2,0.,.35-PartyCharacterControl::StandingHalfHeight) : FVector(-36.,0.,-26.),
@@ -153,13 +153,13 @@ void APartyVoxelPawn::UpdateCrewModel()
         EyePaws[I]->SetRelativeScale3D(Fist ? FVector(.20,I ? .20 : -.20,.20) : FVector(.22,I ? .14 : -.14,.17));
     }
 
-    CrewSculpture->SetStaticMesh(Mesh);
+    CrewSculpture->SetStaticMesh(SculptureMesh);
     for (const auto& Part : SuitParts)
     {
-        if (Part==CrewSculpture) Part->SetVisibility(Mesh && !Skin);
-        else if (Part==CrewBadge) Part->SetVisibility(Mesh || Skin);
+        if (Part==CrewSculpture) Part->SetVisibility(SculptureMesh && !Skin);
+        else if (Part==CrewBadge) Part->SetVisibility(SculptureMesh || Skin);
         else if (Gloves.Contains(Part) || Boots.Contains(Part)) Part->SetVisibility(!Skin);
-        else Part->SetVisibility(!Mesh && !Skin);
+        else Part->SetVisibility(!SculptureMesh && !Skin);
     }
     for (const auto& Glove : Gloves)
     {

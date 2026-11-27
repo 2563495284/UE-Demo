@@ -29,13 +29,13 @@ private:
     void Keep();
     void Revert();
     EActiveTimerReturnType CheckDeadline(double Now, float Delta);
-    TSharedRef<SWidget> Button(FName Tag, TAttribute<FText> Caption, TFunction<void()> Action,
+    TSharedRef<SWidget> Button(FName WidgetTag, TAttribute<FText> Caption, TFunction<void()> Action,
         bool bStrong = false, TAttribute<bool> Enabled = true, TAttribute<FText> AccessibleName = {});
     void Row(const FText& Name, TSharedRef<SWidget> Control);
-    void Choice(FName Tag, const FText& Name, TAttribute<FText> Value, TFunction<void(int32)> Step,
+    void Choice(FName WidgetTag, const FText& Name, TAttribute<FText> Value, TFunction<void(int32)> Step,
         TAttribute<bool> Enabled = true);
-    void Toggle(FName Tag, const FText& Name, bool FIslandSettingsDraft::* Field);
-    void Slider(FName Tag, const FText& Name, float FIslandSettingsDraft::* Field, float Minimum,
+    void Toggle(FName WidgetTag, const FText& Name, bool FIslandSettingsDraft::* Field);
+    void Slider(FName WidgetTag, const FText& Name, float FIslandSettingsDraft::* Field, float Minimum,
         float Maximum, float Increment, TAttribute<FText> Readout);
 
     TWeakObjectPtr<UIslandClientSettings> Settings;

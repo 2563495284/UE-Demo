@@ -454,13 +454,13 @@ void AIslandPlayerController::SetPartyTravelLocked(bool bLocked)
     {
         ClearHeldIslandActions();
         SetVoxelInputEnabled(false);
-        if (auto* Character = Cast<ACharacter>(GetPawn()))
+        if (auto* ControlledCharacter = Cast<ACharacter>(GetPawn()))
         {
-            Character->StopJumping();
-            Character->GetCharacterMovement()->StopMovementImmediately();
-            Character->GetCharacterMovement()->DisableMovement();
+            ControlledCharacter->StopJumping();
+            ControlledCharacter->GetCharacterMovement()->StopMovementImmediately();
+            ControlledCharacter->GetCharacterMovement()->DisableMovement();
         }
-        if (auto* Pawn = Cast<APartyPawn>(GetPawn())) Pawn->ReleaseLocalPartyInput();
+        if (auto* PartyPawn = Cast<APartyPawn>(GetPawn())) PartyPawn->ReleaseLocalPartyInput();
     }
     else if (GetHero())
     {
@@ -694,9 +694,9 @@ void AIslandPlayerController::ClientReturnFromParty_Implementation(uint32 RoundI
     if (RoundId != LocalPartyRound || bCanUnloadParty) return;
     bPartyReturning = true;
     bCanUnloadParty = true;
-    if (APartyPawn* Pawn = Cast<APartyPawn>(GetPawn()))
+    if (APartyPawn* PartyPawn = Cast<APartyPawn>(GetPawn()))
     {
-        Pawn->ReleaseLocalPartyInput();
+        PartyPawn->ReleaseLocalPartyInput();
     }
     ReleasePartyAssets();
     if (bPartyActivating)
@@ -741,11 +741,11 @@ void AIslandPlayerController::UpdatePartyClient()
         if (bWaitingForVenue && PartyVenue && (PartyVenue->IsLevelVisible() ||
             PartyVenue->GetLevelStreamingState()==ELevelStreamingState::FailedToLoad))
             ReportPartyAssets(LocalPartyRound);
-        const APartyPawn* Pawn = Cast<APartyPawn>(GetPawn());
-        if (const auto* VoxelPawn = Cast<APartyVoxelPawn>(Pawn); VoxelPawn && VoxelPawn->GetSession()
+        const APartyPawn* PartyPawn = Cast<APartyPawn>(GetPawn());
+        if (const auto* VoxelPawn = Cast<APartyVoxelPawn>(PartyPawn); VoxelPawn && VoxelPawn->GetSession()
             && PartyVenue && PartyVenue->IsLevelVisible() && PartyVenue->GetLoadedLevel())
             VoxelPawn->GetSession()->BindVenueLevel(*PartyVenue->GetLoadedLevel());
-        if (!bPartyPawnReadySent && Pawn && Pawn->HasLocalPartyInput())
+        if (!bPartyPawnReadySent && PartyPawn && PartyPawn->HasLocalPartyInput())
         {
             bPartyPawnReadySent = true;
             UE_LOG(LogTemp, Display, TEXT("PARTY_PAWN_READY round=%u"), LocalPartyRound);

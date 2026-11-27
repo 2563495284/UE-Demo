@@ -43,10 +43,10 @@ void AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thrower, const F
         return;
     }
 
-    AVoxelTerrain* Terrain = GetTerrain();
-    if (!Terrain || !Hit.GetActor()) return;
+    AVoxelTerrain* IslandTerrain = GetTerrain();
+    if (!IslandTerrain || !Hit.GetActor()) return;
     const bool bWide = Round->HasDecoyToolBoost(Thrower.GetTeam());
-    if (Hit.GetActor() == Terrain)
+    if (Hit.GetActor() == IslandTerrain)
     {
         QueueMudLanding(Hit.ImpactPoint, Hit.ImpactNormal, bWide);
         return;
@@ -74,7 +74,7 @@ void AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thrower, const F
     {
         FHitResult Ground;
         const FVector Probe = Hit.ImpactPoint + Hit.ImpactNormal * 20.;
-        if (Terrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
+        if (IslandTerrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
             QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal, bWide);
     }
     if (auto* Prop = Cast<AIslandNeutralProp>(MechanismHit.GetActor())) Prop->ReceiveMudImpact(MechanismHit);
