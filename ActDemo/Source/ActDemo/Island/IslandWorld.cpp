@@ -14,6 +14,13 @@
 #include "ProceduralMeshComponent.h"
 #include "UObject/ConstructorHelpers.h"
 
+namespace
+{
+    const FVector ClosedLidExtent(45.,34.,7.);
+    // Stock-space section of SM_CofferLid, running from the crown to the bottom of its lip.
+    const FVector2D LidProfile[] = {{0.,50.}, {12.,48.}, {28.,35.}, {42.,15.}, {50.,-10.}, {50.,-50.}};
+}
+
 AIslandChest::AIslandChest()
 {
     bReplicates = true;
@@ -60,7 +67,7 @@ AIslandChest::AIslandChest()
     LidHinge = CreateDefaultSubobject<USceneComponent>(TEXT("Hinge"));
     LidHinge->SetupAttachment(Frame);
     LidHinge->SetRelativeLocation(FVector(0, -34, 18));
-    LidMesh = MakePanel(TEXT("Lid"), LidHinge, FVector(0, 34, 7), FVector(45, 34, 7), Clue.Object, Crown.Object);
+    LidMesh = MakePanel(TEXT("Lid"), LidHinge, IslandRules::ClosedLidCenter - LidHinge->GetRelativeLocation(), ClosedLidExtent, Clue.Object, Crown.Object);
     ClaspMesh = MakePanel(TEXT("Clasp"), LidHinge, FVector(0, 68, 0), FVector(7.5, 2., 9.), Prize.Object, Hasp.Object);
     for (int32 I = 0; I < 2; ++I)
     {
@@ -89,6 +96,30 @@ void AIslandChest::SetPrize(bool bValue)
 {
     bPrize = bValue;
     OnRep_Prize();
+}
+
+bool AIslandChest::IsLidExposed(const FVoxelDensity& Soil, FVector BuriedCenter)
+{
+    const FVector Lid = BuriedCenter + IslandRules::ClosedLidCenter;
+    if (Soil.IsVolumeSolid(FBox::BuildAABB(Lid,ClosedLidExtent))) return false;
+
+    const auto HasAir = [&](double X, double Y, double Z)
+    {
+        return Soil.SignedDistanceAt(Lid + FVector(X,Y,Z) * (ClosedLidExtent/50.)) > 0.;
+    };
+    // Across the grain, check both ends and successive strips under half a soil cell apart.
+    constexpr int32 Strips = 8;
+    for (int32 I=0; I<=Strips; ++I)
+    {
+        const double X = FMath::Lerp(-50.,50.,double(I)/Strips);
+        for (const auto& YZ : LidProfile)
+        {
+            if (HasAir(X,YZ.X,YZ.Y) || (YZ.X > 0. && HasAir(X,-YZ.X,YZ.Y))) return true;
+            // The end-grain faces extend down to the lip. The underside is inside the coffer.
+            if ((I==0 || I==Strips) && (HasAir(X,YZ.X,-35.) || HasAir(X,-YZ.X,-35.))) return true;
+        }
+    }
+    return false;
 }
 
 void AIslandChest::SeatAtReveal(const AVoxelTerrain& Terrain)
@@ -158,8 +189,9 @@ void AIslandChest::OnRep_ChallengeResolved()
 
 double AIslandChest::GetInteractionDistanceSquared(FVector Origin) const
 {
-    const FVector Center = GetActorLocation();
-    return FMath::Min(FVector::DistSquared(Origin,Center), FVector::DistSquared(Origin,GetDiscoveryPoint()));
+    const double ToCenter = FVector::DistSquared(Origin,GetActorLocation());
+    const double ToDiscovery = FVector::DistSquared(Origin,GetDiscoveryPoint());
+    return FMath::Min3(ToCenter,ToDiscovery,LidMesh->Bounds.GetBox().ComputeSquaredDistanceToPoint(Origin));
 }
 
 bool AIslandChest::HasDiscoveryTarget() const
@@ -167,18 +199,49 @@ bool AIslandChest::HasDiscoveryTarget() const
     return DiscoveryRise > 0. || (IslandSceneryVoxels::IsExhausted(BoxMesh) && IslandSceneryVoxels::IsExhausted(LidMesh));
 }
 
-bool AIslandChest::IsReachableFrom(const AVoxelCharacter& Hero) const
+bool AIslandChest::IsReachableFrom(const AVoxelCharacter& Hero, FVector* VisiblePoint) const
 {
-    const FVector Origin = Hero.GetAimOrigin();
+    return FindInteractionPoint(Hero.GetAimOrigin(),Hero,VisiblePoint);
+}
+
+bool AIslandChest::FindInteractionPoint(FVector Origin, const AVoxelCharacter& Hero, FVector* VisiblePoint) const
+{
     const FCollisionQueryParams Query(SCENE_QUERY_STAT(IslandReachableChest), false, &Hero);
-    const auto Reach = [&](FVector Spot)
+    const auto Reach = [&](FVector Spot, bool bRequirePanel)
     {
-        if (FVector::DistSquared(Origin,Spot) > FMath::Square(IslandRules::OpenReach)) return false;
         FHitResult Hit;
-        return !GetWorld()->LineTraceSingleByChannel(Hit, Origin, Spot, ECC_Visibility, Query) || Hit.GetActor() == this;
+        if (GetWorld()->LineTraceSingleByChannel(Hit,Origin,Spot,ECC_Visibility,Query))
+        {
+            if (Hit.GetActor()!=this) return false;
+            Spot = Hit.ImpactPoint;
+        }
+        else if (bRequirePanel) return false;
+        if (FVector::DistSquared(Origin,Spot)>FMath::Square(IslandRules::OpenReach)) return false;
+        if (VisiblePoint) *VisiblePoint = Spot;
+        return true;
     };
+    if (GetInteractionDistanceSquared(Origin)>FMath::Square(IslandRules::OpenReach)) return false;
     const FVector Center = GetActorLocation();
-    return Reach(Center) || (DiscoveryRise > 0. && Reach(Center+FVector(0.,0.,DiscoveryRise)));
+    if (Reach(Center,false) || (DiscoveryRise > 0. && Reach(GetDiscoveryPoint(),false))) return true;
+    if (LidMesh->Bounds.GetBox().ComputeSquaredDistanceToPoint(Origin) > FMath::Square(IslandRules::OpenReach)) return false;
+
+    // The ray to the centre can still hit dirt when just one lip has broken through.
+    // Require a physical panel hit for these extra sightlines (a missing board gives no reach).
+    if (Reach(Origin+Hero.GetViewRotation().Vector()*IslandRules::OpenReach,true)) return true;
+    const FTransform LidPose = LidMesh->GetComponentTransform();
+    for (double X : {0.,-49.,49.})
+        for (int32 ProfileIndex : {0,3,4})
+        {
+            const FVector2D YZ = LidProfile[ProfileIndex];
+            for (double Side : {-1.,1.})
+            {
+                const FVector Target = LidPose.TransformPosition({X,Side*YZ.X,YZ.Y});
+                const FVector End = Target + (Target-Origin).GetSafeNormal();
+                if (Reach(End,true)) return true;
+                if (YZ.X == 0.) break;
+            }
+        }
+    return false;
 }
 
 void AIslandChest::OnRep_Prize()

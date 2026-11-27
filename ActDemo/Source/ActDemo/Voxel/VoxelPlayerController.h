@@ -22,7 +22,7 @@ public:
     FVector GetExpeditionThrowAim(const AVoxelCharacter& Hero) const;
     FVector GetExpeditionActionAim(EExpeditionAction Action) const;
     void SubmitExpeditionThrow(const FVector& Aim);
-    void OnMudStunChanged(bool bStunned);
+    void CancelMudInputs();
     void SetExpeditionDigHeld(bool bHeld);
     float GetPunchChargeAlpha() const;
     uint8 GetReleasedPunchPower() const { return ReleasedPunchPower; }
@@ -63,7 +63,6 @@ public:
 protected:
     virtual void Punch();
     void TriggerExpeditionEvent(EExpeditionAction Action, bool bHeld, AActor* Target = nullptr);
-    FVector2D GetLocalLookScale() const;
     void BeginPlay() override;
     void EndPlay(const EEndPlayReason::Type Reason) override;
     void DispatchExpeditionAction(EExpeditionAction Action, bool bHeld = false, FVector Aim = FVector::ZeroVector);
@@ -82,13 +81,14 @@ private:
 
     void Move(const FInputActionValue& Value);
     void Look(const FInputActionValue& Value);
+    FVector2D GetLocalLookScale() const;
     void Jump();
     void SwitchPerspective();
     void DigDown();
     void StopDig();
     void StopThrow();
     void SendHeldExpeditionAim();
-    UFUNCTION(Server, Reliable) void ServerExpeditionAction(EExpeditionAction Action, bool bHeld, FVector_NetQuantizeNormal Aim);
+    UFUNCTION(Server, Reliable) void ServerExpeditionAction(EExpeditionAction Action, bool bHeld, FVector_NetQuantizeNormal Aim, bool bStartedAnchored);
     UFUNCTION(Server, Reliable) void ServerReleaseExpeditionAction(EExpeditionAction Action);
     UFUNCTION(Server, Unreliable) void ServerUpdateExpeditionAim(EExpeditionAction Action, FVector_NetQuantizeNormal Aim);
     UFUNCTION(Server, Reliable) void ServerFinishPunch(bool bStrike, FVector_NetQuantizeNormal Aim,float ReportedHoldSeconds);
@@ -100,6 +100,7 @@ private:
     bool bDigHeld = false;
     bool bThrowHeld = false;
     bool bServerDigHeld = false;
+    bool bPeelingAtPress = false;
     bool bServerThrowHeld = false;
     FVector DigAim = FVector::ForwardVector;
     FVector ThrowAim = FVector::ForwardVector;

@@ -1,6 +1,7 @@
 #include "Island/IslandGameMode.h"
-#include "Abilities/ExpeditionMudEffect.h"
+#include "Island/ExpeditionBodyMud.h"
 #include "Island/IslandBreakable.h"
+#include "Island/IslandExcavationEcho.h"
 #include "Island/IslandAttachedMud.h"
 #include "Island/IslandSceneryVoxels.h"
 #include "Voxel/IslandRouteLayout.h"
@@ -39,6 +40,9 @@ AIslandGameMode::AIslandGameMode()
 void AIslandGameMode::BeginPlay()
 {
     Super::BeginPlay();
+    // Bind the island's authored scenery while arriving. The dock and the playing
+    // camera should see the same geometry on either side of the countdown.
+    if (bExpeditionRoom) GetWorld()->SpawnActor<AIslandVoxelEdits>();
 #if !UE_BUILD_SHIPPING
     if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
     {
@@ -120,6 +124,10 @@ void AIslandGameMode::Tick(float DeltaSeconds)
 {
     if (bExpeditionRoom && GetGameState<AIslandGameState>()->Phase == EIslandPhase::Waiting && GetTerrain() && GetTerrain()->IsReady())
     {
+        // Ground and authored landings are immutable while crews are at the dock.
+        // Survey them during arrival, before the first start/cancel input.
+        if (!DockSurface && GetTerrain()->Layout == EVoxelLayout::Expedition)
+            DockSurface = IslandNeutral::Survey(*GetWorld(), *GetTerrain());
         if (!ReturningTeams.IsEmpty() && FPlatformTime::Seconds() >= ReturnDeadline)
         {
             ReturningTeams.Reset();
@@ -143,14 +151,16 @@ void AIslandGameMode::Tick(float DeltaSeconds)
             Member->ForceNetUpdate();
         }
     }
+    if (bExpeditionRoom && GetGameState<AIslandGameState>()->Phase == EIslandPhase::Starting)
+        BuildDepartureScenery();
     Super::Tick(DeltaSeconds);
-    if (!BurialSites.IsEmpty()) CheckMudLandings();
 }
 
 bool AIslandGameMode::IsStartRequested() const
 {
     const auto* Round = GetGameState<AIslandGameState>();
-    return bExpeditionRoom ? Round && Round->Phase == EIslandPhase::Starting
+    return bExpeditionRoom ? Round && Round->Phase == EIslandPhase::Starting && DepartureScenery.IsSet()
+        && (DepartureScenery->IsBuilt() || !DepartureScenery->Error.IsEmpty())
         && Round->GetServerWorldTimeSeconds() >= Round->StartAtServerTime : Super::IsStartRequested();
 }
 
@@ -176,11 +186,26 @@ void AIslandGameMode::RoundSetupFailed(const FString& Error)
 
 bool AIslandGameMode::PrepareRound(FString& Error)
 {
-    if (bExpeditionRoom && !PositionCrews())
+    if (bExpeditionRoom)
     {
-        Error = TEXT("这张地图没有足够的独立出生位，请检查码头布局。");
-        return false;
+        Error = DepartureScenery->Error;
+        if (!Error.IsEmpty()) return false;
+        if (!PositionCrews())
+        {
+            Error = TEXT("这张地图没有足够的独立出生位，请检查码头布局。");
+            return false;
+        }
+        FinishDepartureScenery(true);
     }
+    else if (!PlanIslandLayout(Error)) return false;
+    Exposed.SetNum(HiddenLayout.Num());
+    TeamClues.SetNum(bExpeditionRoom ? Settings.MaxTeams : IslandRules::TeamCount);
+    for (FIslandClues& Clues : TeamClues) Clues.bUsesKeyFragments = bExpeditionRoom;
+    return true;
+}
+
+bool AIslandGameMode::PlanIslandLayout(FString& Error)
+{
     const int32 Decoys = bExpeditionRoom ? Settings.DecoyCount : FMath::Clamp(DecoyChestCount, 0, IslandRules::MaxDecoys);
     if (!bExpeditionRoom && Decoys != DecoyChestCount)
     {
@@ -189,7 +214,7 @@ bool AIslandGameMode::PrepareRound(FString& Error)
     const AVoxelTerrain* Terrain = GetTerrain();
     const auto& Circles = Terrain->GetSearchCircles();
     const auto& Density = *Terrain->GetDensity();
-    const auto Survey = bExpeditionRoom ? IslandNeutral::Survey(*GetWorld(),*Terrain) : IslandNeutral::FSurface();
+    const auto& Survey = DockSurface;
     const auto CanReachDecoy = [&Survey](FVector2D XY){ return IslandNeutral::CanReachDigSite(Survey,XY); };
     const TArray<FBox2D> SearchObstacles = bExpeditionRoom ? IslandRules::CollectSearchObstacles(*GetWorld()) : TArray<FBox2D>();
     if (!bExpeditionRoom && !IslandRules::GenerateLayout(0, Decoys, Circles, Density, HiddenLayout, &Error, true))
@@ -253,28 +278,80 @@ bool AIslandGameMode::PrepareRound(FString& Error)
             return false;
         }
 #endif
-        TArray<FIslandNeutralPlacement> Layout;
-        IslandNeutral::Generate(Survey, LayoutSeed, HiddenLayout, Layout);
-        const auto Sites = IslandRouteLayout::Build(*GetWorld(), *Terrain, Survey, HiddenLayout, Layout);
-        GetWorld()->SpawnActor<AIslandVoxelEdits>();
-        for (const auto& Site : Sites)
-            AIslandRouteVoxel::Spawn(*GetWorld(), Site.Kind, Site.Location, Site.Yaw, Site.Variant);
-        for (const auto& Placement : Layout)
+        IslandNeutral::Generate(Survey, LayoutSeed, HiddenLayout, DepartureScenery->Facilities);
+        DepartureScenery->Sites = IslandRouteLayout::Build(*GetWorld(), *Terrain, Survey, HiddenLayout, DepartureScenery->Facilities);
+    }
+    return true;
+}
+
+void AIslandGameMode::BuildDepartureScenery()
+{
+    if (!GetTerrain() || !GetTerrain()->IsReady()) return;
+    if (!DepartureScenery.IsSet())
+    {
+        auto& Plan = DepartureScenery.Emplace();
+        if (!PlanIslandLayout(Plan.Error) && Plan.Error.IsEmpty()) Plan.Error = TEXT("海岛布局生成失败。");
+        return;
+    }
+    auto& Plan = DepartureScenery.GetValue();
+    if (!Plan.Error.IsEmpty()) return;
+    const double SliceEnd = FPlatformTime::Seconds() + .004;
+    while (!Plan.IsBuilt() && FPlatformTime::Seconds() < SliceEnd)
+    {
+        AActor* Staged = nullptr;
+        if (Plan.Next < Plan.Sites.Num())
         {
+            const auto& Site = Plan.Sites[Plan.Next];
+            Staged = AIslandRouteVoxel::Spawn(*GetWorld(), Site.Kind, Site.Location, Site.Yaw, Site.Variant);
+        }
+        else
+        {
+            const auto& Placement = Plan.Facilities[Plan.Next - Plan.Sites.Num()];
             const FTransform Transform(FRotator(0., Placement.Yaw, 0.), FVector(Placement.Location), IslandNeutral::SiteScale(Placement.Kind));
             auto* Prop = GetWorld()->SpawnActorDeferred<AIslandNeutralProp>(AIslandNeutralProp::StaticClass(),
                 Transform, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
-            if (!Prop) continue;
-            Prop->Initialize(Placement);
-            Prop->FinishSpawning(Transform);
-            NeutralProps.Add(Prop);
-            if (Placement.Kind == EIslandNeutralKind::Tide) Prop->RefreshTide(*Terrain);
+            if (Prop)
+            {
+                Prop->Initialize(Placement);
+                Prop->FinishSpawning(Transform);
+                if (Placement.Kind == EIslandNeutralKind::Tide) Prop->RefreshTide(*GetTerrain());
+                Staged = Prop;
+            }
         }
+        if (!Staged)
+        {
+            Plan.Error = TEXT("海岛场景生成失败，请重新创建房间。");
+            return;
+        }
+        // Only the public scenery replicates during countdown. The server retains
+        // the private treasure layout and each visible end can build meshes before play.
+        Staged->SetActorHiddenInGame(true);
+        Plan.Actors.Add(Staged);
+        ++Plan.Next;
     }
-    Exposed.SetNum(HiddenLayout.Num());
-    TeamClues.SetNum(bExpeditionRoom ? Settings.MaxTeams : IslandRules::TeamCount);
-    for (FIslandClues& Clues : TeamClues) Clues.bUsesKeyFragments = bExpeditionRoom;
-    return true;
+}
+
+void AIslandGameMode::FinishDepartureScenery(bool bLaunch)
+{
+    if (!DepartureScenery.IsSet()) return;
+    for (const auto& Entry : DepartureScenery->Actors)
+    {
+        AActor* Actor = Entry.Get();
+        if (!Actor) continue;
+        if (bLaunch)
+        {
+            Actor->SetActorHiddenInGame(false);
+            Actor->ForceNetUpdate();
+            if (auto* Prop = Cast<AIslandNeutralProp>(Actor)) NeutralProps.Add(Prop);
+        }
+        else Actor->Destroy();
+    }
+#if !UE_BUILD_SHIPPING
+    UE_LOG(LogTemp, Display, TEXT("ISLAND_DEPARTURE_SCENERY launched=%d built=%d expected=%d"),
+        bLaunch, DepartureScenery->Actors.Num(), DepartureScenery->Sites.Num() + DepartureScenery->Facilities.Num());
+#endif
+    DepartureScenery.Reset();
+    if (bLaunch) DockSurface.Reset();
 }
 
 void AIslandGameMode::PostLogin(APlayerController* NewPlayer)
@@ -305,7 +382,6 @@ void AIslandGameMode::Logout(AController* Exiting)
         RemovePartyPlayer(*Player);
         SeaStates.Remove(Player);
         NextRallyAt.Remove(Player);
-        BurialSites.Remove(Player);
     }
     Super::Logout(Exiting);
     if (bExpeditionRoom && !bRestarting)
@@ -418,6 +494,7 @@ void AIslandGameMode::CancelStart(const FString& Reason)
     auto* Round = GetGameState<AIslandGameState>();
     if (Round && Round->Phase == EIslandPhase::Starting)
     {
+        FinishDepartureScenery(false);
         Round->Phase = EIslandPhase::Waiting;
         Round->StartAtServerTime = 0.0;
         Round->RoomNotice = Reason;
@@ -577,7 +654,13 @@ bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim, u
     // A held tool has already committed to a punch. Respect a lid that became
     // reachable while winding up, including a discovery target whose boards are gone.
     auto* Player = Cast<AIslandPlayerController>(Hero.GetController());
-    if (bExpeditionRoom && bProtectChest && Player && Player->GetChestAlongAim(Aim)) return true;
+    if (bExpeditionRoom)
+    {
+        FHitResult Rescue;
+        if (TraceCrewMud(Hero, Start, Start + Aim * AimReach, Rescue))
+            return CastChecked<AVoxelCharacter>(Rescue.GetActor())->GetBodyMud()->Strike(Rescue.Item);
+        if (bProtectChest && Player && Player->GetChestAlongAim(Aim)) return true;
+    }
     FHitResult Hit;
     if (AIslandNeutralProp::TraceShovel(*GetWorld(), Hit, Start, Start + Aim * AimReach, Query))
     {
@@ -585,14 +668,15 @@ bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim, u
         {
             const auto* Round = GetGameState<AIslandGameState>();
             const bool bWide = Player && Round && Round->HasDecoyToolBoost(Player->GetTeam());
-            const float Scale = PartyPunch::RadiusScale(PunchPower,bWide);
-            if (auto* Mud = Cast<AIslandAttachedMud>(Hit.GetActor())) { Mud->Strike(Hit,Scale); return true; }
-            if (auto* Route = Cast<AIslandRouteVoxel>(Hit.GetActor())) { Route->Strike(Hit,Scale); return true; }
+            const float RadiusScale = PartyPunch::RadiusScale(PunchPower,bWide);
+            const float DepthScale = PartyPunch::DepthScale(PunchPower);
+            if (auto* Mud = Cast<AIslandAttachedMud>(Hit.GetActor())) { Mud->Strike(Hit,RadiusScale,DepthScale); return true; }
+            if (auto* Route = Cast<AIslandRouteVoxel>(Hit.GetActor())) { Route->Strike(Hit,RadiusScale,DepthScale); return true; }
             if (auto* Neutral = Cast<AIslandNeutralProp>(Hit.GetActor()))
                 if (Player && Neutral->Strike(*Player,Hit)) return true;
             if (Cast<UIslandMeshVoxels>(IslandSceneryVoxels::SurfaceFor(Hit.GetComponent())))
             {
-                IslandSceneryVoxels::Strike(Hit,Scale);
+                IslandSceneryVoxels::Strike(Hit,RadiusScale,DepthScale);
                 return true;
             }
             return Hit.GetActor() != GetTerrain();
@@ -603,10 +687,11 @@ bool AIslandGameMode::TryStrikeProp(AVoxelCharacter& Hero, const FVector& Aim, u
         }
         return AIslandSceneryDamage::RemoveAuthoredPiece(Hit);
     }
-    return false;
+    // A quick empty-handed swing brushes the newest clod off the player's own back.
+    return bExpeditionRoom && PunchPower <= PartyPunch::Quantize(.25f) && Hero.GetBodyMud()->Peel();
 }
 
-void AIslandGameMode::RevealChestIfClear(int32 Index)
+void AIslandGameMode::TryRevealChest(int32 Index)
 {
     if (Exposed[Index] || ConsumedDecoys.Contains(Index)) return;
     const bool bPrize = Index == IslandRules::PrizeIndex;
@@ -614,10 +699,16 @@ void AIslandGameMode::RevealChestIfClear(int32 Index)
         return;
 
     const FVector Center = HiddenLayout.GetCenter(Index);
-    if (!GetTerrain()->IsVolumeClear(FBox::BuildAABB(Center, IslandRules::ChestExtent))) return;
+    const AVoxelTerrain* Terrain = GetTerrain();
+    if (bExpeditionRoom)
+    {
+        const FVoxelDensity* Soil = Terrain->GetDensity();
+        if (!Soil || !AIslandChest::IsLidExposed(*Soil, Center)) return;
+    }
+    else if (!Terrain->IsVolumeClear(FBox::BuildAABB(Center, IslandRules::ChestExtent))) return;
     if (AIslandChest* Chest = GetWorld()->SpawnActor<AIslandChest>(Center, FRotator::ZeroRotator))
     {
-        if (bExpeditionRoom) Chest->SeatAtReveal(*GetTerrain());
+        if (bExpeditionRoom) Chest->SeatAtReveal(*Terrain);
         Chest->SetPrize(bPrize);
         Exposed[Index] = Chest;
     }
@@ -625,6 +716,12 @@ void AIslandGameMode::RevealChestIfClear(int32 Index)
 
 void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerController* Source)
 {
+    for (AVoxelPlayerController* Player : GetPlayers())
+        if (auto* Hero = Player->GetHero(); Hero && Hero->GetBodyMud()->Num())
+        {
+            Hero->GetBodyMud()->RefreshContacts(); // Includes multi-player chains in the same pass.
+            break;
+        }
     for (AIslandNeutralProp* Prop : NeutralProps)
         if (Prop->GetKind() == EIslandNeutralKind::Tide) Prop->RefreshTide(*GetTerrain());
     if (Edit.Action == EVoxelAction::Fill)
@@ -632,30 +729,21 @@ void AIslandGameMode::OnTerrainCommitted(const FVoxelEdit& Edit, AVoxelPlayerCon
         return;
     }
     AIslandPlayerController* Digger = bExpeditionRoom ? Cast<AIslandPlayerController>(Source) : nullptr;
-    const FVector BrushCenter(Edit.Center);
-    const double BrushRadius = Edit.BrushId == VoxelPlayground::ShallowCut ? Edit.PunchRadius() : VoxelPlayground::RadiusFor(Edit.BrushId);
-    bool bFaintEcho = false;
-    bool bStrongEcho = false;
+    const int32 Team = Digger ? Digger->GetTeam() : INDEX_NONE;
+    FIslandExcavationEcho Echo{FVector(Edit.Center)};
     for (int32 Index = 0; Index < Exposed.Num(); ++Index)
     {
-        const FVector Center = HiddenLayout.GetCenter(Index);
-        const FBox Bounds = FBox::BuildAABB(Center, IslandRules::ChestExtent);
-        RevealChestIfClear(Index);
-        if (Digger && !Exposed[Index] && CanClaimChest(Digger->GetTeam(), Index))
+        // Include the chest uncovered by this stroke in its final echo.
+        if (TeamClues.IsValidIndex(Team) && !Exposed[Index] && !ConsumedDecoys.Contains(Index)
+            && (Index != IslandRules::PrizeIndex || TeamClues[Team].CanOpenPrize()))
         {
-            const double ToBox = FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(BrushCenter));
-            const double Gap = ToBox - BrushRadius;
-            const auto& Circles = GetTerrain()->GetSearchCircles();
-            const int32 Area = HiddenLayout.IsDecoy(Index) ? HiddenLayout.Decoys[Index - HiddenLayout.Centers.Num()].ClueIndex : Index;
-            const double HearingRange = Circles.IsValidIndex(Area)
-                ? FMath::Clamp(Circles[Area].Radius * .55, 550., 1200.) : 550.;
-            bFaintEcho |= Gap <= HearingRange;
-            bStrongEcho |= Gap <= 250.;
+            Echo.Consider(HiddenLayout.GetCenter(Index));
         }
+        TryRevealChest(Index);
     }
-    if (Digger && bFaintEcho)
+    if (Digger)
     {
-        Digger->ClientExcavationEcho(bStrongEcho);
+        Digger->ClientExcavationEcho(Echo.GetDistanceCm(), Echo.GetDirection());
     }
 }
 
@@ -692,10 +780,14 @@ bool AIslandGameMode::CanFillAt(const FVoxelEdit& Edit) const
 
 bool AIslandGameMode::CanPlayerAct(const AVoxelPlayerController& Player) const
 {
+    return CanPlayerPunch(Player) && (!bExpeditionRoom || !Player.GetHero()->IsMudAnchored());
+}
+
+bool AIslandGameMode::CanPlayerPunch(const AVoxelPlayerController& Player) const
+{
     const FSeaState* Sea = SeaStates.Find(&Player);
     return GetGameState<AIslandGameState>()->Phase == EIslandPhase::Hunting
-        && Super::CanPlayerAct(Player) && (!Sea || Sea->RespawnAt == 0.0)
-        && (!bExpeditionRoom || !Player.GetHero()->IsMudStunned());
+        && Super::CanPlayerAct(Player) && (!Sea || Sea->RespawnAt == 0.0);
 }
 
 int32 AIslandGameMode::FindReachableChest(const AIslandPlayerController& Player) const
@@ -826,7 +918,7 @@ bool AIslandGameMode::GiveClue(int32 Team, int32 Index)
     if (Snapshot.Complete())
     {
         Snapshot.Crossing = HiddenLayout.Crossing;
-        if (bExpeditionRoom) RevealChestIfClear(IslandRules::PrizeIndex);
+        if (bExpeditionRoom) TryRevealChest(IslandRules::PrizeIndex);
     }
     SendClueSnapshot(Team);
     return true;
@@ -1032,8 +1124,6 @@ void AIslandGameMode::ReturnToSafeGround(AVoxelPlayerController& Player)
 {
     if (AVoxelCharacter* Hero = Player.GetHero())
     {
-        BurialSites.Remove(Cast<AIslandPlayerController>(&Player));
-        UExpeditionMudMarkEffect::Clear(*Hero);
         const FTransform Target = FindSafeReturn(Player);
         Hero->ReturnToStart(Target);
         Player.ClientResetView(Target.Rotator());
@@ -1044,7 +1134,7 @@ void AIslandGameMode::RecoverPlayer(AVoxelPlayerController& Player)
 {
     Player.CancelPunchCharge();
     const EIslandPhase Phase = GetGameState<AIslandGameState>()->Phase;
-    if (Phase == EIslandPhase::PartyLoading || Phase == EIslandPhase::PartyPlaying || Phase == EIslandPhase::PartyReturning)
+    if (Phase == EIslandPhase::PartyBriefing || Phase == EIslandPhase::PartyPlaying || Phase == EIslandPhase::PartyReturning)
     {
         return;
     }
@@ -1128,6 +1218,10 @@ void AIslandGameMode::UpdateEnvironment()
 void AIslandGameMode::SetPhase(EIslandPhase Phase)
 {
     AIslandGameState* Round = GetGameState<AIslandGameState>();
+    const bool bLeavingIsland = Round->Phase == EIslandPhase::Hunting && Phase != EIslandPhase::Hunting;
     Round->Phase = Phase;
+    if (bLeavingIsland)
+        for (AVoxelPlayerController* Player : GetPlayers())
+            if (auto* Hero = Player->GetHero()) Hero->GetBodyMud()->Clear();
     Round->ForceNetUpdate();
 }

@@ -1,7 +1,6 @@
 #pragma once
 
-#include "Island/IslandRules.h"
-#include "Island/IslandRoomSettings.h"
+#include "Island/IslandState.h"
 #include "Voxel/VoxelPlayerController.h"
 #include "Island/IslandFallEvent.h"
 #include "IslandPlayerController.generated.h"
@@ -10,7 +9,8 @@ class APartySession;
 class ULevelStreamingDynamic;
 class AIslandChest;
 class AIslandNeutralProp;
-class USoundWave;
+class USoundBase;
+class USoundAttenuation;
 struct FStreamableHandle;
 enum class EIslandChipSurface : uint8;
 
@@ -46,24 +46,32 @@ public:
     bool IsVoxelInputEnabled() const override { return !bMapOpen && Super::IsVoxelInputEnabled(); }
     const FIslandClues& GetLocalClues() const { return LocalClues; }
     FString WaterStatus() const;
-    UFUNCTION(Client, Reliable) void ClientExcavationEcho(bool bStrong);
+    UFUNCTION(Client, Reliable) void ClientExcavationEcho(float DistanceCm, FVector_NetQuantizeNormal DigDirection);
     UFUNCTION(Client, Reliable) void ClientCrewRally(FVector_NetQuantize Position, bool bAtChest, double ExpiresAt);
     bool GetCrewRally(FVector& Position, bool& bAtChest) const;
     double GetEchoAge() const { return FPlatformTime::Seconds() - LastEchoAt; }
-    bool HasStrongEcho() const { return bStrongEcho; }
+    float GetEchoProximity() const;
+    FVector GetEchoDirection() const { return EchoDirection; }
+    bool HasStrongEcho() const { return EchoDistanceCm >= 0.f && EchoDistanceCm <= 250.f; }
     bool HasChestClue(const AIslandChest& Chest) const;
 
     void RestartIsland();
 
     UClass* GetPartySessionClass() const;
     FIslandPartyTransitionView GetPartyTransitionView() const;
+    uint32 GetLocalPartyBriefingRound() const { return LocalPartyBriefingFeature.IsNone() ? 0 : LocalPartyRound; }
+    FName GetLocalPartyBriefingFeature() const { return LocalPartyBriefingFeature; }
+    const TArray<FIslandPartyBriefingMember>& GetPartyBriefingMembers() const;
+    void NotifyPartyBriefingPainted(uint32 RoundId);
     bool IsPartyTravelLocked() const { return bPartyTravelLocked; }
-    bool IsMoveInputIgnored() const override { return bPartyTravelLocked || Super::IsMoveInputIgnored(); }
-    bool IsLookInputIgnored() const override { return bPartyTravelLocked || Super::IsLookInputIgnored(); }
-    UFUNCTION(Client, Reliable) void ClientPrepareParty(uint32 RoundId, FName Feature, bool bAnimate);
+    bool IsMoveInputIgnored() const override { return bPartyTravelLocked || IsInPartyBriefing() || Super::IsMoveInputIgnored(); }
+    bool IsLookInputIgnored() const override { return bPartyTravelLocked || IsInPartyBriefing() || Super::IsLookInputIgnored(); }
+    UFUNCTION(Client, Reliable) void ClientPrepareParty(uint32 RoundId, FName Feature, bool bAnimate, const TArray<FIslandPartyBriefingMember>& Members);
     UFUNCTION(Client, Reliable) void ClientBeginPartyReturn(uint32 RoundId);
     UFUNCTION(Client, Reliable) void ClientReturnFromParty(uint32 RoundId);
     UFUNCTION(Client, Reliable) void ClientRevealParty(uint32 RoundId, bool bReturning);
+    UFUNCTION(Server, Reliable) void ServerAgreeParty(uint32 RoundId);
+    UFUNCTION(Server, Reliable) void ServerForceStartParty(uint32 RoundId);
 
     UFUNCTION(Client, Reliable) void ClientUpdateClues(const FIslandClues& Snapshot);
     UFUNCTION(Client, Reliable) void ClientWaterState(uint8 State);
@@ -71,6 +79,7 @@ public:
     UFUNCTION(Client, Reliable) void ClientSceneryFallContact(uint32 Id, const FIslandFallContact& Contact);
 
 protected:
+    void AutoManageActiveCameraTarget(AActor* SuggestedTarget) override;
     void Punch() override;
     void SetupInputComponent() override;
     void PlayerTick(float DeltaTime) override;
@@ -91,12 +100,15 @@ private:
     UFUNCTION(Server, Reliable) void ServerPartyPawnReady(uint32 RoundId);
     UFUNCTION(Server, Reliable) void ServerPartyUnloaded(uint32 RoundId, bool bSuccess);
 
+    void RecordPartyBriefingPresentation(bool bRendered);
+    void StartPartyPreload(uint32 RoundId, FName Feature);
     void LoadPartyAssets(uint32 RoundId);
     void ReportPartyAssets(uint32 RoundId);
     void UpdatePartyClient();
-    void StartPartyVeil(bool bReturning);
+    void StartPartyReturnVeil();
     void TickPartyVeil();
     void SetPartyTravelLocked(bool bLocked);
+    bool IsInPartyBriefing() const;
     void FinishPartyUnload(uint32 RoundId, bool bSuccess);
     void ReleasePartyAssets();
 
@@ -105,6 +117,13 @@ private:
     TSharedPtr<FStreamableHandle> PartyAssets;
     FString PartyPluginURL;
     uint32 LocalPartyRound = 0;
+    FName LocalPartyBriefingFeature;
+    TArray<FIslandPartyBriefingMember> InitialPartyMembers;
+    uint64 BriefingPresentedFrame = MAX_uint64;
+    bool bPartyPreloadStarted = false;
+#if !UE_BUILD_SHIPPING
+    double EarliestPartyPreloadTime = 0.;
+#endif
     EIslandPartyVeil PartyVeil = EIslandPartyVeil::Clear;
     double VeilStart = 0.;
     uint64 BlackAtFrame = 0;
@@ -120,9 +139,12 @@ private:
     bool bPartyUnloadStarted = false;
 
     FIslandClues LocalClues;
-    UPROPERTY() TObjectPtr<USoundWave> EchoSound;
+    UPROPERTY() TObjectPtr<USoundBase> EchoSound;
+    UPROPERTY() TObjectPtr<USoundAttenuation> EchoAttenuation;
+    void PlayExcavationEcho();
     double LastEchoAt = -1e9;
-    bool bStrongEcho = false;
+    float EchoDistanceCm = -1.f;
+    FVector EchoDirection = FVector::ZeroVector;
     FVector RallyPosition = FVector::ZeroVector;
     bool bRallyAtChest = false;
     double RallyExpiresAt = 0.;

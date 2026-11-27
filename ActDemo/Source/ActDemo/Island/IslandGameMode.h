@@ -2,8 +2,8 @@
 
 #include "Island/IslandRules.h"
 #include "Island/IslandRoomSettings.h"
-#include "Island/ExpeditionMudRules.h"
 #include "Voxel/VoxelGameMode.h"
+#include "Voxel/IslandRouteLayout.h"
 #include "IslandGameMode.generated.h"
 
 class AIslandChest;
@@ -12,6 +12,7 @@ class APartyPawn;
 class APartySession;
 class AIslandPlayerController;
 class AExpeditionMudBall;
+struct FIslandPartyBriefingMember;
 
 UCLASS(Config = Game)
 class ACTDEMO_API AIslandGameMode : public AVoxelGameMode
@@ -32,15 +33,17 @@ public:
     void PartyScreenBlack(AIslandPlayerController& Player, uint32 RoundId, bool bReturning);
     void PartyScreenClear(AIslandPlayerController& Player, uint32 RoundId, bool bReturning);
     void PartyPawnReady(AIslandPlayerController& Player, uint32 RoundId);
+    void PartyBriefingResponse(AIslandPlayerController& Player, uint32 RoundId, bool bForceStart);
     void PartyUnloaded(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess);
     void RecoverPlayer(AVoxelPlayerController& Player) override;
     TOptional<FVector> FindStandingFloor(const AVoxelCharacter* Hero, FVector Start, double Reach) const;
     bool CanPlayerAct(const AVoxelPlayerController& Player) const override;
-    bool CanJumpBeforePartyBlack(const AIslandPlayerController& Player) const;
     void QueueHopperSand(AIslandNeutralProp& Hopper, const TArray<FVector>& Centers);
     void OnPlayerJumped(AVoxelCharacter& Hero) override;
     void ThrowExpeditionMud(AIslandPlayerController& Player, const FVector& Aim);
-    int32 GetMudMarks(const AVoxelCharacter& Target) const;
+    bool CanPlayerPunch(const AVoxelPlayerController& Player) const;
+    void RefreshMudChestLocks();
+    static bool TraceCrewMud(const AVoxelCharacter& Digger, FVector Start, FVector End, FHitResult& OutHit);
 
 protected:
     void InitGame(const FString& MapName, const FString& Options, FString& Error) override;
@@ -68,10 +71,7 @@ protected:
 private:
     friend class AIslandProbe;
     friend class AExpeditionMudBall;
-    AVoxelCharacter* ResolveMudImpact(AIslandPlayerController& Thrower, const FHitResult& Hit, uint8& Marks);
-    void AddMudShellLayer(AIslandPlayerController& Target);
-    void CheckMudLandings();
-    TMap<AIslandPlayerController*, FExpeditionBurialSite> BurialSites;
+    void ResolveMudImpact(AIslandPlayerController& Thrower, const FHitResult& Hit);
     UPROPERTY() TArray<TObjectPtr<AIslandNeutralProp>> NeutralProps;
     struct FSeaState
     {
@@ -85,21 +85,23 @@ private:
         TWeakObjectPtr<APartyPawn> Temporary;
         FRotator View = FRotator::ZeroRotator;
         int32 Seat = INDEX_NONE;
+        int32 PlayerId = INDEX_NONE;
         bool bReturnToDock = false;
-        bool bAssetsReady = false;
         bool bEntryBlack = false;
         bool bReturnBlack = false;
         bool bArrivalVisible = false;
-        bool bPawnReady = false;
         bool bUnloaded = false;
     };
 
     void BeginParty(int32 ChestIndex, int32 OpeningTeam = INDEX_NONE);
+    void TryStartBriefedParty();
+    FIslandPartyBriefingMember* FindBriefingMember(const FPartyPlayer* Participant);
     void UpdateParty();
     void ReturnFromParty();
     void RestorePartyPlayers();
     void RemovePartyPlayer(AIslandPlayerController& Player);
     void PrepareExpeditionParties(int32 Seed);
+    bool HasOpposingCrews(const AVoxelPlayerController* Leaving = nullptr) const;
     FName PartyFeatureForChest(int32 Index) const;
     void AwardPartyTreasure(bool bAllowSand = true);
     void CompletePartyReturn(bool bFinishedGame);
@@ -132,6 +134,20 @@ private:
 
     AActor* FindDock(int32 Seat) const;
     bool PositionCrews();
+    struct FDepartureScenery
+    {
+        TArray<FIslandRouteSite> Sites;
+        TArray<FIslandNeutralPlacement> Facilities;
+        TArray<TWeakObjectPtr<AActor>> Actors;
+        FString Error;
+        int32 Next = 0;
+        bool IsBuilt() const { return Next >= Sites.Num() + Facilities.Num(); }
+    };
+    IslandNeutral::FSurface DockSurface;
+    TOptional<FDepartureScenery> DepartureScenery;
+    bool PlanIslandLayout(FString& Error);
+    void BuildDepartureScenery();
+    void FinishDepartureScenery(bool bLaunch);
     void UpdateRoom();
     void CancelStart(const FString& Reason);
     int32 AvailableTeam(int32 Preferred, const AIslandPlayerController* Except) const;
@@ -143,7 +159,7 @@ private:
     FTransform FindSafeReturn(const AVoxelPlayerController& Player, TOptional<FVector> InlandTarget = {},
         TConstArrayView<FVector> KeepAwayFrom = {});
     int32 FindReachableChest(const AIslandPlayerController& Player) const;
-    void RevealChestIfClear(int32 Index);
+    void TryRevealChest(int32 Index);
     bool GiveClue(int32 Team, int32 Index);
     void SendClueSnapshot(int32 Team);
     void PublishWinner(int32 Team);
@@ -188,8 +204,11 @@ private:
     int32 PartyOpenerTeam = INDEX_NONE;
     FRandomStream ScatterRandom;
     double PartyDeadline = 0.0;
+    double LastBriefingServiceAt = 0.0;
     bool bPartyPrepareFailed = false;
-    bool bPartyAwaitingBlack = false;
+    bool bPartyCoversReady = false;
+    bool bPartyTechnicalReady = false;
+    bool bPartyConsensusReached = false;
     bool bPartyRestored = false;
     bool bPartyRevealSent = false;
     bool bPartyCompleted = false;

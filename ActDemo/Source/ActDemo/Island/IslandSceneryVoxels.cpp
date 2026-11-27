@@ -1,4 +1,5 @@
 #include "Island/IslandSceneryVoxels.h"
+#include "Island/ExpeditionBodyMud.h"
 #include "Island/IslandMeshVoxelData.h"
 #include "Island/IslandScenerySupport.h"
 #include "Island/IslandFallingScenery.h"
@@ -24,6 +25,9 @@
 
 namespace
 {
+    constexpr double LightCutRadius = 57.;
+    constexpr double LightCutDepth = 43.;
+
     UIslandMeshVoxels* FieldFor(UPrimitiveComponent* Part)
     {
         if (!Part) return nullptr;
@@ -95,6 +99,9 @@ bool UIslandMeshVoxels::Initialize(UPrimitiveComponent& Source)
 void UIslandMeshVoxels::RefreshSource()
 {
     if (!Original || !Field) return;
+    const bool WasVisible = IsVisible();
+    const auto BeforeCollision = GetCollisionEnabled();
+    const auto BeforeVisibilityTrace = GetCollisionResponseToChannel(ECC_Visibility);
     // Animated props may have just changed their real collision profile. A parked
     // source mesh normally has no collision; the voxel surface owns the queries.
     if (Original->GetCollisionEnabled()!=ECollisionEnabled::NoCollision)
@@ -114,6 +121,9 @@ void UIslandMeshVoxels::RefreshSource()
         SetCollisionResponseToChannel(ECC_Visibility,GetOwner()->IsA<AIslandChest>() ? ECR_Block : ECR_Overlap);
     }
     SetCollisionEnabled(Visible ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+    if (WasVisible != IsVisible() || BeforeCollision != GetCollisionEnabled()
+        || BeforeVisibilityTrace != GetCollisionResponseToChannel(ECC_Visibility))
+        UExpeditionBodyMudComponent::NotifySceneChanged(GetWorld());
 }
 
 int32 UIslandMeshVoxels::RemainingCount() const {return Field ? Field->Remaining : 0;}
@@ -221,15 +231,16 @@ bool UIslandMeshVoxels::RemoveCells(TConstArrayView<int32> Ids)
     if(Prev==Field->Remaining) return false;
     Rebuild();
     RefreshSource();
+    UExpeditionBodyMudComponent::NotifySceneChanged(GetWorld());
     return true;
 }
 
-bool UIslandMeshVoxels::Cut(FVector World,FVector Normal,float RadiusScale)
+bool UIslandMeshVoxels::Cut(FVector World,FVector Normal,float RadiusScale,float DepthScale)
 {
     if (!RemainingCount()) return false;
     const FVector Probe=World-Normal.GetSafeNormal()*1.;
-    const double Rad=57.*RadiusScale;
-    constexpr double Depth=43.;
+    const double Rad=LightCutRadius*RadiusScale;
+    const double Depth=LightCutDepth*DepthScale;
     const FVector Local=GetComponentTransform().InverseTransformPosition(Probe);
     const FVector Scale=GetComponentScale().GetAbs().ComponentMax(FVector(.00001));
     const double Half=CellRadius();
@@ -466,7 +477,7 @@ void IslandSceneryVoxels::CheckFoundations(UWorld& World,const FBox& Area)
     }
 }
 
-bool IslandSceneryVoxels::Strike(const FHitResult& Hit,float RadiusScale)
+bool IslandSceneryVoxels::Strike(const FHitResult& Hit,float RadiusScale,float DepthScale)
 {
     auto* Grid=FieldFor(Hit.GetComponent());
     AActor* Owner=Grid ? Grid->GetOwner():nullptr;
@@ -482,20 +493,21 @@ bool IslandSceneryVoxels::Strike(const FHitResult& Hit,float RadiusScale)
     if (RadiusScale>1.f)
     {
         TInlineComponentArray<UIslandMeshVoxels*> Candidates(Owner);
-        const FBox Area=FBox::BuildAABB(Hit.ImpactPoint,FVector(57.*RadiusScale+50.));
+        const double Reach=FMath::Sqrt(FMath::Square(LightCutRadius*RadiusScale)+FMath::Square(LightCutDepth*DepthScale));
+        const FBox Area=FBox::BuildAABB(Hit.ImpactPoint,FVector(Reach));
         for (int32 I=0;I<Struck.Num();++I)
         {
             const FBox Touch=Struck[I]->Bounds.GetBox().ExpandBy(3.);
             for (auto* Part:Candidates)
                 if (Part->IsVisible() && Part->RemainingCount()>0 && !Struck.Contains(Part) &&
-                    Area.Intersect(Part->Bounds.GetBox()) && Touch.Intersect(Part->Bounds.GetBox()))
+                    Area.Intersect(Part->Bounds.GetBox().ExpandBy(Part->CellRadius()+3.)) && Touch.Intersect(Part->Bounds.GetBox()))
                     Struck.Add(Part);
         }
     }
     bool bChanged=false;
     for (auto* Part:Struck)
     {
-        if (!Part->Cut(Hit.ImpactPoint,Hit.ImpactNormal,RadiusScale)) continue;
+        if (!Part->Cut(Hit.ImpactPoint,Hit.ImpactNormal,RadiusScale,DepthScale)) continue;
         AIslandVoxelEdits::Record(*Part);
         bChanged=true;
     }

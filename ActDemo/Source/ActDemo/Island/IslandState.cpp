@@ -18,6 +18,10 @@ void AIslandGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
     DOREPLIFETIME(AIslandGameState, StartAtServerTime);
     DOREPLIFETIME(AIslandGameState, RoomNotice);
     DOREPLIFETIME(AIslandGameState, PartyStartedAt);
+    DOREPLIFETIME(AIslandGameState, PartyBriefingRound);
+    DOREPLIFETIME(AIslandGameState, PartyBriefingFeature);
+    DOREPLIFETIME(AIslandGameState, PartyBriefingMembers);
+    DOREPLIFETIME(AIslandGameState, bPartyForceStartRequested);
     DOREPLIFETIME(AIslandGameState, PartyWinnerName);
     DOREPLIFETIME(AIslandGameState, PartyWinnerTeam);
     DOREPLIFETIME(AIslandGameState, PartyWinnerMask);

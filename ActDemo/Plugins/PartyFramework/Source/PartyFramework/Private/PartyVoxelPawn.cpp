@@ -1,4 +1,5 @@
 #include "PartyVoxelArena.h"
+#include "PartyCharacterControl.h"
 #include "PartyPunch.h"
 #include "GameFramework/GameStateBase.h"
 #include "PartyCrewAppearance.h"
@@ -7,6 +8,7 @@
 #include "GameFramework/PlayerState.h"
 
 #include "Camera/CameraComponent.h"
+#include "PartyCharacterCamera.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -25,34 +27,18 @@ APartyVoxelPawn::APartyVoxelPawn()
     PrimaryActorTick.bCanEverTick=true;
     bReplicates=true;
     bAlwaysRelevant=true;
-    bUseControllerRotationYaw=true;
-    BaseEyeHeight=58.;
-    GetCapsuleComponent()->InitCapsuleSize(33.,88.);
+    PartyCharacterControl::ConfigureMovement(*this);
+    BaseEyeHeight=PartyCharacterCamera::EyeHeight();
     GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Visibility,ECR_Ignore);
     GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn,ECR_Ignore);
     GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Camera,ECR_Ignore);
-    GetCharacterMovement()->JumpZVelocity=565.;
-    GetCharacterMovement()->AirControl=.55f;
-    GetCharacterMovement()->MaxWalkSpeed=570.;
-    GetCharacterMovement()->MaxStepHeight=36.;
     CameraBoom=CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
     CameraBoom->SetupAttachment(GetCapsuleComponent());
-    CameraBoom->TargetArmLength=330.f;
-    CameraBoom->TargetOffset.Z=BaseEyeHeight;
-    CameraBoom->SocketOffset=FVector(0,55,17);
-    CameraBoom->ProbeSize=12.f;
-    CameraBoom->bUsePawnControlRotation=true;
     ShoulderCamera=CreateDefaultSubobject<UCameraComponent>(TEXT("ShoulderCamera"));
     ShoulderCamera->SetupAttachment(CameraBoom,USpringArmComponent::SocketName);
-    ShoulderCamera->FieldOfView=85.f;
     Eye=CreateDefaultSubobject<UCameraComponent>(TEXT("Eyes"));
     Eye->SetupAttachment(GetCapsuleComponent());
-    Eye->SetAutoActivate(false);
-    Eye->SetRelativeLocation(FVector(0,0,BaseEyeHeight));
-    Eye->FieldOfView=85.f;
-    Eye->bUsePawnControlRotation=true;
-    Eye->bEnableFirstPersonScale=true;
-    Eye->FirstPersonScale=.5f;
+    PartyCharacterCamera::Configure(*CameraBoom, *ShoulderCamera, *Eye);
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Orb(TEXT("/Game/TreasureIsland/Art/Crew/SM_CarvedRound"));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Mitten(TEXT("/Game/TreasureIsland/Art/Crew/SM_Mitten"));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Block(TEXT("/Game/TreasureIsland/Art/Neutral/SM_HewnBlock"));
@@ -109,10 +95,10 @@ APartyVoxelPawn::APartyVoxelPawn()
         Paw->SetVisibility(false);
         EyePaws.Add(Paw);
     }
-    CrewSculpture=Part(TEXT("CrewSculpture"),{0,0,-88},FVector::OneVector,nullptr);
+    CrewSculpture=Part(TEXT("CrewSculpture"),{0,0,-PartyCharacterControl::StandingHalfHeight},FVector::OneVector,nullptr);
     CrewRig=CreateDefaultSubobject<UPartyCrewRig>(TEXT("CrewRig"));
     CrewRig->SetupAttachment(OutfitRoot);
-    CrewRig->SetRelativeLocation({0.,0.,-88.});
+    CrewRig->SetRelativeLocation({0.,0.,-PartyCharacterControl::StandingHalfHeight});
     CrewRig->SetVisibility(false);
     CrewSculpture->SetStaticMesh(nullptr);
     CrewSculpture->SetVisibility(false);
@@ -156,7 +142,7 @@ void APartyVoxelPawn::UpdateCrewModel()
     if (CrewSculpture->GetStaticMesh()==Mesh && CrewRig->GetSkinnedAsset()==Skin) return;
     CrewRig->SetSkinnedAssetAndUpdate(Skin);
     CrewRig->SetVisibility(Skin!=nullptr);
-    CrewBadge->SetRelativeLocationAndRotation(Skin ? Appearance->GetCrewBadgeAnchor()+FVector(-2.2,0.,-87.65) : FVector(-36.,0.,-26.),
+    CrewBadge->SetRelativeLocationAndRotation(Skin ? Appearance->GetCrewBadgeAnchor()+FVector(-2.2,0.,.35-PartyCharacterControl::StandingHalfHeight) : FVector(-36.,0.,-26.),
         Skin ? FRotator(-10.,0.,0.) : FRotator::ZeroRotator);
     CrewBadge->SetRelativeScale3D(Skin ? FVector(.024,.20,.12) : FVector(.07,.43,.30));
     UStaticMesh* Fist=Appearance ? Appearance->GetPartyFirstPersonFist() : nullptr;
@@ -197,19 +183,14 @@ void APartyVoxelPawn::ServerSetChaseView_Implementation(bool bFirstPerson)
     ForceNetUpdate();
 }
 
-FRotator APartyVoxelPawn::GetViewRotation() const
-{
-    // Simulated teammates have no controller here. Their pawn replicates aim pitch and facing.
-    if (!Controller && Arena && Arena->IsChaseGame()) return GetBaseAimRotation();
-    return Super::GetViewRotation();
-}
-
 void APartyVoxelPawn::CalcCamera(float DeltaSeconds,FMinimalViewInfo& OutView)
 {
     const bool bSpectated=!IsLocallyControlled() && Arena && Arena->IsChaseGame();
     const bool bFirst=bSpectated ? bObservedFirstPerson : IsInFirstPersonView();
+    // A remote pawn's camera component doesn't apply control rotation itself.
+    // Rotate the component so both the view and its attached hands follow the teammate's aim.
+    if (bSpectated && bFirst) Eye->SetWorldRotation(GetViewRotation());
     (bFirst ? Eye : ShoulderCamera)->GetCameraView(DeltaSeconds,OutView);
-    if (bSpectated && bFirst) OutView.Rotation = GetViewRotation();
     if (bSpectated)
         for (const auto& Paw : EyePaws) Paw->SetVisibility(bFirst);
     const bool bHideSuit=bFirst || FVector::DistSquared(OutView.Location,GetPawnViewLocation())<FMath::Square(52.);
@@ -250,22 +231,18 @@ void APartyVoxelPawn::PlayPunch(float Strength)
 void APartyVoxelPawn::UpdatePaws(float DeltaSeconds)
 {
     const double Now=GetWorld()->GetTimeSeconds();
-    if (bPlacingStroke && LastRenderedThrow!=ToolStrokeAt)
-    {
-        LastRenderedThrow=ToolStrokeAt;
-        CrewMotion.Throw(ToolStrokeAt);
-    }
-    const FPartyCrewPose Pose=CrewMotion.Sample(Now,DeltaSeconds,FMath::Clamp(float(GetVelocity().Size2D())/570.f,0.f,1.f),
+    const FPartyCrewPose Pose=CrewMotion.Sample(Now,DeltaSeconds,PartyCharacterControl::GaitSpeed(*this),
         GetVelocity().Z,GetCharacterMovement()->IsFalling());
     // Spin around the soles, keeping the camera, collision and aim on their original axes.
-    const FVector Sole(0,0,-88.);
+    const FVector Sole(0,0,-PartyCharacterControl::StandingHalfHeight);
     OutfitRoot->SetRelativeLocationAndRotation(Pose.BodyOffset+Sole-Pose.BodyRot.RotateVector(Sole),Pose.BodyRot);
     CrewRig->Apply(Pose);
     for (int32 I=0;I<2;++I)
     {
         Gloves[I]->SetRelativeLocationAndRotation(Sole+Pose.Hands[I],Pose.HandRot[I]);
         Boots[I]->SetRelativeLocation(Sole+Pose.Feet[I]);
-        if (bLocalFirstPerson) EyePaws[I]->SetRelativeLocationAndRotation(Pose.EyeHands[I],Pose.EyeRot[I]);
+        if (bLocalFirstPerson || bObservedFirstPerson)
+            EyePaws[I]->SetRelativeLocationAndRotation(Pose.EyeHands[I],Pose.EyeRot[I]);
     }
 }
 
@@ -277,13 +254,26 @@ void APartyVoxelPawn::SetupPlayerInputComponent(UInputComponent* Input)
     {
         bWaitDigRelease=PC->IsInputKeyDown(EKeys::LeftMouseButton);
         bWaitPlaceRelease=PC->IsInputKeyDown(EKeys::RightMouseButton);
-        bWaitJumpRelease=PC->IsInputKeyDown(EKeys::SpaceBar);
     }
 }
 
 bool APartyVoxelPawn::HasLocalPartyInput() const
 {
     return bInputReady && IsLocallyControlled() && Arena && Arena->HasGrid();
+}
+
+bool APartyVoxelPawn::CanMoveInArena() const
+{
+    const auto* PC = Cast<APlayerController>(Controller);
+    if (!HasLocalPartyInput() || !PC || PC->bShowMouseCursor) return false;
+    return CanActInRound() || (!Arena->IsChaseGame() && Arena->GetPhase() == EPartyVoxelPhase::Results);
+}
+
+bool APartyVoxelPawn::CanLookInArena() const
+{
+    if (CanMoveInArena()) return true;
+    const auto* PC = Cast<APlayerController>(Controller);
+    return HasLocalPartyInput() && PC && !PC->bShowMouseCursor && Arena->GetPhase() == EPartyVoxelPhase::Countdown;
 }
 
 void APartyVoxelPawn::ReleaseLocalPartyInput()
@@ -323,7 +313,7 @@ bool APartyVoxelPawn::AimTerrain(FHitResult& Hit) const
     return Arena && Arena->TraceTerrain(GetPawnViewLocation(), GetToolAimDirection(), this, Hit);
 }
 
-bool APartyVoxelPawn::CanPunch() const
+bool APartyVoxelPawn::CanActInRound() const
 {
     return Arena && Arena->GetPhase()==EPartyVoxelPhase::Playing && !Arena->IsCaught(Seat)
         && (!Arena->IsChaseGame() || Arena->IsRunner(Seat) || Arena->GetHeadStartRemaining()<=0.);
@@ -336,7 +326,7 @@ float APartyVoxelPawn::GetPunchChargeAlpha() const
 
 void APartyVoxelPawn::BeginPunchInput()
 {
-    if (!HasLocalPartyInput() || !CanPunch() || LocalPunchStart>=0.) return;
+    if (!HasLocalPartyInput() || !CanActInRound() || LocalPunchStart>=0.) return;
     LocalPunchStart=FPlatformTime::Seconds();
     SetPunchCharge(true);
     ServerBeginPunch();
@@ -348,7 +338,7 @@ void APartyVoxelPawn::ReleasePunchInput()
     const float Held=float(FPlatformTime::Seconds()-LocalPunchStart);
     LocalPunchStart=-1.;
     SetPunchCharge(false);
-    ServerEndPunch(!CanPunch(),GetToolAimDirection(),Held);
+    ServerEndPunch(!CanActInRound(),GetToolAimDirection(),Held);
 }
 
 void APartyVoxelPawn::CancelPunchInput()
@@ -370,7 +360,7 @@ void APartyVoxelPawn::OnRep_PunchStart()
 
 void APartyVoxelPawn::ServerBeginPunch_Implementation()
 {
-    if (!CanPunch() || ServerPunchStart>=0.) return;
+    if (!CanActInRound() || ServerPunchStart>=0.) return;
     ServerPunchRealStart=FPlatformTime::Seconds();
     // Replicated poses use the server world clock shared with remote GameStates.
     ServerPunchStart=GetWorld()->GetTimeSeconds();
@@ -386,7 +376,7 @@ void APartyVoxelPawn::ServerEndPunch_Implementation(bool bCancel,FVector_NetQuan
     ServerPunchStart=-1.;
     OnRep_PunchStart();
     ForceNetUpdate();
-    if (bCancel || !CanPunch() || Direction.ContainsNaN() || Direction.IsNearlyZero() || Now<NextServerDig) return;
+    if (bCancel || !CanActInRound() || Direction.ContainsNaN() || Direction.IsNearlyZero() || Now<NextServerDig) return;
     const auto* PS=GetPlayerState();
     const float Ping=PS && !IsLocallyControlled() ? PS->GetPingInMilliseconds() : -1.f;
     const uint8 Power=PartyPunch::ResolvePower(Held,ReportedHoldSeconds,Ping);
@@ -407,20 +397,27 @@ void APartyVoxelPawn::MulticastPunch_Implementation(uint8 Power)
 
 void APartyVoxelPawn::UseTool(bool bPlace)
 {
-    if (!HasLocalPartyInput() || !CanPunch()) return;
+    if (!HasLocalPartyInput() || !CanActInRound()) return;
     if (!bPlace) { BeginPunchInput(); ReleasePunchInput(); return; }
-    ToolStrokeAt=GetWorld()->GetTimeSeconds();
-    bPlacingStroke=true;
+    CrewMotion.Throw(GetWorld()->GetTimeSeconds());
     ServerTool(true,GetToolAimDirection());
 }
 
 void APartyVoxelPawn::ServerTool_Implementation(bool bPlace,FVector_NetQuantizeNormal Direction)
 {
-    if (!bPlace || !CanPunch() || Direction.ContainsNaN() || Direction.IsNearlyZero()) return;
+    if (!bPlace || !CanActInRound() || Direction.ContainsNaN() || Direction.IsNearlyZero()) return;
     const double Time=GetWorld()->GetTimeSeconds();
     if (Time<NextServerPlace) return;
     NextServerPlace=Time+.22;
     Arena->UseTerrainTool(*this,true,Direction);
+    MulticastPlace();
+}
+
+void APartyVoxelPawn::MulticastPlace_Implementation()
+{
+    // The owner already moved its hand on press. Other viewers see each accepted use once.
+    if (!IsLocallyControlled() && GetNetMode() != NM_DedicatedServer)
+        CrewMotion.Throw(GetWorld()->GetTimeSeconds());
 }
 
 void APartyVoxelPawn::Tick(float DeltaSeconds)
@@ -439,19 +436,19 @@ void APartyVoxelPawn::Tick(float DeltaSeconds)
         const auto Response=bCaught ? ECR_Ignore : ECR_Block;
         if (Capsule->GetCollisionResponseToChannel(ECC_Visibility)!=Response)
             Capsule->SetCollisionResponseToChannel(ECC_Visibility,Response);
-        if (Arena->GetRunnerTeam()!=INDEX_NONE)
-            GetCharacterMovement()->MaxWalkSpeed=Arena->IsRunner(Seat) ? APartyVoxelSession::ChaseRunnerSpeed : APartyVoxelSession::ChaseHunterSpeed;
     }
     auto* PC=Cast<APlayerController>(Controller);
     const bool bLocalInput=PC && HasLocalPartyInput();
     if (bChase || bLocalInput)
     {
-        const double Pitch=FRotator::NormalizeAxis(GetViewRotation().Pitch);
-        CameraBoom->SocketOffset.Y=55.*FMath::GetMappedRangeValueClamped(FVector2D(-75.,-45.),FVector2D(0.,1.),Pitch);
+        PartyCharacterCamera::UpdateBoom(*CameraBoom, GetViewRotation().Pitch, true);
     }
-    if (HasAuthority() && ServerPunchStart>=0. && !CanPunch()) { ServerPunchStart=-1.; OnRep_PunchStart(); ForceNetUpdate(); }
+    if (HasAuthority() && ServerPunchStart>=0. && !CanActInRound()) { ServerPunchStart=-1.; OnRep_PunchStart(); ForceNetUpdate(); }
+    // UE replicates the watched pawn's control rotation to its spectator when the
+    // spectator's server-side view target is set. Facing now follows movement.
+    if (bCaught && HasAuthority() && PC && !bLocalInput) FollowSurvivingTeammate(*PC);
     if (!bLocalInput) return;
-    if (!CanPunch() || PC->bShowMouseCursor) CancelPunchInput();
+    if (!CanActInRound() || PC->bShowMouseCursor) CancelPunchInput();
     if (bChase && bSentFirstPerson!=bLocalFirstPerson)
     {
         bSentFirstPerson=bLocalFirstPerson;
@@ -472,37 +469,14 @@ void APartyVoxelPawn::Tick(float DeltaSeconds)
         bAimingAtVenue = false;
         bWaitDigRelease=PC->IsInputKeyDown(EKeys::LeftMouseButton);
         bWaitPlaceRelease=PC->IsInputKeyDown(EKeys::RightMouseButton);
-        bWaitJumpRelease=PC->IsInputKeyDown(EKeys::SpaceBar);
         return;
     }
     const bool Playing=Arena->GetPhase()==EPartyVoxelPhase::Playing;
-    const bool bWaitingHunter=bChase && Playing && !Arena->IsRunner(Seat) && Arena->GetHeadStartRemaining()>0.f;
-    const bool CanWalk=(Playing && !bWaitingHunter) || (!bChase && Arena->GetPhase()==EPartyVoxelPhase::Results);
-    float MouseX=0, MouseY=0;
-    PC->GetInputMouseDelta(MouseX,MouseY);
-    if (!PC->IsLookInputIgnored() && (CanWalk || Arena->GetPhase()==EPartyVoxelPhase::Countdown))
-    {
-        FRotator Look=PC->GetControlRotation();
-        Look.Yaw+=FMath::Clamp(MouseX,-90.f,90.f)*.18f*LocalLookScale.X;
-        Look.Pitch=FMath::Clamp(FRotator::NormalizeAxis(Look.Pitch)-FMath::Clamp(MouseY,-90.f,90.f)*.18f*LocalLookScale.Y,-84.,80.);
-        PC->SetControlRotation(Look);
-    }
     const bool DigDown=PC->IsInputKeyDown(EKeys::LeftMouseButton);
     const bool PlaceDown=PC->IsInputKeyDown(EKeys::RightMouseButton);
-    const bool JumpDown=PC->IsInputKeyDown(EKeys::SpaceBar);
     bWaitDigRelease &= DigDown;
     bWaitPlaceRelease &= PlaceDown;
-    bWaitJumpRelease &= JumpDown;
-    if (CanWalk && !PC->IsMoveInputIgnored())
-    {
-        const FRotationMatrix Basis(FRotator(0,PC->GetControlRotation().Yaw,0));
-        const float Forward=float(PC->IsInputKeyDown(EKeys::W))-float(PC->IsInputKeyDown(EKeys::S));
-        const float Side=float(PC->IsInputKeyDown(EKeys::D))-float(PC->IsInputKeyDown(EKeys::A));
-        AddMovementInput(Basis.GetUnitAxis(EAxis::X),Forward);
-        AddMovementInput(Basis.GetUnitAxis(EAxis::Y),Side);
-        if (JumpDown && !bWaitJumpRelease) Jump(); else StopJumping();
-    }
-    if (Playing && !bWaitingHunter)
+    if (CanActInRound())
     {
         const bool bDig=DigDown && !bWaitDigRelease;
         const bool bPlace=!bWaitPlaceRelease && (PlaceDown || PC->WasInputKeyJustPressed(EKeys::RightMouseButton));

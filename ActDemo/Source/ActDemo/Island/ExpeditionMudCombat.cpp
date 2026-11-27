@@ -1,9 +1,8 @@
 #include "Island/IslandGameMode.h"
 
-#include "Abilities/ExpeditionMudEffect.h"
-#include "AbilitySystemComponent.h"
+#include "Island/ExpeditionBodyMud.h"
 #include "Components/CapsuleComponent.h"
-#include "GameFramework/CharacterMovementComponent.h"
+#include "EngineUtils.h"
 #include "Island/ExpeditionMudBall.h"
 #include "Island/IslandAttachedMud.h"
 #include "Island/IslandNeutralProp.h"
@@ -12,42 +11,6 @@
 #include "Island/IslandWorld.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
-
-void FExpeditionBurialSite::Begin(const FVoxelDensity& Density, const FVector& Position)
-{
-    Foot = Position;
-    Layers = 0;
-    bPending = false;
-    bAwaitingLanding = false;
-    ++Generation;
-    // Save what already existed around the shell. A nearby pre-existing wall intercepts a ball
-    // as ordinary terrain even when the far surface of that wall touches the burial site.
-    Origin = Density.Grid.Origin;
-    const FVector GridPosition = (Position - FVector(Origin)) / VoxelPlayground::Spacing;
-    First = FIntVector(FMath::FloorToInt(GridPosition.X) - Across/2,
-        FMath::FloorToInt(GridPosition.Y) - Across/2, FMath::FloorToInt(GridPosition.Z) - 2);
-    Before.SetNumUninitialized(Across * Across * High);
-    for (int32 Z = 0; Z < High; ++Z)
-        for (int32 Y = 0; Y < Across; ++Y)
-            for (int32 X = 0; X < Across; ++X)
-                Before[X + Across * (Y + Across * Z)] = Density.Sample(First + FIntVector(X,Y,Z));
-}
-
-bool FExpeditionBurialSite::WasAir(const FVector& Position) const
-{
-    const FVector Local = (Position - FVector(Origin)) / VoxelPlayground::Spacing - FVector(First);
-    const int32 X = FMath::FloorToInt(Local.X), Y = FMath::FloorToInt(Local.Y), Z = FMath::FloorToInt(Local.Z);
-    if (X < 0 || X + 1 >= Across || Y < 0 || Y + 1 >= Across || Z < 0 || Z + 1 >= High || Before.IsEmpty())
-        return false;
-    const auto At = [&](int32 DX, int32 DY, int32 DZ) -> double
-    {
-        return Before[X + DX + Across * (Y + DY + Across * (Z + DZ))];
-    };
-    const auto Row = [&](int32 DY, int32 DZ) { return FMath::Lerp(At(0,DY,DZ), At(1,DY,DZ), Local.X - X); };
-    const double Bottom = FMath::Lerp(Row(0,0), Row(1,0), Local.Y - Y);
-    const double Top = FMath::Lerp(Row(0,1), Row(1,1), Local.Y - Y);
-    return FMath::Lerp(Bottom, Top, Local.Z - Z) > 0.;
-}
 
 void AIslandGameMode::ThrowExpeditionMud(AIslandPlayerController& Player, const FVector& Aim)
 {
@@ -60,176 +23,96 @@ void AIslandGameMode::ThrowExpeditionMud(AIslandPlayerController& Player, const 
     auto* Ball = GetWorld()->SpawnActor<AExpeditionMudBall>(AExpeditionMudBall::StaticClass(), Hero->GetAimOrigin(), Aim.Rotation(), Params);
     if (!Ball) return;
     Ball->Launch(Aim.GetSafeNormal());
+    Hero->MulticastExpeditionThrow();
 }
 
-void AIslandGameMode::AddMudShellLayer(AIslandPlayerController& Target)
-{
-    FExpeditionBurialSite* Active = BurialSites.Find(&Target);
-    if (!Active || !Target.GetHero() || !Target.GetHero()->IsMudStunned()) return;
-    FExpeditionBurialSite& Site = *Active;
-    if (Site.bAwaitingLanding || Site.bPending || Site.Layers >= 3) return;
-    Site.bPending = true;
-    const int32 Layer = Site.Layers + 1;
-    const uint32 Generation = Site.Generation;
-    const TWeakObjectPtr<AIslandPlayerController> Member(&Target);
-    const TWeakObjectPtr<AIslandGameMode> WeakMode(this);
-    QueueBurialLayer(*Target.GetHero(), Site.Foot, Layer, [WeakMode, Member, Generation, Layer](bool bCommitted)
-    {
-        AIslandGameMode* Mode = WeakMode.Get();
-        if (!Mode || !Member.IsValid()) return;
-        FExpeditionBurialSite* Current = Mode->BurialSites.Find(Member.Get());
-        if (!Current || Current->Generation != Generation) return;
-        Current->bPending = false;
-        if (bCommitted) Current->Layers = Layer;
-        UE_LOG(LogTemp, Display, TEXT("ISLAND_MUD_SHELL target=%s layer=%d committed=%d"),
-            *Member->GetName(), Layer, bCommitted);
-    });
-}
-
-AVoxelCharacter* AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thrower, const FHitResult& Hit, uint8& Marks)
+void AIslandGameMode::ResolveMudImpact(AIslandPlayerController& Thrower, const FHitResult& Hit)
 {
     const auto* Round = GetGameState<AIslandGameState>();
     if (!bExpeditionRoom || !IsPlaying() || !Round || Round->Phase != EIslandPhase::Hunting
-        || !GetPlayers().Contains(&Thrower) || !Thrower.GetHero()) return nullptr;
+        || !GetPlayers().Contains(&Thrower) || !Thrower.GetHero()) return;
 
-    AVoxelCharacter* Body = Cast<AVoxelCharacter>(Hit.GetActor());
-    if (!Body)
+    if (auto* Body = Cast<AVoxelCharacter>(Hit.GetActor()))
     {
-        AVoxelTerrain* Terrain = GetTerrain();
-        if (!Terrain || Hit.GetActor() == nullptr) return nullptr;
-        if (Hit.GetActor() == Terrain)
+        const auto* Target = Cast<AIslandPlayerController>(Body->GetController());
+        if (Target && Target != &Thrower && Target->GetTeam() != Thrower.GetTeam()
+            && CanPlayerPunch(*Target) && !Round->IsDecoyEventActive(EIslandDecoyEvent::Ceasefire))
         {
-            for (AVoxelPlayerController* Other : GetPlayers())
-            {
-                auto* Target = CastChecked<AIslandPlayerController>(Other);
-                if (Target->GetTeam() == Thrower.GetTeam() || !Target->GetHero() || !Target->GetHero()->IsMudStunned()) continue;
-                const FExpeditionBurialSite* Active = BurialSites.Find(Target);
-                if (!Active) continue;
-                const FExpeditionBurialSite& Site = *Active;
-                if (Site.Layers < 1 || Site.Layers >= 3
-                    || !VoxelPlayground::IsBurialSurface(Site.Foot, Site.Layers, Hit.ImpactPoint)
-                    || !Site.WasAir(Hit.ImpactPoint - Hit.ImpactNormal * 6.)) continue;
-                AddMudShellLayer(*Target);
-                return nullptr;
-            }
+            Body->GetBodyMud()->AddHit(Hit);
         }
-        else
-        {
-            FHitResult MechanismHit = Hit;
-            if (const auto* Mud = Cast<AIslandAttachedMud>(Hit.GetActor()))
-            {
-                // All courses use the underlying physical beam as their attachment
-                // parent. A coat of clay must not mask the station on later throws.
-                if (auto* Beam = Cast<UPrimitiveComponent>(Mud->GetRootComponent()->GetAttachParent()))
-                    MechanismHit = FHitResult(Beam->GetOwner(), Beam, Hit.ImpactPoint, Hit.ImpactNormal);
-            }
-            if (AIslandAttachedMud::CanReceive(Hit.GetComponent()))
-            {
-                FVoxelEdit Stamp;
-                Stamp.Action = EVoxelAction::Fill;
-                Stamp.BrushId = VoxelPlayground::MudPad;
-                Stamp.Center = VoxelPlayground::QuantizeCenter(Hit.ImpactPoint);
-                Stamp.SurfaceNormal = VoxelPlayground::QuantizeNormal(Hit.ImpactNormal);
-                Stamp.bWideFootprint = Round->HasDecoyToolBoost(Thrower.GetTeam());
-                ClipProtectedMud(Stamp);
-                TMap<AVoxelCharacter*, FVector> Lifts;
-                if (CheckMudOccupants(Stamp, &Lifts) && AIslandAttachedMud::Place(Hit, Stamp))
-                    LiftMudOccupants(Lifts);
-            }
-            else
-            {
-                FHitResult Ground;
-                const FVector Probe = Hit.ImpactPoint + Hit.ImpactNormal * 20.;
-                if (Terrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
-                    QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal, Round->HasDecoyToolBoost(Thrower.GetTeam()));
-            }
-            if (auto* Prop = Cast<AIslandNeutralProp>(MechanismHit.GetActor())) Prop->ReceiveMudImpact(MechanismHit);
-            return nullptr;
-        }
-        QueueMudLanding(Hit.ImpactPoint, Hit.ImpactNormal, Round->HasDecoyToolBoost(Thrower.GetTeam()));
-        return nullptr;
+        return;
     }
 
-    auto* Target = Cast<AIslandPlayerController>(Body->GetController());
-    if (!Target || Target == &Thrower || Target->GetTeam() == Thrower.GetTeam() || !GetPlayers().Contains(Target)) return nullptr;
-    if (Round->IsDecoyEventActive(EIslandDecoyEvent::Ceasefire)) return nullptr;
-    if (Body->IsMudStunned())
+    AVoxelTerrain* Terrain = GetTerrain();
+    if (!Terrain || !Hit.GetActor()) return;
+    const bool bWide = Round->HasDecoyToolBoost(Thrower.GetTeam());
+    if (Hit.GetActor() == Terrain)
     {
-        AddMudShellLayer(*Target);
-        return nullptr;
+        QueueMudLanding(Hit.ImpactPoint, Hit.ImpactNormal, bWide);
+        return;
     }
-    const double Now = Round->GetServerWorldTimeSeconds();
-#if !UE_BUILD_SHIPPING
-    const auto TraceContact = [&](const TCHAR* Result, int32 Stack)
+    FHitResult MechanismHit = Hit;
+    if (const auto* Mud = Cast<AIslandAttachedMud>(Hit.GetActor()))
     {
-        if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
-            UE_LOG(LogTemp, Display, TEXT("MUD_QA_CONTACT source=%s target=%s result=%s stack=%d time=%.4f"),
-                *Thrower.GetName(), *Target->GetName(), Result, Stack, Now);
-    };
-#endif
-    if (Body->IsMudImmune())
-    {
-#if !UE_BUILD_SHIPPING
-        TraceContact(TEXT("immune"), GetMudMarks(*Body));
-#endif
-        return nullptr;
+        if (auto* Beam = Cast<UPrimitiveComponent>(Mud->GetRootComponent()->GetAttachParent()))
+            MechanismHit = FHitResult(Beam->GetOwner(), Beam, Hit.ImpactPoint, Hit.ImpactNormal);
     }
-    if (!CanPlayerAct(*Target)) return nullptr;
-    Marks = UExpeditionMudMarkEffect::TryHit(*Thrower.GetHero(), *Body);
-#if !UE_BUILD_SHIPPING
-    if (!Marks)
+    if (AIslandAttachedMud::CanReceive(Hit.GetComponent()))
     {
-        static const FGameplayTag Window = FGameplayTag::RequestGameplayTag(TEXT("Expedition.Status.MudImpactWindow"));
-        TraceContact(Body->GetAbilitySystemComponent()->HasMatchingGameplayTag(Window) ? TEXT("window") : TEXT("rejected"), GetMudMarks(*Body));
+        FVoxelEdit Stamp;
+        Stamp.Action = EVoxelAction::Fill;
+        Stamp.BrushId = VoxelPlayground::MudPad;
+        Stamp.Center = VoxelPlayground::QuantizeCenter(Hit.ImpactPoint);
+        Stamp.SurfaceNormal = VoxelPlayground::QuantizeNormal(Hit.ImpactNormal);
+        Stamp.bWideFootprint = bWide;
+        ClipProtectedMud(Stamp);
+        TMap<AVoxelCharacter*, FVector> Lifts;
+        if (CheckMudOccupants(Stamp, &Lifts) && AIslandAttachedMud::Place(Hit, Stamp))
+            LiftMudOccupants(Lifts);
     }
     else
-        TraceContact(TEXT("accepted"), Marks);
-#endif
-    if (!Marks) return nullptr;
-    UE_LOG(LogTemp, Display, TEXT("ISLAND_MUD_HIT target=%s stage=%d time=%.3f"), *Target->GetName(), Marks, Now);
-    if (Marks < 3) return Body;
-
-    Marks = 0;
-    if (!ChestLocks.IsEmpty())
     {
-        // Resolve already-earned work before changing the leader's ability to hold the lock.
-        UpdateChestLocks(Now);
-        if (Round->Phase != EIslandPhase::Hunting) return nullptr;
+        FHitResult Ground;
+        const FVector Probe = Hit.ImpactPoint + Hit.ImpactNormal * 20.;
+        if (Terrain->TraceRock(Probe + FVector::UpVector * 38., Probe - FVector::UpVector * 60., Thrower.GetHero(), Ground))
+            QueueMudLanding(Ground.ImpactPoint, Ground.ImpactNormal, bWide);
     }
-    if (!Body->ApplyMudStun()) return nullptr;
-    // An airborne victim follows normal gravity. Their shell begins at the actual landing.
-    BurialSites.FindOrAdd(Target).bAwaitingLanding = true;
-    CheckMudLandings();
-    if (!ChestLocks.IsEmpty())
+    if (auto* Prop = Cast<AIslandNeutralProp>(MechanismHit.GetActor())) Prop->ReceiveMudImpact(MechanismHit);
+}
+
+bool AIslandGameMode::TraceCrewMud(const AVoxelCharacter& Digger, FVector Start, FVector End, FHitResult& OutHit)
+{
+    const auto* Member = Digger.GetPlayerState<AIslandPlayerState>();
+    if (!Member) return false;
+    bool bFound = false;
+    for (TActorIterator<AVoxelCharacter> It(Digger.GetWorld()); It; ++It)
     {
-        UpdateChestLocks(Now);
+        const auto* Other = It->GetPlayerState<AIslandPlayerState>();
+        if (*It == &Digger || !Other || Other->Team != Member->Team || !It->GetBodyMud()->Num()) continue;
+        FHitResult Hit;
+        if (It->GetBodyMud()->Trace(Start, End, 0.f, Hit))
+        {
+            FHitResult Obstruction;
+            const FCollisionQueryParams Query(SCENE_QUERY_STAT(MudRescue), false, &Digger);
+            if (AIslandNeutralProp::TraceShovel(*Digger.GetWorld(), Obstruction, Start, Hit.ImpactPoint, Query)) continue;
+            // A fist aimed straight through a teammate cannot peel the far side of their coat.
+            if (It->GetCapsuleComponent()->LineTraceComponent(Obstruction, Start, Hit.ImpactPoint, Query)
+                && FVector::Dist(Obstruction.ImpactPoint, Hit.ImpactPoint) > 12.) continue;
+            bFound = true;
+            OutHit = Hit;
+            End = Hit.ImpactPoint;
+        }
+    }
+    return bFound;
+}
+
+void AIslandGameMode::RefreshMudChestLocks()
+{
+    if (!ChestLocks.IsEmpty() && GetGameState<AIslandGameState>()->Phase == EIslandPhase::Hunting)
+    {
+        UpdateChestLocks(GetGameState<AIslandGameState>()->GetServerWorldTimeSeconds());
         PublishLockViews();
     }
-    return Body;
-}
-
-void AIslandGameMode::CheckMudLandings()
-{
-    for (auto It = BurialSites.CreateIterator(); It; ++It)
-    {
-        AIslandPlayerController* Target = It.Key();
-        if (!It.Value().bAwaitingLanding) continue;
-        AVoxelCharacter* Body = Target->GetHero();
-        if (!Body || !Body->IsMudStunned())
-        {
-            It.RemoveCurrent();
-            continue;
-        }
-        if (!Body->GetCharacterMovement()->IsMovingOnGround()) continue;
-        const FVector Foot = Body->GetActorLocation() - FVector::UpVector * Body->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-        It.Value().Begin(*GetTerrain()->GetDensity(), Foot);
-        AddMudShellLayer(*Target);
-    }
-}
-
-int32 AIslandGameMode::GetMudMarks(const AVoxelCharacter& Target) const
-{
-    return UExpeditionMudMarkEffect::Count(Target);
 }
 
 void AIslandGameMode::GetProtectedMudVolumes(TArray<FBox>& OutVolumes) const

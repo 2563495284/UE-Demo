@@ -1,6 +1,7 @@
 #include "Island/IslandRoomPanel.h"
 #include "Island/IslandMessageText.h"
 #include "Island/IslandClientSettingsPanel.h"
+#include "Island/IslandPartyBriefPanel.h"
 #include "Island/IslandMenuStyle.h"
 #include "ExpeditionText.h"
 
@@ -19,6 +20,7 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SSpacer.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/SBoxPanel.h"
 
@@ -81,8 +83,10 @@ TSharedRef<SWidget> SIslandRoomPanel::FocusTarget()
 {
     auto Focused=FSlateApplication::Get().GetKeyboardFocusedWidget();
     if (Focused && HasFocusedDescendants()) return Focused.ToSharedRef();
+    if (PartyBrief) return PartyBrief->FocusTarget();
     if (ClientSettings) return ClientSettings->FocusTarget();
     if (Primary && Primary->IsEnabled()) return Primary.ToSharedRef();
+    if (CharacterButton && CharacterButton->IsEnabled()) return CharacterButton.ToSharedRef();
     return AsShared();
 }
 
@@ -91,7 +95,13 @@ TSharedRef<SWidget> SIslandRoomPanel::Button(TAttribute<FText> Value, TFunction<
 {
     static const FButtonStyle Plain = IslandMenuStyle::MakeButtonStyle(false), Strong = IslandMenuStyle::MakeButtonStyle(true);
     return SNew(SButton).Tag(Tag).ButtonStyle(bPrimary ? &Strong : &Plain).IsEnabled(Enabled)
-        .OnClicked_Lambda([this,Action = MoveTemp(Press)] { ++Actions; Action(); return FReply::Handled(); })
+        .OnClicked_Lambda([this,Action = MoveTemp(Press)]
+        {
+            if (const auto* Room = Session(); Room && Room->IsTravelInputBlocked()) return FReply::Handled();
+            ++Actions;
+            Action();
+            return FReply::Handled();
+        })
         [Label(Value, 17, bPrimary ? FLinearColor(.018f,.034f,.034f) : IslandMenuStyle::Ink, bPrimary)];
 }
 
@@ -119,6 +129,11 @@ void SIslandRoomPanel::Show(EIslandPanel Target)
     const bool bFromCharacter = Page == EIslandPanel::Character && Target == EIslandPanel::Lobby;
     const bool bReturning = Page == EIslandPanel::ClientSettings && Target == SettingsOrigin;
     if (Target == EIslandPanel::ClientSettings) SettingsOrigin = Page;
+    if (PartyBrief)
+    {
+        ChildSlot[SNullWidget::NullWidget];
+        PartyBrief.Reset();
+    }
     if (ClientSettings)
     {
         ChildSlot[SNullWidget::NullWidget];
@@ -127,7 +142,6 @@ void SIslandRoomPanel::Show(EIslandPanel Target)
     Page = Target;
     bChooseEmpty=false;
     LocalError.Reset();
-    TransitionAt = FPlatformTime::Seconds();
     if (Page == EIslandPanel::Hidden)
     {
         SetVisibility(EVisibility::Collapsed);
@@ -142,17 +156,18 @@ void SIslandRoomPanel::Show(EIslandPanel Target)
     }
     SetVisibility(EVisibility::SelfHitTestInvisible);
     Build();
-    if (ClientSettings) Focus(ClientSettings->FocusTarget());
+    if (PartyBrief) Focus(PartyBrief->FocusTarget());
+    else if (ClientSettings) Focus(ClientSettings->FocusTarget());
     else if (bReturning) Focus(ClientSettingsButton);
     else if (bFromCharacter && CharacterButton && CharacterButton->IsEnabled()) Focus(CharacterButton);
     else if (Page==EIslandPanel::Search && Session() && Entries.Contains(Session()->LastJoinedRoomId))
         Focus(Entries[Session()->LastJoinedRoomId]);
+    else if (Page == EIslandPanel::Lobby && Primary && !Primary->IsEnabled()) Focus(CharacterButton);
     else Focus(Primary);
 }
 
 void SIslandRoomPanel::Build()
 {
-    const float PreviousHeight=Body ? float(Body->GetCachedGeometry().GetLocalSize().Y)+32.f : 0.f;
     Primary.Reset();
     NameField.Reset();
     AddressField.Reset();
@@ -162,9 +177,22 @@ void SIslandRoomPanel::Build()
     LastListings.Reset();
     ClientSettingsButton.Reset();
     CharacterButton.Reset();
+    if (Page == EIslandPanel::PartyBrief)
+    {
+        Body.Reset();
+        MenuScroll.Reset();
+        ChildSlot.HAlign(HAlign_Fill).VAlign(VAlign_Fill).Padding(0)
+        [
+            SAssignNew(PartyBrief, SIslandPartyBriefPanel)
+            .Tag("Island.PartyBrief").Controller(PC)
+            .OnAction_Lambda([this]{ ++Actions; })
+        ];
+        return;
+    }
     if (Page == EIslandPanel::ClientSettings)
     {
         Body.Reset();
+        MenuScroll.Reset();
         ChildSlot.HAlign(HAlign_Fill).VAlign(VAlign_Fill).Padding(0)
         [
             SAssignNew(ClientSettings, SIslandClientSettingsPanel)
@@ -173,28 +201,39 @@ void SIslandRoomPanel::Build()
         ];
         return;
     }
-    ChildSlot.HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(34,12)
-    [
-        SNew(SBox).WidthOverride(456.f)
-        .HeightOverride_Lambda([this,PreviousHeight]
-        {
-            const float T=FMath::Clamp(float((FPlatformTime::Seconds()-TransitionAt)/.16),0.f,1.f);
-            if (!Body || PreviousHeight<=32.f || T>=1.f) return FOptionalSize();
-            const float Target=Body->GetDesiredSize().Y+32.f;
-            return FOptionalSize(FMath::Lerp(PreviousHeight,FMath::Max(32.f,Target),FMath::SmoothStep(0.f,1.f,T)));
-        })
+    if (!Body)
+    {
+        // Use the viewport for the menu's top edge. A roster update, validation message
+        // or page change can extend the sheet down without moving the current action.
+        ChildSlot.HAlign(HAlign_Left).VAlign(VAlign_Fill).Padding(34,12)
         [
-            SNew(SBorder).BorderImage(&IslandMenuStyle::Backing).Padding(0)
+            SNew(SVerticalBox)
+            + SVerticalBox::Slot().FillHeight(.16f)[ SNew(SSpacer) ]
+            + SVerticalBox::Slot().FillHeight(.84f).VAlign(VAlign_Top)
             [
-                SNew(SHorizontalBox)
-                + SHorizontalBox::Slot().AutoWidth()
-                [ SNew(SBox).WidthOverride(3)[ SNew(SBorder).BorderImage(&IslandMenuStyle::Accent) ] ]
-                + SHorizontalBox::Slot().FillWidth(1)
-                [ SNew(SScrollBox).ScrollBarPadding(FMargin(1)).ConsumeMouseWheel(EConsumeMouseWheel::WhenScrollingPossible)
-                  + SScrollBox::Slot().Padding(22,18,16,14)[ SAssignNew(Body,SVerticalBox) ] ]
+                SNew(SBox).WidthOverride(456.f)
+                [
+                    SNew(SBorder).BorderImage(&IslandMenuStyle::Backing).Padding(0)
+                    [
+                        SNew(SHorizontalBox)
+                        + SHorizontalBox::Slot().AutoWidth()
+                        [ SNew(SBox).WidthOverride(3)[ SNew(SBorder).BorderImage(&IslandMenuStyle::Accent) ] ]
+                        + SHorizontalBox::Slot().FillWidth(1)
+                        [ SAssignNew(MenuScroll,SScrollBox).ScrollBarPadding(FMargin(1))
+                            .ScrollWhenFocusChanges(EScrollWhenFocusChanges::InstantScroll)
+                            .ConsumeMouseWheel(EConsumeMouseWheel::WhenScrollingPossible)
+                            + SScrollBox::Slot().Padding(22,18,16,14)[ SAssignNew(Body,SVerticalBox) ] ]
+                    ]
+                ]
             ]
-        ]
-    ];
+        ];
+    }
+    else
+    {
+        Body->ClearChildren();
+        MenuScroll->EndInertialScrolling();
+        MenuScroll->ScrollToStart();
+    }
     if (Page == EIslandPanel::Home)
     {
         AddTitle(EXPEDITION_TEXT("海岛寻宝", "Treasure Island"));
@@ -204,6 +243,10 @@ void SIslandRoomPanel::Build()
             if (auto* S = Session()) S->Search(SelectedNetwork);
             Show(EIslandPanel::Search);
         },true,false,"Island.Search"));
+        AddClientSettingsButton();
+        Add(Button(Txt(EXPEDITION_TEXT("退出游戏", "Quit game")), [this]{
+            if (PC.IsValid()) UKismetSystemLibrary::QuitGame(PC.Get(),PC.Get(),EQuitPreference::Quit,false);
+        },true,false,"Island.Quit"));
         if (SelectedNetwork == EIslandRoomNetwork::Internet)
         {
             auto Retry = Button(Txt(EXPEDITION_TEXT("重试联网", "Retry connection")), [this]{
@@ -214,10 +257,6 @@ void SIslandRoomPanel::Build()
             }));
             Add(Retry);
         }
-        AddClientSettingsButton();
-        Add(Button(Txt(EXPEDITION_TEXT("退出游戏", "Quit game")), [this]{
-            if (PC.IsValid()) UKismetSystemLibrary::QuitGame(PC.Get(),PC.Get(),EQuitPreference::Quit,false);
-        },true,false,"Island.Quit"));
     }
     else if (Page==EIslandPanel::Arriving)
     {
@@ -287,16 +326,19 @@ void SIslandRoomPanel::AddClientSettingsButton()
 void SIslandRoomPanel::BuildForm()
 {
     const bool bNew = Page == EIslandPanel::Create;
+    const auto CanEdit = TAttribute<bool>::CreateLambda([this]{
+        return Session() && !Session()->IsBusy();
+    });
     AddTitle(bNew ? EXPEDITION_TEXT("创建房间", "Create room") : EXPEDITION_TEXT("房间设置", "Room settings"));
     Add(Label(Txt(EXPEDITION_TEXT("房间名称", "Room name")),15,IslandMenuStyle::Muted),2);
-    Add(SAssignNew(NameField, SEditableTextBox).Tag("Island.RoomName").Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).Text(Txt(Draft.RoomName))
+    Add(SAssignNew(NameField, SEditableTextBox).Tag("Island.RoomName").IsEnabled(CanEdit).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).Text(Txt(Draft.RoomName))
         .OnTextChanged_Lambda([this](const FText& Value){ Draft.RoomName = Value.ToString(); }));
-    const auto Number = [this](const TCHAR* Caption, int32 FIslandRoomSettings::* Member, FName Tag, int32 Minimum=1, int32 Maximum=8)
+    const auto Number = [this, CanEdit](const TCHAR* Caption, int32 FIslandRoomSettings::* Member, FName Tag, int32 Minimum=1, int32 Maximum=8)
     {
         Add(SNew(SHorizontalBox)
             + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)[Label(Txt(Caption),16,IslandMenuStyle::Ink)]
             + SHorizontalBox::Slot().AutoWidth()[ SNew(SBox).WidthOverride(106)
-                [SNew(SSpinBox<int32>).Tag(Tag).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).MinValue(Minimum).MaxValue(Maximum)
+                [SNew(SSpinBox<int32>).Tag(Tag).IsEnabled(CanEdit).Font(FCoreStyle::GetDefaultFontStyle("Regular",16)).MinValue(Minimum).MaxValue(Maximum)
                  .Value_Lambda([this,Member]{return Draft.*Member;})
                  .OnValueChanged_Lambda([this,Member](int32 Value){ Draft.*Member = Value; })] ]);
     };
@@ -306,8 +348,7 @@ void SIslandRoomPanel::BuildForm()
     Number(EXPEDITION_TEXT("额外假箱数量", "Additional decoy chests"), &FIslandRoomSettings::DecoyCount, "Island.DecoyCount", 0, IslandRules::MaxDecoys);
     const TCHAR* CreateLabel = SelectedNetwork == EIslandRoomNetwork::Internet
         ? EXPEDITION_TEXT("创建互联网房间", "Create internet room") : EXPEDITION_TEXT("创建局域网房间", "Create LAN room");
-    Primary = Button(Txt(bNew ? CreateLabel : EXPEDITION_TEXT("保存设置", "Save settings")), [this]{ SubmitForm(); },
-        TAttribute<bool>::CreateLambda([this]{ return Session() && !Session()->IsBusy(); }), true, "Island.SubmitRoom");
+    Primary = Button(Txt(bNew ? CreateLabel : EXPEDITION_TEXT("保存设置", "Save settings")), [this]{ SubmitForm(); }, CanEdit, true, "Island.SubmitRoom");
     Add(Primary.ToSharedRef());
     Add(Button(Txt(EXPEDITION_TEXT("返回", "Back")), [this]{ Back(); },true,false,"Island.Back"));
 }
@@ -418,8 +459,13 @@ FString SIslandRoomPanel::RoomStatus() const
 {
     const auto* GS = Round();
     if (!GS) return EXPEDITION_TEXT("正在接收房间状态", "Receiving room status");
-    if (GS->Phase == EIslandPhase::Starting)
-        return FString::Format(EXPEDITION_TEXT("{0} 秒后登岛", "Landing in {0}s"), {FMath::Max(0,FMath::CeilToInt(GS->StartAtServerTime-GS->GetServerWorldTimeSeconds()))});
+    if (GS->Phase == EIslandPhase::Starting || GS->Phase == EIslandPhase::Hunting)
+    {
+        const int32 Seconds = FMath::CeilToInt(GS->StartAtServerTime - GS->GetServerWorldTimeSeconds());
+        return GS->Phase == EIslandPhase::Starting && Seconds > 0
+            ? FString::Format(EXPEDITION_TEXT("{0} 秒后登岛", "Landing in {0}s"), {Seconds})
+            : FString(EXPEDITION_TEXT("正在登岛…", "Landing…"));
+    }
     if (GS->CanLaunch()) return EXPEDITION_TEXT("所有成员已就绪", "Everyone is ready");
     if (!GS->RoomNotice.IsEmpty()) return IslandMessageText::Display(GS->RoomNotice);
     for (const auto& Entry : GS->PlayerArray)
@@ -501,9 +547,25 @@ void SIslandRoomPanel::BuildCharacterPicker()
 
 void SIslandRoomPanel::BuildLobby()
 {
-    LobbyName = Round() ? Round()->RoomSettings.RoomName : EXPEDITION_TEXT("房间", "Room");
     bHostLayout = Me() && Me()->bHost;
-    AddTitle(LobbyName);
+    const auto Name = TAttribute<FText>::CreateLambda([this]{
+        return Txt(Round() ? Round()->RoomSettings.RoomName : EXPEDITION_TEXT("房间", "Room"));
+    });
+    Add(SNew(STextBlock).Text(Name).ToolTipText(Name).OverflowPolicy(ETextOverflowPolicy::Ellipsis)
+        .Font(FCoreStyle::GetDefaultFontStyle("Bold", 35)).ColorAndOpacity(IslandMenuStyle::Ink), 16);
+    if (bHostLayout)
+    {
+        Primary = Button(Txt(EXPEDITION_TEXT("开始寻宝", "Start expedition")), [this]{ if (PC.IsValid()) PC->ServerStartExpedition(); },
+            TAttribute<bool>::CreateLambda([this]{ auto* GS=Round(); return GS && GS->Phase==EIslandPhase::Waiting && GS->CanLaunch(); }),true,"Island.Start");
+    }
+    else
+    {
+        Primary = Button(TAttribute<FText>::CreateLambda([this]{ return Txt(Me() && Me()->bRoomReady ? EXPEDITION_TEXT("取消准备", "Cancel ready") : EXPEDITION_TEXT("准备", "Ready up")); }),
+            [this]{ if (PC.IsValid() && Me()) PC->ServerSetRoomReady(!Me()->bRoomReady); },
+            TAttribute<bool>::CreateLambda([this]{ return Me() && Me()->Team>=0 && Round()
+                && (Round()->Phase==EIslandPhase::Waiting || Me()->bRoomReady); }),true,"Island.Ready");
+    }
+    Add(Primary.ToSharedRef());
     auto ChestRules=Label(TAttribute<FText>::CreateLambda([this]
     {
         const auto* RoomSession = Session();
@@ -559,21 +621,10 @@ void SIslandRoomPanel::BuildLobby()
         }));
         Body->AddSlot().AutoHeight()[Empty];
     }
-    if (Me() && Me()->bHost)
+    if (bHostLayout)
     {
-        Primary = Button(Txt(EXPEDITION_TEXT("开始寻宝", "Start expedition")), [this]{ if (PC.IsValid()) PC->ServerStartExpedition(); },
-            TAttribute<bool>::CreateLambda([this]{ auto* GS=Round(); return GS && GS->Phase==EIslandPhase::Waiting && GS->CanLaunch(); }),true,"Island.Start");
-        Add(Primary.ToSharedRef());
         Add(Button(Txt(EXPEDITION_TEXT("房间设置", "Room settings")), [this]{ Show(EIslandPanel::Settings); },
             TAttribute<bool>::CreateLambda([this]{return Round() && Round()->Phase==EIslandPhase::Waiting;}), false,"Island.Settings"));
-    }
-    else
-    {
-        Primary = Button(TAttribute<FText>::CreateLambda([this]{ return Txt(Me() && Me()->bRoomReady ? EXPEDITION_TEXT("取消准备", "Cancel ready") : EXPEDITION_TEXT("准备", "Ready up")); }),
-            [this]{ if (PC.IsValid() && Me()) PC->ServerSetRoomReady(!Me()->bRoomReady); },
-            TAttribute<bool>::CreateLambda([this]{ return Me() && Me()->Team>=0 && Round()
-                && (Round()->Phase==EIslandPhase::Waiting || Me()->bRoomReady); }),true,"Island.Ready");
-        Add(Primary.ToSharedRef());
     }
     AddClientSettingsButton();
     Add(Button(Txt(EXPEDITION_TEXT("离开房间", "Leave room")), [this]{ Show(EIslandPanel::Pause); }, true, false,"Island.Leave"));
@@ -582,12 +633,14 @@ void SIslandRoomPanel::BuildLobby()
 void SIslandRoomPanel::Refresh()
 {
     if (Page==EIslandPanel::Hidden) return;
-    const double Alpha = FMath::Clamp((FPlatformTime::Seconds()-TransitionAt)/.14,0.,1.);
-    SetRenderOpacity(.72f + .28f*Alpha);
-    SetRenderTransform(FSlateRenderTransform(FVector2D(-6.f*(1.f-Alpha),0)));
+    if (PartyBrief)
+    {
+        PartyBrief->Refresh();
+        return;
+    }
     if (Page==EIslandPanel::Search) UpdateListings();
     if (Page==EIslandPanel::Lobby && Round() && (TeamRows!=Round()->RoomSettings.MaxTeams
-        || (Me() && Me()->bHost)!=bHostLayout || Round()->RoomSettings.RoomName!=LobbyName))
+        || (Me() && Me()->bHost)!=bHostLayout))
     {
         Build();
         Focus(Primary);
@@ -615,7 +668,11 @@ void SIslandRoomPanel::Back()
 
 FReply SIslandRoomPanel::OnPreviewKeyDown(const FGeometry& Geometry, const FKeyEvent& E)
 {
+    if (const auto* Room = Session(); Room && Room->IsTravelInputBlocked()) return FReply::Handled();
     if (ClientSettings) return FReply::Unhandled();
+    // A jump/accept key already held as the arena arrives cannot consent on key-repeat.
+    if (PartyBrief && E.IsRepeat() && FSlateApplication::Get().GetNavigationActionFromKey(E) == EUINavigationAction::Accept)
+        return FReply::Handled();
     if (E.GetKey()==EKeys::Escape || (Page==EIslandPanel::Character && E.GetKey()==EKeys::Gamepad_FaceButton_Right)) { if (!E.IsRepeat()) Back(); return FReply::Handled(); }
     return SCompoundWidget::OnPreviewKeyDown(Geometry,E);
 }

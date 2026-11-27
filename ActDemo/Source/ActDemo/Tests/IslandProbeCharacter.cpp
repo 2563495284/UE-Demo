@@ -161,7 +161,7 @@ void AIslandProbe::TickCharacterSelection(double Now)
         }
         return;
     }
-    if (CharacterStage == Arena && Round->Phase == EIslandPhase::PartyLoading)
+    if (CharacterStage == Arena && Round->Phase == EIslandPhase::PartyBriefing)
         if (auto* Session = Cast<APartyVoxelSession>(Mode->PartySession)) Session->RoundSeconds = 9.f;
     if (Now < NextCharacterPoll) return;
     FIntVector Host(-1,0,0), Guest(-1,-1,0); // model, team, ready flag; -1 skips team/ready or checks the original default model.

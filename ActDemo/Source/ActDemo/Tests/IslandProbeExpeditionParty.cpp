@@ -1,4 +1,5 @@
 #include "Tests/IslandProbe.h"
+#include "Island/ExpeditionBodyMud.h"
 
 #include "Abilities/ExpeditionAbility.h"
 #include "Island/ExpeditionAnimalComponent.h"
@@ -15,6 +16,7 @@
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
 #include "Island/IslandWorld.h"
+#include "PartyCrewRig.h"
 #include "PartyVoxelArena.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
@@ -326,6 +328,12 @@ void AIslandProbePeer::TickArenaViews(AIslandPlayerController& Player)
         Player.InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V, IE_Released, 0.f));
         bViewKeyDown = false;
     }
+    // Other ordinary actions (opening a chest, aiming a tool) can use V too. Follow the
+    // source pawn up to the swap, then compare the destination with the saved preference.
+    if (ViewStep == EViewStep::Idle && Player.GetHero() && !Player.IsPartyTravelLocked())
+        bViewFirst = Player.WantsFirstPersonView();
+    if (ViewStep == EViewStep::Return && Cast<APartyVoxelPawn>(Player.GetPawn()) && !Player.IsPartyTravelLocked())
+        bViewFirst = Player.WantsFirstPersonView();
     if (!Round || Now < ViewNext || Player.IsPartyTravelLocked()) return;
     const auto Toggle = [&]()
     {
@@ -343,7 +351,7 @@ void AIslandProbePeer::TickArenaViews(AIslandPlayerController& Player)
         }
         else if (ViewStep == EViewStep::Return)
         {
-            if (Player.GetHero()->IsInFirstPersonView() != bViewFirst) return;
+            if (Player.WantsFirstPersonView() != bViewFirst || Player.GetHero()->IsInFirstPersonView() != bViewFirst) return;
             UE_LOG(LogTemp,Display,TEXT("ARENA_VIEW_RETURN round=%d first=%d"),ViewRound,bViewFirst);
             ViewStep = EViewStep::Idle;
         }
@@ -371,7 +379,8 @@ void AIslandProbePeer::TickArenaViews(AIslandPlayerController& Player)
     FRotator Rotation;
     Player.GetPlayerViewPoint(Camera, Rotation);
     const double Gap = FVector::Dist(Camera, Pawn->GetPawnViewLocation());
-    if (Pawn->IsInFirstPersonView() != bViewFirst || (bViewFirst ? Gap > 8. : Gap < 75.)) return;
+    if (Player.WantsFirstPersonView() != bViewFirst || Pawn->IsInFirstPersonView() != bViewFirst ||
+        (bViewFirst ? Gap > 8. : Gap < 75.)) return;
     if (ViewStep == EViewStep::Photo)
     {
         if (FScreenshotRequest::IsScreenshotRequested()) return;
@@ -380,16 +389,20 @@ void AIslandProbePeer::TickArenaViews(AIslandPlayerController& Player)
             const FString Name = FString::Printf(TEXT("%s-R%d-%s.png"),*ViewFeature.ToString(),ViewRound,bViewFirst ? TEXT("First") : TEXT("Third"));
             FScreenshotRequest::RequestScreenshot(VenuePhotoPath(*Name),true,false);
         }
-        bool bSuitVisible = false;
+        const auto* Rig = Pawn->FindComponentByClass<UPartyCrewRig>();
+        bool bBodyVisible = Rig && Rig->GetSkinnedAsset() && Rig->IsVisible() && !Rig->bOwnerNoSee;
         int32 Paws = 0;
         TInlineComponentArray<UStaticMeshComponent*> Meshes(Pawn);
         for (const auto* Part : Meshes)
         {
-            if (Part->GetFName() == TEXT("Suit")) bSuitVisible = Part->IsVisible() && !Part->bOwnerNoSee;
+            if (Part->GetFName() == TEXT("CrewSculpture") || Part->GetFName() == TEXT("Suit"))
+                bBodyVisible |= Part->GetStaticMesh() && Part->IsVisible() && !Part->bOwnerNoSee;
             if (Part->bOnlyOwnerSee && Part->GetName().StartsWith(TEXT("FirstPerson")) && Part->IsVisible()) ++Paws;
         }
+        if (!ViewsMeasured)
+            UE_LOG(LogTemp,Display,TEXT("ARENA_VIEW_ENTRY round=%d first=%d"),ViewRound,bViewFirst);
         UE_LOG(LogTemp,Display,TEXT("ARENA_VIEW round=%d mode=%s gap_cm=%.2f body=%d paws=%d"),
-            ViewRound,bViewFirst ? TEXT("first") : TEXT("third"),Gap,bSuitVisible,Paws);
+            ViewRound,bViewFirst ? TEXT("first") : TEXT("third"),Gap,bBodyVisible,Paws);
         ViewStep = EViewStep::LookAtFloor;
         return;
     }
@@ -463,8 +476,11 @@ void AIslandProbePeer::TickArenaTerrainSample(AIslandPlayerController& Player)
         for (int32 R=0; R<=160; R+=10)
         {
             FHitResult Hit;
-            if (!SampleFloor(*Arena,TerrainSampleOrigin+FVector(0,R,0),Hit)) return;
-            Depths.Add(FString::FromInt(FMath::RoundToInt((TerrainSampleOrigin.Z-Hit.ImpactPoint.Z)*10.)));
+            if (SampleFloor(*Arena,TerrainSampleOrigin+FVector(0,R,0),Hit))
+                Depths.Add(FString::FromInt(FMath::RoundToInt((TerrainSampleOrigin.Z-Hit.ImpactPoint.Z)*10.)));
+            else if (!Hit.bBlockingHit)
+                Depths.Add(TEXT("open"));
+            else return;
         }
         UE_LOG(LogTemp,Display,TEXT("ARENA_PUNCH_PROFILE round=%d game=%s trial=%d seq=%d depth_mm=%s"),
             TerrainSampleRound,*TerrainSampleGame.ToString(),TerrainSampleStage-4,TerrainSampleSequence,*FString::Join(Depths,TEXT(",")));
@@ -960,23 +976,24 @@ void AIslandProbe::TickExpeditionGame(double Now)
     const bool bTerrain = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaTerrainQA"));
     const bool bDecoyQA = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA"));
     const bool bZeroScore = bDecoyQA && GameCount == 1;
-    if (bZeroScore && !bInjectedDecoyLoadFailure && Round->Phase == EIslandPhase::PartyLoading)
+    if (bGamesDrop && GameCount == 0 && (Round->Phase == EIslandPhase::PartyBriefing || Round->Phase == EIslandPhase::PartyPlaying))
+        bGameDropSent = true;
+    if (bZeroScore && !bInjectedDecoyLoadFailure && Round->Phase == EIslandPhase::PartyBriefing)
     {
         // Exercise the same prepare-failure path as a failed venue asset load while a boost is live.
         Mode->bPartyPrepareFailed = true;
         bInjectedDecoyLoadFailure = true;
     }
-    if (Round->Phase == EIslandPhase::PartyLoading)
+    if (Round->Phase == EIslandPhase::PartyBriefing)
         Require(Round->ActiveDecoyEvent == ActiveBeforeGame && Round->DecoyToolBoostMask == BoostMaskBeforeGame,
             TEXT("a pending load preserves the active event"));
     const bool bMazeProof = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMazeQA"));
-    if (bShots && !bInteraction && GameCount == 0 && !bIssued && Round->Phase == EIslandPhase::PartyLoading
-        && Round->GetServerWorldTimeSeconds() - Round->PartyStartedAt >= .42)
+    if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaControlsQA")) && GameCount == 0 && bGameStarted)
     {
-        FString Dir;
-        FParse::Value(FCommandLine::Get(), TEXT("FieldShotsDir="), Dir);
-        FScreenshotRequest::RequestScreenshot(FPaths::Combine(Dir, TEXT("PartyPull.png")), true, false);
-        bIssued = true;
+        auto& Host = *CastChecked<AIslandPlayerController>(Mode->GetPlayers()[0]);
+        const auto* Arena = Cast<APartyVoxelSession>(Mode->PartySession);
+        if (Arena && Arena->GetPhase() == EPartyVoxelPhase::Playing && !MeasureControlPass(Host, 1)) return;
+        if (Round->Phase == EIslandPhase::Hunting && !MeasureControlPass(Host, 2)) return;
     }
     if (Now - LastAction < .45) return;
     LastAction = Now;
@@ -987,6 +1004,11 @@ void AIslandProbe::TickExpeditionGame(double Now)
     }
     const auto& Players = Mode->GetPlayers();
     auto* Session = Cast<APartyVoxelSession>(Mode->PartySession);
+    if (Round->Phase == EIslandPhase::PartyBriefing)
+    {
+        Require((!Session || Session->GetPhase() == EPartyVoxelPhase::Waiting) && Round->PartyOutcome == EIslandChestOutcome::Unknown,
+            TEXT("arena clock and treasure settlement wait for the briefing"));
+    }
     if (Session && !bGameStarted)
     {
         if (Session->IsChaseGame())
@@ -1044,7 +1066,6 @@ void AIslandProbe::TickExpeditionGame(double Now)
                 *Mode->CurrentPartyFeature.ToString(), GameCount + 1, Players.Num());
             if (bGamesDrop && GameCount == 0)
             {
-                bGameDropSent = true;
                 UE_LOG(LogTemp, Display, TEXT("EXPEDITION_GAMES_DROP_READY"));
             }
         }
@@ -1295,26 +1316,25 @@ void AIslandProbe::TickExpeditionGame(double Now)
             AVoxelCharacter* Target = nullptr;
             for (AVoxelPlayerController* Player : Players)
                 if (CastChecked<AIslandPlayerController>(Player)->GetTeam() != Thrower->GetTeam()) Target = Player->GetHero();
-            if (!Target || Target->IsMudImmune() || !Mode->CanPlayerAct(*CastChecked<AIslandPlayerController>(Target->GetController())))
+            if (!Target || !Mode->CanPlayerAct(*CastChecked<AIslandPlayerController>(Target->GetController())))
             {
                 Require(false, TEXT("ceasefire contact fixture is a normally hittable opponent"));
                 return;
             }
             // Deliver the same impact payload as a mud ball touching an enemy capsule, then a real terrain hit.
             FHitResult Contact(Target, Target->GetCapsuleComponent(), Target->GetActorLocation(), FVector::UpVector);
-            uint8 Marks = 0;
-            const auto* Marked = Mode->ResolveMudImpact(*Thrower, Contact, Marks);
-            Require(!Marked && !Marks && !Mode->GetMudMarks(*Target) && !Target->IsMudStunned(),
-                TEXT("a ceasefire capsule contact creates no mud mark or stun"));
+            Mode->ResolveMudImpact(*Thrower, Contact);
+            Require(Target->FindComponentByClass<UExpeditionBodyMudComponent>()->Num() == 0 && !Target->IsMudAnchored(),
+                TEXT("a ceasefire capsule contact creates no body clay or anchor"));
             CeasefireGroundSequence = Terrain->GetAppliedSequence() + 1;
             CeasefireFloorBefore = Floor.ImpactPoint.Z;
-            Mode->ResolveMudImpact(*Thrower, Floor, Marks);
+            Mode->ResolveMudImpact(*Thrower, Floor);
             return;
         }
         if (int32(Terrain->GetAppliedSequence()) < CeasefireGroundSequence || Terrain->IsBusy()) return;
         const double Rise = Floor.ImpactPoint.Z - CeasefireFloorBefore;
         Require(Rise > 35. && Rise < 48., TEXT("a ceasefire ground contact still builds a standable normal pad"));
-        UE_LOG(LogTemp,Display,TEXT("DECOY_QA_CEASEFIRE round=%d enemy_marks=0 stun=0 ground_rise_cm=%.1f"),GameCount+1,Rise);
+        UE_LOG(LogTemp,Display,TEXT("DECOY_QA_CEASEFIRE round=%d clods=0 anchored=0 ground_rise_cm=%.1f"),GameCount+1,Rise);
     }
     if (bDecoyQA && ExpectedEvent == EIslandDecoyEvent::SpringTide)
     {

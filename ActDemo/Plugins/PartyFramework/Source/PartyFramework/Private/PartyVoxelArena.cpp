@@ -1,4 +1,5 @@
 #include "PartyVoxelArena.h"
+#include "PartyCharacterControl.h"
 #include "PartyPunch.h"
 
 #include "Components/CapsuleComponent.h"
@@ -224,12 +225,13 @@ void APartyVoxelSession::OnRep_Beacons()
         for (const auto& B : Beacons) ApplyBeacon(B.Cell,B.Color);
 }
 
-void APartyVoxelSession::SetStart(int32 Seat,FIntVector Feet,float Yaw)
+FVector APartyVoxelSession::SetStart(int32 Seat,FIntVector Feet,float Yaw)
 {
     // A UCharacterMovementComponent floor sits slightly above the collision face.
     FVector Position=CellCenter(Feet);
-    Position.Z+=41.;
+    Position.Z+=PartyCharacterControl::StandingHalfHeight + 3. - PartyGrid::Size * .5;
     Starts.Add(Seat,FTransform(FRotator(0,Yaw,0),Position));
+    return Position;
 }
 
 APartyPawn* APartyVoxelSession::CreateParticipant(int32 Seat)

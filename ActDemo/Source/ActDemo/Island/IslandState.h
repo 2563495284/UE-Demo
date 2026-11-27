@@ -9,6 +9,19 @@
 
 class AIslandChest;
 
+USTRUCT()
+struct FIslandPartyBriefingMember
+{
+    GENERATED_BODY()
+
+    UPROPERTY() int32 PlayerId = INDEX_NONE;
+    UPROPERTY() FString Name;
+    UPROPERTY() bool bHost = false;
+    UPROPERTY() bool bAgreed = false;
+    UPROPERTY() bool bAssetsReady = false;
+    UPROPERTY() bool bGameReady = false;
+};
+
 UENUM()
 enum class EIslandChestOutcome : uint8 { Unknown, Genuine, Scatter, Disguise, Decoy };
 
@@ -57,6 +70,10 @@ public:
     UPROPERTY(Replicated) double StartAtServerTime = 0.0;
     UPROPERTY(Replicated) FString RoomNotice;
     UPROPERTY(Replicated) double PartyStartedAt = 0.;
+    UPROPERTY(Replicated) uint32 PartyBriefingRound = 0;
+    UPROPERTY(Replicated) FName PartyBriefingFeature;
+    UPROPERTY(Replicated) TArray<FIslandPartyBriefingMember> PartyBriefingMembers;
+    UPROPERTY(Replicated) bool bPartyForceStartRequested = false;
     UPROPERTY(Replicated) FString PartyWinnerName;
     UPROPERTY(Replicated) int32 PartyWinnerTeam = INDEX_NONE;
     UPROPERTY(Replicated) int32 PartyWinnerMask = 0;

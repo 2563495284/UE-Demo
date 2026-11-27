@@ -8,6 +8,7 @@ class AIslandGameState;
 struct FIslandClues;
 class AIslandChest;
 class ACameraActor;
+class AExpeditionDock;
 class SIslandRoomPanel;
 class SWidget;
 enum class EIslandPanel : uint8;
@@ -22,8 +23,10 @@ public:
     void DrawHUD() override;
     void Tick(float DeltaSeconds) override;
     void ToggleMenu();
+    void ShowLocalPartyBriefing(AIslandPlayerController& Player);
     bool IsMenuOpen() const;
     bool IsAcceptingWorldInput() const;
+    bool OwnsDockView() const { return bRoomCamera && DockCamera.IsValid(); }
     bool GetTreasureFeedbackFrame(FName& OutStage, float& OutAge) const;
 #if !UE_BUILD_SHIPPING
     FIntPoint GetDrawnCrewCounts() const { return DrawnCrewCounts; }
@@ -41,6 +44,8 @@ private:
     void DrawTreasureFeedback(const AIslandPlayerController& Player, float Scale, bool bFullChart);
     void DrawVaultBearing(const AIslandPlayerController& Player, float Scale);
     void UpdateDockCamera(AIslandPlayerController& Player, bool bRoom);
+    void UpdateHuntHandoff(AIslandPlayerController& Player);
+    void PresentRoomView(const AIslandPlayerController& Player);
     bool UpdateCrewPreview(AIslandPlayerController& Player, bool bShow);
     void UpdateInput(AIslandPlayerController& Player, bool bMenu);
     void UpdateResultCamera(AIslandPlayerController& Player);
@@ -60,6 +65,8 @@ private:
     TSharedPtr<SIslandRoomPanel> Panel;
     TSharedPtr<SWidget> ViewportLayer;
     TWeakObjectPtr<ACameraActor> DockCamera, ResultCamera;
+    TWeakObjectPtr<AExpeditionDock> ArrivalDock;
+    float DockViewWorldTime = 0.f;
     TArray<TWeakObjectPtr<AActor>> ResultOccluders;
     TArray<TWeakObjectPtr<AActor>> PreviewOccluders;
     bool bCrewPreview = false;
@@ -68,11 +75,14 @@ private:
     bool bRoomCamera = false;
     bool bMenuInput = false;
     bool bHandoffInput = false;
+    bool bTakingControl = false;
+    bool bRoomPresented = false;
     bool bSetInput = false;
     bool bLegacyProbe = false;
     bool bHadFocus = true;
     uint8 LastPhase = 255;
-    double HandoffUntil = 0.0;
+    double LobbyShownAt = -1.;
+    float HandoffProgress = 0.f;
     float ChartVisibility = 0.f;
 #if !UE_BUILD_SHIPPING
     FIntPoint DrawnCrewCounts = FIntPoint::ZeroValue;

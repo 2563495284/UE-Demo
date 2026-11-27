@@ -25,7 +25,7 @@ public:
     UIslandRouteVoxelComponent(const FObjectInitializer& Initializer = FObjectInitializer::Get());
     bool InitializeField(const FBox& LocalBounds, double Spacing,
         TFunctionRef<FRouteVoxelSample(FVector)> SampleShape);
-    bool ApplyWorldCut(FVector Point, FVector OutwardNormal, double Radius = 62.);
+    bool ApplyWorldCut(FVector Point, FVector OutwardNormal, double Radius = 62., float DepthScale = 1.f);
     // Test each occupied local sample against the owner's real attachment/support.
     bool CullUnsupported(TFunctionRef<bool(FVector)> IsLocalAnchor, TArray<FIslandLooseSamples>* Loose = nullptr);
     double SignedDistanceLocal(FVector Local) const;
@@ -77,7 +77,7 @@ public:
     AIslandRouteVoxel();
     static AIslandRouteVoxel* Spawn(UWorld& World, IslandRouteFlora::EShape Kind, FVector Location,
         int32 Yaw, int32 Variant);
-    bool Strike(const FHitResult& Hit, float RadiusScale = 1.f);
+    bool Strike(const FHitResult& Hit, float RadiusScale, float DepthScale);
     UIslandRouteVoxelComponent* Field() const { return Voxels; }
     IslandRouteFlora::EShape GetKind() const { return static_cast<IslandRouteFlora::EShape>(State.Kind); }
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const override;

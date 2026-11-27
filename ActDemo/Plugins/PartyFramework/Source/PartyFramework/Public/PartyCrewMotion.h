@@ -10,6 +10,7 @@ struct PARTYFRAMEWORK_API FPartyCrewPose
     FVector BodyOffset = FVector::ZeroVector;
     FRotator BodyRot = FRotator::ZeroRotator;
     float Gait = 0.f, Speed = 0.f, Load = 0.f, Extension = 0.f, Strength = 0.f;
+    float Recoil = 0.f, TossFollow = 0.f;
     float Air = 0.f, Landing = 0.f, Brake = 0.f, Idle = 0.f, Pry = 0.f, Toss = 0.f;
     float EarPitch = 0.f, BrimPitch = 0.f;
     float WorkLook = 0.f, EyeClose = 0.f, Relaxed = 0.f;

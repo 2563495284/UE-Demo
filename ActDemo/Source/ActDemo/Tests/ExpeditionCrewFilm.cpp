@@ -11,6 +11,7 @@
 #include "HAL/FileManager.h"
 #include "Island/IslandGameMode.h"
 #include "Island/ExpeditionDock.h"
+#include "Island/ExpeditionMudBall.h"
 #include "Island/IslandCrewPortrait.h"
 #include "Island/ExpeditionAnimalComponent.h"
 #include "Island/IslandPlayerController.h"
@@ -63,6 +64,7 @@ void AExpeditionWalk::TickCrewFilm()
     if (!PC || !PC->IsLocalController() || !PC->GetHero() || !Game || !Terrain || !Terrain->IsReady()) return;
     const bool Pair=FParse::Param(FCommandLine::Get(),TEXT("CrewPunchFilmPair"));
     const bool Shape=FParse::Param(FCommandLine::Get(),TEXT("CrewShapeFilm"));
+    const bool Buttons=FParse::Param(FCommandLine::Get(),TEXT("CrewButtonFilm"));
     if (HasAuthority() && bFilmPryStarted && Game->Phase==EIslandPhase::Finished)
     {
         UE_LOG(LogTemp,Display,TEXT("CREW_FILM_DONE frames=%d authority=1 pry=1 chest_finished=1"),FilmFrame);
@@ -144,12 +146,12 @@ void AExpeditionWalk::TickCrewFilm()
         if (Frame==85) Hero->StopJumping();
         if (Frame==114 || Frame==140 || Frame==243) PC->SetExpeditionDigHeld(true);
         if (Frame==116 || Frame==173 || Frame==278) PC->SetExpeditionDigHeld(false);
-        if (Frame==197)
+        if (Frame==197 || (Buttons && (Frame==232 || Frame==265)))
         {
-            PC->SetControlRotation(FRotator(6.,Heading.Yaw,0.));
+            if (!Buttons) PC->SetControlRotation(FRotator(6.,Heading.Yaw,0.));
             PC->SetExpeditionThrowHeld(true);
         }
-        if (Frame==200) PC->SetExpeditionThrowHeld(false);
+        if (Frame==200 || (Buttons && (Frame==235 || Frame==268))) PC->SetExpeditionThrowHeld(false);
         if (Frame==223) { PC->SetViewTarget(Hero); Key(EKeys::V,true); }
         if (Frame==224 || Frame==301) Key(EKeys::V,false);
         if (Frame==300) Key(EKeys::V,true);
@@ -180,7 +182,9 @@ void AExpeditionWalk::TickCrewFilm()
     }
 
     const bool Eyes=HasAuthority() && Frame>=223 && Frame<=301;
-    const bool Shoulder=HasAuthority() && Frame>=216 && Frame<223;
+    const bool Shoulder=HasAuthority() && Frame>=(Buttons ? 191 : 216) && Frame<223;
+    if (Buttons && HasAuthority())
+        if (auto* HUD=PC->GetHUD()) HUD->bShowHUD=Shoulder || Eyes;
     if (Shape)
     {
         const int32 Section=FMath::Min(Frame/12,3);
@@ -194,7 +198,7 @@ void AExpeditionWalk::TickCrewFilm()
     }
     else if (Shoulder)
     {
-        PC->SetControlRotation(FRotator(-6.,Heading.Yaw,0.));
+        PC->SetControlRotation(FRotator(Buttons ? -12. : -6.,Heading.Yaw,0.));
         PC->SetViewTarget(Hero);
     }
     else if (!Eyes)
@@ -238,6 +242,15 @@ void AExpeditionWalk::TickCrewFilm()
         if (HasAuthority() && (Frame==31 || Frame==67 || Frame==88 || Frame==118 || Frame==170 || Frame==178 || Frame==275 || Frame==341))
             UE_LOG(LogTemp,Display,TEXT("CREW_FILM_POSE frame=%d run=%.2f air=%.2f load=%.2f reach=%.2f strength=%.2f pry=%.2f"),
                 Frame,Pose.Speed,Pose.Air,Pose.Load,Pose.Extension,Pose.Strength,Pose.Pry);
+        if (Buttons && HasAuthority() && Frame>=110 && Frame<295)
+        {
+            const AVoxelCharacter* Subject=Hero;
+            int32 Clods=0;
+            for (TActorIterator<AExpeditionMudBall> It(&World);It;++It)
+                if (It->GetInstigator()==Subject) ++Clods;
+            UE_LOG(LogTemp,Display,TEXT("CREW_BUTTON_FRAME frame=%d first=%d load=%.3f punch=%.3f recoil=%.3f toss=%.3f follow=%.3f clods=%d"),
+                Frame,Hero->IsInFirstPersonView(),Pose.Load,Pose.Extension,Pose.Recoil,Pose.Toss,Pose.TossFollow,Clods);
+        }
     }
     if (Frame==226 && HasAuthority()) UE_LOG(LogTemp,Display,TEXT("CREW_FILM_EYES shown=%d"),Hero->IsInFirstPersonView());
     if (Frame>=353 || (!HasAuthority() && FilmFrame>520))

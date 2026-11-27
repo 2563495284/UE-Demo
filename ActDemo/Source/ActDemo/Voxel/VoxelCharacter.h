@@ -10,6 +10,7 @@ class AVoxelTerrain;
 class UCameraComponent;
 class USpringArmComponent;
 class UExpeditionAnimalComponent;
+class UExpeditionBodyMudComponent;
 
 UCLASS()
 class ACTDEMO_API AVoxelCharacter : public ACharacter, public IAbilitySystemInterface
@@ -20,13 +21,14 @@ public:
     AVoxelCharacter(const FObjectInitializer& Initializer = FObjectInitializer::Get());
     virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override;
     void EnsureExpeditionAbilities();
-    bool ApplyMudStun();
-    bool IsMudStunned() const;
-    bool IsMudImmune() const;
+    UExpeditionBodyMudComponent* GetBodyMud() const { return BodyMud; }
+    bool IsMudAnchored() const { return bMudAnchored; }
+    void SetMudAnchored(bool bAnchored);
     bool IsMudCompact() const { return bIsCrouched; }
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Props) const override;
     void SetPunchChargePresentation(bool bHeld);
     UFUNCTION(NetMulticast, Reliable) void MulticastExpeditionDig(uint8 Power=0);
+    UFUNCTION(NetMulticast, Reliable) void MulticastExpeditionThrow();
 
     FVector GetAimOrigin() const;
     FRotator GetViewRotationForTarget(FVector Target, FVector Stand) const;
@@ -50,7 +52,7 @@ protected:
 private:
     UFUNCTION() void OnRep_PunchHeldAt();
     UPROPERTY(ReplicatedUsing=OnRep_PunchHeldAt) double PunchHeldAt=-1.;
-    void MudStunChanged(FGameplayTag Tag, int32 Count);
+    UPROPERTY(VisibleAnywhere) TObjectPtr<UExpeditionBodyMudComponent> BodyMud;
     UPROPERTY(VisibleAnywhere) TObjectPtr<UAbilitySystemComponent> AbilitySystem;
     UPROPERTY(VisibleAnywhere) TObjectPtr<UExpeditionAnimalComponent> ExpeditionAnimal;
     UPROPERTY() TObjectPtr<USpringArmComponent> Boom;
@@ -58,7 +60,7 @@ private:
     float ToolStrokeRemaining = 0.f;
     float ToolStrokeDegrees = 0.f;
     bool bGrantedExpeditionAbilities = false;
-    bool bClearingMud = false;
+    bool bMudAnchored = false;
     TWeakObjectPtr<AVoxelTerrain> Terrain;
     FVector ClimbDirection = FVector::ForwardVector;
     bool bWantsClimb = false;

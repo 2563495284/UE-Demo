@@ -1,11 +1,13 @@
 #include "Island/IslandRoomSession.h"
 
 #include "Island/IslandMessageText.h"
+#include "Island/IslandMenuStyle.h"
 #include "Island/IslandEOSGuest.h"
 #include "Island/IslandEOSLobby.h"
 #include "NetDriverEOS.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "Interfaces/IPv4/IPv4Address.h"
@@ -14,11 +16,51 @@
 #include "Misc/CommandLine.h"
 #include "Kismet/GameplayStatics.h"
 #include "MoviePlayer.h"
+#include "RHIGlobals.h"
 #include "OnlineSubsystemUtils.h"
 #include "Tests/IslandViewportRecording.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SScaleBox.h"
 #include "Widgets/Text/STextBlock.h"
+
+class SIslandTravelScreen : public SCompoundWidget
+{
+public:
+    SLATE_BEGIN_ARGS(SIslandTravelScreen) {}
+    SLATE_END_ARGS()
+
+    void Construct(const FArguments&, const FText& Caption)
+    {
+        static const FSlateColorBrush HarbourInk(FLinearColor(.027f, .048f, .060f));
+        SetVisibility(EVisibility::HitTestInvisible);
+        ChildSlot
+        [
+            SNew(SBorder).BorderImage(&HarbourInk).Padding(0)
+            [
+                // MoviePlayer's window and the viewport use different DPI scales. Fit
+                // the lettering to the same physical frame on both sides of LoadMap.
+                SNew(SScaleBox).Stretch(EStretch::ScaleToFit)
+                [
+                    SNew(SBox).WidthOverride(1280).HeightOverride(720).HAlign(HAlign_Center).VAlign(VAlign_Center)
+                    [SNew(STextBlock).Text(Caption).Font(FCoreStyle::GetDefaultFontStyle("Regular", 18))
+                        .ColorAndOpacity(IslandMenuStyle::Ink)]
+                ]
+            ]
+        ];
+    }
+
+    int32 OnPaint(const FPaintArgs& Args, const FGeometry& Geometry, const FSlateRect& Clip,
+        FSlateWindowElementList& Elements, int32 Layer, const FWidgetStyle& Style, bool bEnabled) const override
+    {
+        ++Paints;
+        return SCompoundWidget::OnPaint(Args, Geometry, Clip, Elements, Layer, Style, bEnabled);
+    }
+    uint32 GetPaints() const { return Paints; }
+
+private:
+    mutable uint32 Paints = 0;
+};
 
 namespace
 {
@@ -29,6 +71,7 @@ namespace
     constexpr int32 RoomProtocol = 9;
     const FName IslandMap(TEXT("/Game/TreasureIsland/L_ExpeditionIsland"));
     const FName FrontMap(TEXT("/Game/TreasureIsland/L_IslandFront"));
+
 
     const FName WhiteboxDisplayTag(TEXT("IslandWhiteboxDisplay"));
 
@@ -82,6 +125,7 @@ void UIslandRoomSession::Initialize(FSubsystemCollectionBase& Collection)
 
 void UIslandRoomSession::Deinitialize()
 {
+    ClearTravelScreen();
     if (bWhiteboxDisplay) SetWhiteboxDisplay(false);
     ++IntentGeneration;
     ClearAdvertisementRetry();
@@ -265,7 +309,28 @@ void UIslandRoomSession::Created(FName Name, bool bSuccess)
     bHosting = true;
     Operation = EOperation::Opening;
     Status = TEXT("正在前往码头…");
-    UGameplayStatics::OpenLevel(this, IslandMap, true, bLAN ? TEXT("listen?bIsLanMatch") : TEXT("listen"));
+    if (!ShowTravelScreen(FText::FromString(IslandMessageText::Display(Status)), 0.f))
+    {
+        OpenHostedIsland();
+        return;
+    }
+    const double Begin = FPlatformTime::Seconds();
+    TravelFade = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateWeakLambda(this, [this, Begin](float)
+    {
+        if (Operation != EOperation::Opening) return false;
+        const float T = FMath::Clamp(float((FPlatformTime::Seconds() - Begin) / .16), 0.f, 1.f);
+        TravelScreen->SetRenderOpacity(FMath::SmoothStep(0.f, 1.f, T));
+        if (T < 1.f) return true;
+        TravelFade.Reset();
+        OpenHostedIsland();
+        return false;
+    }));
+}
+
+void UIslandRoomSession::OpenHostedIsland()
+{
+    UGameplayStatics::OpenLevel(this, IslandMap, true,
+        RoomNetwork == EIslandRoomNetwork::LAN ? TEXT("listen?bIsLanMatch") : TEXT("listen"));
 }
 
 void UIslandRoomSession::UpdateAdvertisement(const FIslandRoomSettings& Settings, int32 Occupied, bool bLocked)
@@ -487,6 +552,7 @@ void UIslandRoomSession::Cancel()
 {
     const EOperation Previous = Operation;
     if (Previous == EOperation::Idle || Previous == EOperation::Leaving) return;
+    ClearTravelScreen();
     ++IntentGeneration;
     if (Previous == EOperation::Creating || Previous == EOperation::Joining)
     {
@@ -533,6 +599,7 @@ void UIslandRoomSession::LoadFront()
 
 void UIslandRoomSession::Fail(const FString& Message)
 {
+    ClearTravelScreen();
     UnbindSessionDelegates();
     DestroyLocalSession();
     Operation = EOperation::Idle;
@@ -540,6 +607,64 @@ void UIslandRoomSession::Fail(const FString& Message)
     Status.Reset();
     Error = Message;
     UE_LOG(LogTemp, Warning, TEXT("ISLAND_%s_ERROR %s"), RoomNetwork == EIslandRoomNetwork::Internet ? TEXT("EOS") : TEXT("LAN"), *Message);
+}
+
+bool UIslandRoomSession::ShowTravelScreen(const FText& Caption, float Opacity, bool bBehindMenu)
+{
+    ClearTravelScreen();
+    auto* Viewport = GetGameInstance()->GetGameViewportClient();
+    if (GUsingNullRHI || !FApp::CanEverRender() || !Viewport || !Viewport->GetGameViewportWidget()) return false;
+    TravelScreen = SNew(SIslandTravelScreen, Caption);
+    TravelScreen->ForceVolatile(true);
+    bTravelInputBlocked = !bBehindMenu;
+    if (bTravelInputBlocked) TravelScreen->SetVisibility(EVisibility::Visible);
+    TravelScreen->SetRenderOpacity(Opacity);
+    TravelViewport = Viewport;
+    Viewport->AddViewportWidgetContent(TravelScreen.ToSharedRef(), bBehindMenu ? 20 : 100);
+    return true;
+}
+
+void UIslandRoomSession::ClearTravelScreen()
+{
+    FTSTicker::RemoveTicker(TravelFade);
+    TravelFade.Reset();
+    if (TravelScreen && TravelViewport.IsValid())
+        TravelViewport->RemoveViewportWidgetContent(TravelScreen.ToSharedRef());
+    TravelScreen.Reset();
+    TravelViewport.Reset();
+    LoadedTravelWorld.Reset();
+    bTravelInputBlocked = false;
+}
+
+void UIslandRoomSession::RevealTravelScreen(bool bImmediate)
+{
+    if (!TravelScreen || !LoadedTravelWorld.IsValid() || LoadedTravelWorld.Get() != GetWorld()) return;
+    if (bImmediate)
+    {
+        ClearTravelScreen();
+        return;
+    }
+    if (TravelFade.IsValid()) return;
+    // The load may block for longer than the whole dissolve. Only advance after a
+    // live viewport paint, even when MoviePlayer is presenting on its own thread.
+    TravelFade = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateWeakLambda(this,
+        [this, LastPaint = TravelScreen->GetPaints(), Elapsed = 0.f](float Delta) mutable
+    {
+        if (LastPaint == TravelScreen->GetPaints()) return true;
+        LastPaint = TravelScreen->GetPaints();
+        Elapsed += FMath::Min(Delta, 1.f / 30.f);
+        const float T = FMath::Min(Elapsed / .30f, 1.f);
+        TravelScreen->SetRenderOpacity(1.f - FMath::SmoothStep(0.f, 1.f, T));
+        if (bTravelInputBlocked && T >= .5f)
+        {
+            bTravelInputBlocked = false;
+            TravelScreen->SetVisibility(EVisibility::HitTestInvisible);
+        }
+        if (T < 1.f) return true;
+        TravelFade.Reset();
+        ClearTravelScreen();
+        return false;
+    }));
 }
 
 void UIslandRoomSession::NetworkFailed(UWorld* World, UNetDriver*, ENetworkFailure::Type Kind, const FString& Message)
@@ -585,18 +710,41 @@ void UIslandRoomSession::OnPreload(const FWorldContext& Context, const FString& 
 {
     if (Context.OwningGameInstance != GetGameInstance()) return;
     UpdateDisplayForMap(Map, Context.WorldType == EWorldType::Game);
-    if ((!IsBusy() && !bInRoom) || !IsMoviePlayerEnabled()) return;
-    FLoadingScreenAttributes Loading;
-    Loading.bAutoCompleteWhenLoadingCompletes = true;
-    Loading.WidgetLoadingScreen = SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-        .BorderBackgroundColor(FLinearColor(.055f,.079f,.09f)).HAlign(HAlign_Center).VAlign(VAlign_Center)
-        [ SNew(STextBlock).Text(FText::FromString(IslandMessageText::Display(Status.IsEmpty() ? TEXT("正在返回码头…") : Status))) ];
-    GetMoviePlayer()->SetupLoadingScreen(Loading);
+    const bool bFront = Map.EndsWith(TEXT("L_IslandFront"));
+    const bool bDock = Map.EndsWith(TEXT("L_ExpeditionIsland")) && (IsBusy() || bInRoom);
+    if ((!bFront && !bDock) || FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
+    {
+        ClearTravelScreen();
+        return;
+    }
+    const FText Caption = bDock ? FText::FromString(IslandMessageText::Display(
+        Status.IsEmpty() ? TEXT("正在返回码头…") : Status)) : FText::GetEmpty();
+    if (!ShowTravelScreen(Caption, 1.f, bFront)) return;
+    if (IsMoviePlayerEnabled())
+    {
+        FLoadingScreenAttributes Loading;
+        Loading.bAutoCompleteWhenLoadingCompletes = true;
+        Loading.WidgetLoadingScreen = SNew(SIslandTravelScreen, Caption);
+        GetMoviePlayer()->SetupLoadingScreen(Loading);
+    }
 }
 
 void UIslandRoomSession::OnLoaded(UWorld* World)
 {
     if (!World || World->GetGameInstance() != GetGameInstance()) return;
+    if (TravelScreen)
+    {
+        // World teardown also releases viewport layers on some travel paths. Put
+        // the cover on the destination overlay before its first presented frame.
+        if (TravelViewport.IsValid()) TravelViewport->RemoveViewportWidgetContent(TravelScreen.ToSharedRef());
+        TravelViewport = World->GetGameViewport();
+        if (TravelViewport.IsValid())
+        {
+            TravelViewport->AddViewportWidgetContent(TravelScreen.ToSharedRef(), bTravelInputBlocked ? 100 : 20);
+            LoadedTravelWorld = World;
+        }
+        else ClearTravelScreen();
+    }
     UpdateDisplayForMap(World->GetMapName(), World->WorldType == EWorldType::Game);
     if (World->GetMapName().EndsWith(TEXT("L_IslandFront")))
     {

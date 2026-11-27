@@ -4,7 +4,6 @@
 namespace
 {
     using namespace VoxelPlayground;
-    constexpr int32 Band = 2 * Spacing;
     using VoxelSurfaceKernel::IntegerSqrt;
 
     // The outside border is air. The islands have one additional zero-distance
@@ -69,7 +68,8 @@ int32 VoxelPlayground::PartyBrushDistance(const FVoxelEdit& Edit, FIntVector Wor
 {
     const FIntVector Local = World - Edit.Center;
     const FIntVector N = Edit.SurfaceNormal;
-    if (Edit.BrushId == ShallowCut) return VoxelSurfaceKernel::ToolDistanceWithRadius(Local,N,Edit.PunchRadius());
+    if (Edit.BrushId == ShallowCut)
+        return VoxelSurfaceKernel::ToolDistanceWithRadius(Local, N, Edit.PunchRadius(), PartyPunch::DepthCm(Edit.PunchPower));
     int32 Distance = IsBurial(Edit.BrushId)
         ? BurialDistance(Local, Edit.BrushId - FirstBurialLayer + 1)
         : VoxelSurfaceKernel::ToolDistance(Local,N,Edit.BrushId == MudPad,Edit.FootprintScale());
@@ -78,18 +78,13 @@ int32 VoxelPlayground::PartyBrushDistance(const FVoxelEdit& Edit, FIntVector Wor
         const int32 ToBox = FMath::Max((Box.Low - World).GetMax(), (World - Box.High).GetMax());
         Distance = FMath::Max(Distance, -ToBox);
     }
+    for (const FVoxelMudClearance& Void : Edit.MudClearances)
+    {
+        FIntVector Delta = World - Void.Center;
+        Delta.Z = FMath::Max(0, FMath::Abs(Delta.Z) - Void.AxisHalfLength);
+        Distance = FMath::Max(Distance, Void.Radius - IntegerSqrt(LengthSquared(Delta)));
+    }
     return Distance;
-}
-
-bool VoxelPlayground::IsBurialSurface(const FVector& FootAnchor, int32 CompletedLayers, const FVector& Point)
-{
-    if (CompletedLayers < 1 || CompletedLayers > 3) return false;
-    const FVector Local = Point - FVector(QuantizeCenter(FootAnchor));
-    if (Local.GetAbsMax() > 150.) return false;
-    const FIntVector P(FMath::RoundToInt(Local.X), FMath::RoundToInt(Local.Y), FMath::RoundToInt(Local.Z));
-    int32 Distance = MAX_int32;
-    for (int32 Layer = 1; Layer <= CompletedLayers; ++Layer) Distance = FMath::Min(Distance, BurialDistance(P, Layer));
-    return FMath::Abs(Distance) <= 16;
 }
 
 uint8 VoxelPlayground::BrushFor(EVoxelAction Action)
@@ -202,6 +197,7 @@ bool FVoxelGrid::IsValidEdit(const FVoxelEdit& Edit) const
         || (Edit.bWideFootprint && Edit.BrushId != ShallowCut && Edit.BrushId != MudPad)
         || (bPartyBrush && !Edit.ExtraFillCenters.IsEmpty())
         || ((!bPartyBrush || Edit.Action != EVoxelAction::Fill) && !Edit.ProtectedBoxes.IsEmpty())
+        || (Edit.BrushId != MudPad && !Edit.MudClearances.IsEmpty()) || Edit.MudClearances.Num() > 32
         || Edit.ProtectedBoxes.Num() > 32
         || Edit.ExtraFillCenters.Num() >= FVoxelEdit::MaxFillCenters
         || (Edit.Action != EVoxelAction::Fill && !Edit.ExtraFillCenters.IsEmpty()))
@@ -214,6 +210,9 @@ bool FVoxelGrid::IsValidEdit(const FVoxelEdit& Edit) const
         const int32 NormalSquared = LengthSquared(Edit.SurfaceNormal);
         if (NormalSquared < 990000 || NormalSquared > 1010000) return false;
     }
+    for (const FVoxelMudClearance& Void : Edit.MudClearances)
+        if (Void.Radius < 1 || Void.Radius > 256 || Void.AxisHalfLength < 0 || Void.AxisHalfLength > 256
+            || FVector::DistSquared(FVector(Void.Center), FVector(Edit.Center)) > FMath::Square(1024.)) return false;
     const int32 Radius = Edit.BrushId==ShallowCut ? Edit.PunchRadius() : RadiusFor(Edit.BrushId) * Edit.FootprintScale();
     const FIntVector Max = Origin + Cells * Spacing;
     const auto InBounds = [&](const FIntVector& P)
@@ -276,7 +275,7 @@ FVoxelDensity::FVoxelDensity(EVoxelLayout InLayout) : Grid(FVoxelGrid::ForLayout
                     Density = FMath::Min(Density, BoxDistance(Point, {1030, 170, 140}, {100, 105, 160}));
                     Density = FMath::Min(Density, BoxDistance(Point, {1030, 495, 140}, {100, 75, 160}));
                 }
-                Samples[Grid.SampleIndex(GridPoint)] = FMath::Clamp(Density, -Band, Band);
+                Samples[Grid.SampleIndex(GridPoint)] = FMath::Clamp(Density, -VoxelSurfaceKernel::Band, VoxelSurfaceKernel::Band);
             }
             Foundation.Add(Samples[Grid.SampleIndex({X,Y,FoundationLayer(Layout)})] < 0);
         }
@@ -287,7 +286,7 @@ int16 FVoxelDensity::BaseSample(const FIntVector& Point) const
 {
     const FIntPoint& Column = BaseColumns[Point.X + Point.Y * (Grid.Cells.X + 1)];
     const int32 Z = Grid.Origin.Z + Point.Z * Spacing;
-    return FMath::Clamp(FMath::Max3(Column.X, Z - Column.Y, -775 - Z), -Band, Band);
+    return FMath::Clamp(FMath::Max3(Column.X, Z - Column.Y, -775 - Z), -VoxelSurfaceKernel::Band, VoxelSurfaceKernel::Band);
 }
 
 namespace
@@ -312,7 +311,7 @@ TArray<int16>& FVoxelDensity::GetOrCreateBlock(const FIntVector& Point)
     if (Block.IsEmpty())
     {
         const FIntVector Start = Point / BlockSide * BlockSide;
-        Block.Init(Band, BlockSide * BlockSide * BlockSide);
+        Block.Init(VoxelSurfaceKernel::Band, BlockSide * BlockSide * BlockSide);
         for (int32 Z = 0; Z < BlockSide && Start.Z + Z <= Grid.Cells.Z; ++Z)
             for (int32 Y = 0; Y < BlockSide && Start.Y + Y <= Grid.Cells.Y; ++Y)
                 for (int32 X = 0; X < BlockSide && Start.X + X <= Grid.Cells.X; ++X)
@@ -327,11 +326,11 @@ void FVoxelDensity::CopySampleRow(FIntVector Start, int32 Count, int16* Destinat
     const int32 MaxX = FMath::Clamp(Grid.Cells.X - Start.X + 1, 0, Count);
     if (MinX == MaxX || Start.Y < 0 || Start.Z < 0 || Start.Y > Grid.Cells.Y || Start.Z > Grid.Cells.Z)
     {
-        for (int32 I = 0; I < Count; ++I) Destination[I] = Band;
+        for (int32 I = 0; I < Count; ++I) Destination[I] = VoxelSurfaceKernel::Band;
         return;
     }
-    for (int32 I = 0; I < MinX; ++I) Destination[I] = Band;
-    for (int32 I = MaxX; I < Count; ++I) Destination[I] = Band;
+    for (int32 I = 0; I < MinX; ++I) Destination[I] = VoxelSurfaceKernel::Band;
+    for (int32 I = MaxX; I < Count; ++I) Destination[I] = VoxelSurfaceKernel::Band;
     Start.X += MinX;
     if (Layout != EVoxelLayout::Expedition)
     {
@@ -358,7 +357,7 @@ int16 FVoxelDensity::Sample(const FIntVector& GridPoint, const FVoxelDensityPatc
 {
     if (!Grid.Contains(GridPoint))
     {
-        return Band;
+        return VoxelSurfaceKernel::Band;
     }
     const int32 Index = Grid.SampleIndex(GridPoint);
     if (const int16* Patched = Patch ? Patch->Samples.Find(Index) : nullptr)
@@ -408,14 +407,14 @@ FVoxelDensityPatch FVoxelDensity::PrepareStamp(const FVoxelBrushStamp& Stamp, co
 {
     using namespace VoxelPlayground;
     const int32 Radius = Stamp.Radius;
-    const int32 Reach = Radius + Band;
+    const int32 Reach = Radius + VoxelSurfaceKernel::Band;
     const FIntVector Relative = Stamp.Center - Grid.Origin;
     const FIntVector Extent(Reach);
     FIntVector Low = ((Relative - Extent) / Spacing).ComponentMax(FIntVector(1));
     FIntVector High = ((Relative + Extent) / Spacing).ComponentMin(Grid.Cells - FIntVector(1));
     if (PartyEdit)
     {
-        const FBox Bounds = PartyBrushBounds(*PartyEdit).ExpandBy(Band + Spacing);
+        const FBox Bounds = PartyBrushBounds(*PartyEdit).ExpandBy(VoxelSurfaceKernel::Band + Spacing);
         Low = (FIntVector(Bounds.Min - FVector(Grid.Origin)) / Spacing).ComponentMax(FIntVector(1));
         High = (FIntVector(Bounds.Max - FVector(Grid.Origin)) / Spacing).ComponentMin(Grid.Cells - FIntVector(1));
     }

@@ -13,7 +13,8 @@ enum class EIslandPhase : uint8
     PartyLoading,
     PartyPlaying,
     PartyReturning,
-    Starting
+    Starting,
+    PartyBriefing
 };
 
 UENUM()
@@ -92,6 +93,7 @@ namespace IslandRules
     inline constexpr double RespawnTime = 1.0;
     inline constexpr float SpringTideJumpScale = 1.5f;
     inline const FVector ChestExtent(45, 34, 32);
+    inline const FVector ClosedLidCenter(0., 0., 25.);
 
     ACTDEMO_API TArray<FIslandSearchCircle> DefaultSearchCircles();
     inline constexpr int32 DecoyEventBit(EIslandDecoyEvent Event) { return 1 << int32(Event); }

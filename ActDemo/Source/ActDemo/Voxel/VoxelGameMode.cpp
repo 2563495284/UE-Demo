@@ -266,21 +266,6 @@ void AVoxelGameMode::QueueMudLanding(const FVector& Impact, const FVector& Norma
     EnqueueMud(MoveTemp(Edit), MoveTemp(Completion));
 }
 
-void AVoxelGameMode::QueueBurialLayer(AVoxelCharacter& Victim, const FVector& FootAnchor, int32 Layer, TFunction<void(bool)> Completion)
-{
-    if (!HasAuthority() || Victim.GetWorld() != GetWorld() || !Players.Contains(Cast<AVoxelPlayerController>(Victim.GetController()))
-        || FootAnchor.ContainsNaN() || Layer < 1 || Layer > 3)
-    {
-        if (Completion) Completion(false);
-        return;
-    }
-    FVoxelEdit Edit;
-    Edit.Action = EVoxelAction::Fill;
-    Edit.BrushId = VoxelPlayground::FirstBurialLayer + Layer - 1;
-    Edit.Center = VoxelPlayground::QuantizeCenter(FootAnchor);
-    EnqueueMud(MoveTemp(Edit), MoveTemp(Completion));
-}
-
 void AVoxelGameMode::EnqueueMud(FVoxelEdit Edit, TFunction<void(bool)> Completion)
 {
     if (!HasAuthority() || !bPlaying || !Terrain || Terrain->Layout != EVoxelLayout::Expedition || !Terrain->IsValidEdit(Edit))
@@ -309,7 +294,8 @@ bool AVoxelGameMode::CheckMudPlacement(const FVoxelEdit& Edit, TMap<AVoxelCharac
     return CheckMudOccupants(Edit, Lifts);
 }
 
-bool AVoxelGameMode::CheckMudOccupants(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts) const
+bool AVoxelGameMode::CheckMudOccupants(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts,
+    TArray<FVoxelMudClearance>* AppendClearances) const
 {
     const FVector Center(Edit.Center);
     const bool bPad = Edit.BrushId == VoxelPlayground::MudPad;
@@ -338,22 +324,35 @@ bool AVoxelGameMode::CheckMudOccupants(const FVoxelEdit& Edit, TMap<AVoxelCharac
         if (!bOverlap) continue;
         // Only a pad directly beneath a standing capsule can raise it. Wall impacts cannot shove a bystander.
         const double FootZ = Position.Z - HalfHeight;
-        if (!bPad || Edit.SurfaceNormal.Z < 650 || FVector::DistSquared2D(Position, Center) > FMath::Square(57. * Edit.FootprintScale())
-            || FootZ < Center.Z - 10. || FootZ > Center.Z + 40.) return false;
-        const FVector Destination(Position.X, Position.Y, Center.Z + 42. + HalfHeight);
-        FCollisionQueryParams Query(SCENE_QUERY_STAT(MudLift), false, Hero);
-        FHitResult Hit;
-        const FCollisionShape Shape = FCollisionShape::MakeCapsule(Radius, HalfHeight);
-        if (GetWorld()->SweepSingleByChannel(Hit, Position, Destination, FQuat::Identity, ECC_Pawn, Shape, Query)
-            && (Hit.bStartPenetrating || Hit.ImpactNormal.Z < .7)) return false;
-        if (GetWorld()->OverlapBlockingTestByChannel(Destination, FQuat::Identity, ECC_Pawn, Shape, Query)) return false;
-        if (Lifts) Lifts->Add(Hero, Destination);
+        if (bPad && !Hero->IsMudAnchored() && Edit.SurfaceNormal.Z >= 650
+            && FVector::DistSquared2D(Position, Center) <= FMath::Square(57. * Edit.FootprintScale())
+            && FootZ >= Center.Z - 10. && FootZ <= Center.Z + 40.)
+        {
+            const FVector Destination(Position.X, Position.Y, Center.Z + 42. + HalfHeight);
+            FCollisionQueryParams Query(SCENE_QUERY_STAT(MudLift), false, Hero);
+            FHitResult Hit;
+            const FCollisionShape Shape = FCollisionShape::MakeCapsule(Radius, HalfHeight);
+            const bool bBlocked = GetWorld()->SweepSingleByChannel(Hit, Position, Destination, FQuat::Identity, ECC_Pawn, Shape, Query)
+                && (Hit.bStartPenetrating || Hit.ImpactNormal.Z < .7);
+            if (!bBlocked && !GetWorld()->OverlapBlockingTestByChannel(Destination, FQuat::Identity, ECC_Pawn, Shape, Query))
+            {
+                if (Lifts) Lifts->Add(Hero, Destination);
+                continue;
+            }
+        }
+        if (!AppendClearances || !bPad || AppendClearances->Num() >= 32) return false;
+        FVoxelMudClearance& Clearance = AppendClearances->AddDefaulted_GetRef();
+        Clearance.Center = FIntVector(FMath::RoundToInt(Position.X), FMath::RoundToInt(Position.Y), FMath::RoundToInt(Position.Z));
+        Clearance.AxisHalfLength = FMath::CeilToInt(Segment);
+        // Leave room for quantization and interpolation of the 25 cm terrain field.
+        Clearance.Radius = FMath::CeilToInt(Radius) + 9;
     }
     return true;
 }
 
 void AVoxelGameMode::ClipProtectedMud(FVoxelEdit& Edit) const
 {
+    Edit.ProtectedBoxes.Reset();
     const FBox Bounds = VoxelPlayground::PartyBrushBounds(Edit).ExpandBy(VoxelPlayground::Spacing);
     TArray<FBox> Protected;
     GetProtectedMudVolumes(Protected);
@@ -364,6 +363,8 @@ void AVoxelGameMode::ClipProtectedMud(FVoxelEdit& Edit) const
         Clip.Low = FIntVector(Box.Min) - FIntVector(2);
         Clip.High = FIntVector(Box.Max) + FIntVector(2);
     }
+    if (Edit.BrushId == VoxelPlayground::MudPad)
+        CheckMudOccupants(Edit, nullptr, &Edit.MudClearances);
 }
 
 void AVoxelGameMode::LiftMudOccupants(const TMap<AVoxelCharacter*, FVector>& Lifts)
@@ -477,6 +478,22 @@ void AVoxelGameMode::StartFrontRequest()
         Mode->WorkingPlayer.Reset();
         if (!bCommitted)
         {
+            // A moving player can enter the pad while the terrain meshes are cooking.
+            // Keep the already cropped volume, add their clearance and retry with the
+            // same completion. Losing the underlying support still cancels the throw.
+            if (Mode->bPlaying && Request.EnvironmentFill && Edit.BrushId == VoxelPlayground::MudPad
+                && !Mode->CheckMudOccupants(Edit, nullptr))
+            {
+                FRequest Retry = Request;
+                Retry.EnvironmentFill = Edit;
+                auto& Clipped = Retry.EnvironmentFill.GetValue();
+                if (Mode->CheckMudOccupants(Clipped, nullptr, &Clipped.MudClearances))
+                {
+                    Mode->Requests.Add(MoveTemp(Retry));
+                    Mode->StartNextEdit();
+                    return;
+                }
+            }
             if (Request.Completion) Request.Completion(false);
             if (AVoxelPlayerController* Sender = Request.Player.Get(); Sender && Mode->bPlaying)
             {

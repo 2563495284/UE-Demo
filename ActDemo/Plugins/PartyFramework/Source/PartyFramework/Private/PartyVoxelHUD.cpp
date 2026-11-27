@@ -110,7 +110,7 @@ void APartyVoxelPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, boo
             const double RecoveryLeft = NextLocalPlace - GetWorld()->GetTimeSeconds();
             if (RecoveryLeft > 0.)
             {
-                const float Ready = FMath::Clamp(1.-RecoveryLeft/APartyVoxelSession::ChaseToolRecovery(bPlacingStroke),0.,1.);
+                const float Ready = FMath::Clamp(1.-RecoveryLeft/APartyVoxelSession::ChaseToolRecovery(true),0.,1.);
                 HUD.DrawRect(Back,W*.5f-12*S,H*.5f+8*S,24*S,3*S);
                 HUD.DrawRect(Ink,W*.5f-12*S,H*.5f+8*S,24*S*Ready,3*S);
             }

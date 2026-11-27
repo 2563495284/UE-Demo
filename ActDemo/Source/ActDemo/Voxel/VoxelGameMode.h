@@ -20,9 +20,8 @@ public:
 
     void ReceiveReady(AVoxelPlayerController& Player, uint32 Checksum);
     void RequestEdit(AVoxelPlayerController& Player, EVoxelAction Action, const FVector& Aim, uint8 Power=0, bool bProtectChest=false);
-    // Server-only. The impact uses the first blocking surface; burial uses a fixed foot anchor.
+    // Server-only, replayed as a single authoritative terrain edit.
     void QueueMudLanding(const FVector& Impact, const FVector& Normal, bool bWideFootprint, TFunction<void(bool)> Completion = {});
-    void QueueBurialLayer(AVoxelCharacter& Victim, const FVector& FootAnchor, int32 Layer, TFunction<void(bool)> Completion = {});
     virtual void RecoverPlayer(AVoxelPlayerController& Player);
     AVoxelTerrain* GetTerrain() const { return Terrain; }
     bool IsPlaying() const { return bPlaying; }
@@ -57,7 +56,8 @@ protected:
     void EnqueueEnvironmentFill(const TArray<FVector>& Centers, TFunction<void(bool)> Completion);
     bool CanStartEnvironmentFill(const TArray<FVector>& Centers) const;
     void ClipProtectedMud(FVoxelEdit& Edit) const;
-    bool CheckMudOccupants(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts) const;
+    bool CheckMudOccupants(const FVoxelEdit& Edit, TMap<AVoxelCharacter*, FVector>* Lifts,
+        TArray<FVoxelMudClearance>* AppendClearances = nullptr) const;
     static void LiftMudOccupants(const TMap<AVoxelCharacter*, FVector>& Lifts);
 
 private:

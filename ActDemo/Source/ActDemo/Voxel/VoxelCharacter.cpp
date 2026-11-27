@@ -3,13 +3,18 @@
 #include "Voxel/VoxelPlayerController.h"
 #include "Abilities/ExpeditionAbility.h"
 #include "AbilitySystemComponent.h"
+#include "PartyCharacterControl.h"
 #include "PartyPunch.h"
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/GameStateBase.h"
+#include "GameFramework/PlayerState.h"
 #include "Island/ExpeditionAnimalComponent.h"
+#include "Island/ExpeditionBodyMud.h"
+#include "Island/IslandGameMode.h"
 
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
+#include "PartyCharacterCamera.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -18,7 +23,6 @@
 
 namespace
 {
-    constexpr double AimHeight = 49.0;
     constexpr float ToolStrokeDuration = .32f;
 }
 
@@ -29,8 +33,9 @@ AVoxelCharacter::AVoxelCharacter(const FObjectInitializer& Initializer)
     AbilitySystem = CreateDefaultSubobject<UAbilitySystemComponent>(TEXT("AbilitySystem"));
     AbilitySystem->SetIsReplicated(true);
     AbilitySystem->SetReplicationMode(EGameplayEffectReplicationMode::Mixed);
+    BodyMud = CreateDefaultSubobject<UExpeditionBodyMudComponent>(TEXT("BodyMud"));
     ExpeditionAnimal = CreateDefaultSubobject<UExpeditionAnimalComponent>(TEXT("ExpeditionAnimal"));
-    GetCapsuleComponent()->InitCapsuleSize(40.f, 90.f);
+    PartyCharacterControl::ConfigureMovement(*this);
     GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
     GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
     GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
@@ -46,40 +51,21 @@ AVoxelCharacter::AVoxelCharacter(const FObjectInitializer& Initializer)
     GetMesh()->SetSkeletalMesh(Manny.Object);
     GetMesh()->SetAnimInstanceClass(Anim.Class);
 
-    bUseControllerRotationYaw = false;
     UCharacterMovementComponent* Movement = GetCharacterMovement();
-    Movement->bOrientRotationToMovement = true;
-    Movement->RotationRate = FRotator(0, 620, 0);
-    Movement->MaxWalkSpeed = 370.f;
     Movement->MaxFlySpeed = 210.f;
     Movement->BrakingDecelerationFlying = 2200.f;
-    Movement->BrakingDecelerationWalking = 1800.f;
-    Movement->JumpZVelocity = 445.f;
-    Movement->AirControl = .54f;
-    Movement->MaxStepHeight = 45.f;
     Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
     Movement->SetCrouchedHalfHeight(40.f);
     Movement->MaxWalkSpeedCrouched = 210.f;
 
     Boom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
     Boom->SetupAttachment(RootComponent);
-    Boom->TargetArmLength = 370.f;
-    Boom->TargetOffset.Z = AimHeight;
-    Boom->SocketOffset = FVector(0, 66, 18);
-    Boom->ProbeSize = 12.f;
-    Boom->bUsePawnControlRotation = true;
     UCameraComponent* Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
     Camera->SetupAttachment(Boom, USpringArmComponent::SocketName);
-    Camera->FieldOfView = 82.f;
 
     EyeCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("EyeCamera"));
     EyeCamera->SetupAttachment(GetCapsuleComponent());
-    EyeCamera->SetAutoActivate(false);
-    EyeCamera->SetRelativeLocation(FVector(0., 0., AimHeight));
-    EyeCamera->bUsePawnControlRotation = true;
-    EyeCamera->FieldOfView = Camera->FieldOfView;
-    EyeCamera->bEnableFirstPersonScale = true;
-    EyeCamera->FirstPersonScale = .5f;
+    PartyCharacterCamera::Configure(*Boom, *Camera, *EyeCamera);
 }
 
 UAbilitySystemComponent* AVoxelCharacter::GetAbilitySystemComponent() const { return AbilitySystem; }
@@ -88,7 +74,6 @@ void AVoxelCharacter::BeginPlay()
 {
     Super::BeginPlay();
     AbilitySystem->InitAbilityActorInfo(this, this);
-    AbilitySystem->RegisterGameplayTagEvent(ExpeditionAbilities::Stunned()).AddUObject(this, &ThisClass::MudStunChanged);
     EnsureExpeditionAbilities();
 }
 
@@ -114,46 +99,43 @@ void AVoxelCharacter::EnsureExpeditionAbilities()
     bGrantedExpeditionAbilities = true;
 }
 
-bool AVoxelCharacter::IsMudStunned() const { return AbilitySystem && AbilitySystem->HasMatchingGameplayTag(ExpeditionAbilities::Stunned()); }
-bool AVoxelCharacter::IsMudImmune() const { return AbilitySystem && AbilitySystem->HasMatchingGameplayTag(ExpeditionAbilities::Immune()); }
-
-bool AVoxelCharacter::ApplyMudStun()
+void AVoxelCharacter::SetMudAnchored(bool bAnchored)
 {
-    if (!HasAuthority() || IsMudStunned() || IsMudImmune()) return false;
-    return ExpeditionAbilities::ApplyTimedTag(*AbilitySystem, ExpeditionAbilities::Stunned(), 1.8f);
-}
-
-void AVoxelCharacter::MudStunChanged(FGameplayTag Tag, int32 Count)
-{
-    if (Count > 0)
+    if (bMudAnchored == bAnchored) return;
+    auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>();
+    if (Mode && bAnchored)
+    {
+        // Settle work earned before this contact. Finishing a chest can change venue and clear the mud.
+        Mode->RefreshMudChestLocks();
+        if (!BodyMud->IsAnchored()) return;
+    }
+    bMudAnchored = bAnchored;
+    if (bAnchored)
     {
         if (HasAuthority()) AbilitySystem->CancelAllAbilities();
-        GetCharacterMovement()->StopMovementImmediately();
+        if (auto* PC = Cast<AVoxelPlayerController>(Controller)) PC->CancelMudInputs();
         if (HasAuthority() || IsLocallyControlled())
         {
-            Crouch();
-            GetCharacterMovement()->Crouch(false);
+            GetCharacterMovement()->StopMovementImmediately();
+            GetCharacterMovement()->DisableMovement();
         }
-        if (auto* PC = Cast<AVoxelPlayerController>(Controller)) PC->OnMudStunChanged(true);
+        if (Mode) Mode->RefreshMudChestLocks();
     }
-    else
+    else if ((HasAuthority() || IsLocallyControlled()) && GetCharacterMovement()->MovementMode == MOVE_None)
     {
-        if (HasAuthority() && !bClearingMud)
-            ExpeditionAbilities::ApplyTimedTag(*AbilitySystem, ExpeditionAbilities::Immune(), 4.f);
-        if (HasAuthority() || IsLocallyControlled()) UnCrouch();
-        if (auto* PC = Cast<AVoxelPlayerController>(Controller); PC && !bClearingMud) PC->OnMudStunChanged(false);
+        GetCharacterMovement()->SetMovementMode(MOVE_Falling);
     }
-    ForceNetUpdate();
+    if (HasAuthority()) ForceNetUpdate();
 }
 
 bool AVoxelCharacter::CanJumpInternal_Implementation() const
 {
-    return !IsMudStunned() && Super::CanJumpInternal_Implementation();
+    return !IsMudAnchored() && Super::CanJumpInternal_Implementation();
 }
 
 FVector AVoxelCharacter::GetAimOrigin() const
 {
-    return GetActorLocation() + FVector(0, 0, IsMudCompact() ? 10.0 : AimHeight);
+    return GetActorLocation() + FVector(0, 0, PartyCharacterCamera::EyeHeight(IsMudCompact()));
 }
 
 bool AVoxelCharacter::IsInFirstPersonView() const
@@ -195,10 +177,8 @@ void AVoxelCharacter::OnJumped_Implementation()
 
 void AVoxelCharacter::MoveOnGrid(const FVector2D& Input, double ViewYaw)
 {
-    if (IsMudStunned()) return;
-    const FRotationMatrix Basis(FRotator(0, ViewYaw, 0));
-    AddMovementInput(IsClimbingRock() ? FVector::UpVector : Basis.GetUnitAxis(EAxis::X), Input.Y);
-    AddMovementInput(Basis.GetUnitAxis(EAxis::Y), Input.X);
+    if (IsMudAnchored()) return;
+    PartyCharacterControl::Move(*this, Input, ViewYaw, IsClimbingRock());
 }
 
 void AVoxelCharacter::SetWantsClimb(bool bEnabled)
@@ -228,14 +208,8 @@ void AVoxelCharacter::Tick(float DeltaSeconds)
     }
     if (IsLocallyControlled())
     {
-        const bool bLow = IsMudCompact();
-        Boom->TargetArmLength = bLow ? 4.f : 370.f;
-        Boom->TargetOffset.Z = bLow ? 10.f : AimHeight;
         const auto* PC = Cast<AVoxelPlayerController>(Controller);
-        const float Shoulder = PC && PC->UsesExpeditionAbilities()
-            ? FMath::GetMappedRangeValueClamped(FVector2D(-74., -55.), FVector2D(0., 66.), FRotator::NormalizeAxis(GetControlRotation().Pitch))
-            : 66.f;
-        Boom->SocketOffset = bLow ? FVector::ZeroVector : FVector(0, Shoulder, 18);
+        PartyCharacterCamera::UpdateBoom(*Boom, GetControlRotation().Pitch, PC && PC->UsesExpeditionAbilities(), IsMudCompact());
     }
     if (!HasAuthority())
     {
@@ -308,12 +282,22 @@ void AVoxelCharacter::MulticastExpeditionDig_Implementation(uint8 Power)
     if (GetNetMode()!=NM_DedicatedServer) ExpeditionAnimal->PlayPunch(PartyPunch::Alpha(Power));
 }
 
+void AVoxelCharacter::MulticastExpeditionThrow_Implementation()
+{
+    if (GetNetMode() == NM_DedicatedServer) return;
+    ExpeditionAnimal->PlayThrow();
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionMudQA")))
+        UE_LOG(LogTemp, Display, TEXT("MUD_QA_THROW_POSE player=%d local=%d"), GetPlayerState() ? GetPlayerState()->GetPlayerId() : INDEX_NONE, IsLocallyControlled());
+#endif
+}
+
 void AVoxelCharacter::ReturnToStart(const FTransform& Start)
 {
     SetPunchChargePresentation(false);
     if (HasAuthority() && bGrantedExpeditionAbilities)
     {
-        TGuardValue<bool> Clearing(bClearingMud, true);
+        BodyMud->Clear();
         AbilitySystem->CancelAllAbilities();
         ExpeditionAbilities::ClearTimedTags(*AbilitySystem);
         UnCrouch();

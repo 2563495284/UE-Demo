@@ -4,6 +4,7 @@
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
+#include "Island/IslandWorld.h"
 #include "Tests/IslandProbe.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
@@ -66,7 +67,8 @@ void AExpeditionWalk::TickTreasure(float DeltaSeconds)
     auto* State=GetWorld()->GetGameState<AIslandGameState>();
     auto* Mode=GetWorld()->GetAuthGameMode<AIslandGameMode>();
     if (!Player || !Mode || !State || !Player->IsLocalController()) return;
-    if (State->Phase == EIslandPhase::PartyLoading || State->Phase == EIslandPhase::PartyPlaying || State->Phase == EIslandPhase::PartyReturning)
+    if (State->Phase == EIslandPhase::PartyLoading || State->Phase == EIslandPhase::PartyBriefing ||
+        State->Phase == EIslandPhase::PartyPlaying || State->Phase == EIslandPhase::PartyReturning)
     {
         bAwaitingChestReveal = true;
         return;
@@ -115,8 +117,8 @@ void AExpeditionWalk::TickTreasure(float DeltaSeconds)
         return;
     }
 
-    bool bExposed=false;
-    if (!AIslandProbe::TryGetWalkTarget(Mode,TreasureIndex,ChestTarget,bExposed)) return;
+    const AIslandChest* Exposed = nullptr;
+    if (!AIslandProbe::TryGetWalkTarget(Mode,TreasureIndex,ChestTarget,Exposed)) return;
     if (HuntStep==EHuntStep::ReadChart)
     {
         if (Now-StageStarted<.65) return;
@@ -148,7 +150,7 @@ void AExpeditionWalk::TickTreasure(float DeltaSeconds)
     }
     if (HuntStep==EHuntStep::Excavate)
     {
-        if (bExposed) { SetHuntStep(EHuntStep::Open); return; }
+        if (Exposed) { SetHuntStep(EHuntStep::Open); return; }
         if (Now-StageStarted<.4 || Terrain.IsBusy()) return;
         const FVector2D Offset=FVector2D(Position)-FVector2D(ChestTarget);
         if (Offset.Size()>85. && Hero.GetCharacterMovement()->IsMovingOnGround())
@@ -192,8 +194,10 @@ void AExpeditionWalk::TickTreasure(float DeltaSeconds)
             Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Pressed,1.f));
             Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Released,0.f));
         }
-        Turn(*Player,Hero.GetViewRotationForTarget(ChestTarget,Hero.GetActorLocation()),DeltaSeconds);
-        if (Now-LastInput>.65 && Player->GetAimedChest())
+        FVector VisiblePoint;
+        if (!Exposed || !Exposed->IsReachableFrom(Hero,&VisiblePoint)) return;
+        Turn(*Player,Hero.GetViewRotationForTarget(VisiblePoint,Hero.GetActorLocation()),DeltaSeconds);
+        if (Now-LastInput>.65 && Player->GetAimedChest()==Exposed)
         {
             Player->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::LeftMouseButton,IE_Pressed,1.f));
             FTimerHandle Release;

@@ -1,4 +1,5 @@
 #include "Voxel/IslandRouteVoxel.h"
+#include "Island/ExpeditionBodyMud.h"
 #include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandFallingScenery.h"
 #include "Island/IslandAttachedMud.h"
@@ -146,6 +147,7 @@ FColor UIslandRouteVoxelComponent::SurfaceColor(FVector Local) const
 
 void UIslandRouteVoxelComponent::UpdateSurface()
 {
+    UExpeditionBodyMudComponent::NotifySceneChanged(GetWorld());
     if (SolidCount == 0)
     {
         ClearAllMeshSections();
@@ -186,13 +188,17 @@ void UIslandRouteVoxelComponent::BuildSurface(FIntVector Low, FIntVector High,
     Combined.bEnableCollision = !Combined.ProcIndexBuffer.IsEmpty();
 }
 
-bool UIslandRouteVoxelComponent::ApplyWorldCut(FVector Point, FVector OutwardNormal, double Radius)
+bool UIslandRouteVoxelComponent::ApplyWorldCut(FVector Point, FVector OutwardNormal, double Radius, float DepthScale)
 {
     if (!SolidCount || Radius <= 0.) return false;
     const FTransform& Transform = GetComponentTransform();
     const FVector N = OutwardNormal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
-    const FVector Center = Point - N * 12.;
-    const double Depth = .69 * FMath::Min(Radius,62.);
+    // Keep the brush's outer face in place as the fist reaches farther into the surface.
+    const double LightHalfDepth = .69 * FMath::Min(Radius,62.);
+    constexpr double LightInset = 12.;
+    const double ExtraDepth = (LightHalfDepth + LightInset) * (DepthScale - 1.f);
+    const FVector Center = Point - N * (LightInset + .5 * ExtraDepth);
+    const double Depth = LightHalfDepth + .5 * ExtraDepth;
     const FBox Bounds = FBox::BuildAABB(Center, FVector(Radius + Depth + Step * 2.)).TransformBy(Transform.Inverse());
     const FIntVector Low = Rounded((Bounds.Min - GridStart)/Step).ComponentMax(FIntVector(0));
     const FIntVector High = Rounded((Bounds.Max - GridStart)/Step).ComponentMin(Size - FIntVector(1));
@@ -403,9 +409,9 @@ void AIslandRouteVoxel::Publish()
     ForceNetUpdate();
 }
 
-bool AIslandRouteVoxel::Strike(const FHitResult& Hit, float RadiusScale)
+bool AIslandRouteVoxel::Strike(const FHitResult& Hit, float RadiusScale, float DepthScale)
 {
-    if (!HasAuthority() || Hit.GetComponent() != Voxels || !Voxels->ApplyWorldCut(Hit.ImpactPoint, Hit.ImpactNormal, 62.*RadiusScale)) return false;
+    if (!HasAuthority() || Hit.GetComponent() != Voxels || !Voxels->ApplyWorldCut(Hit.ImpactPoint, Hit.ImpactNormal, 62.*RadiusScale, DepthScale)) return false;
     const auto* Terrain = AVoxelTerrain::Find(GetWorld());
     if (!Terrain || !RefreshGrounding(*Terrain))
     {

@@ -3,11 +3,18 @@
 #include "Abilities/ExpeditionAbility.h"
 #include "AbilitySystemComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Engine/OverlapResult.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "InputKeyEventArgs.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
+#include "Island/ExpeditionBodyMud.h"
+#include "Island/ExpeditionMudBall.h"
+#include "Island/IslandAttachedMud.h"
+#include "Island/IslandNeutralProp.h"
+#include "Voxel/IslandRouteVoxel.h"
+#include "TimerManager.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
@@ -91,21 +98,154 @@ void AIslandProbe::SetMudStep(int32 Next,double Now)
     UE_LOG(LogTemp,Display,TEXT("MUD_QA_STEP stage=%d"),Next);
 }
 
+
+AIslandMudProbeSurface::AIslandMudProbeSurface()
+{
+    bReplicates = true;
+    bAlwaysRelevant = true;
+    Field = CreateDefaultSubobject<UIslandRouteVoxelComponent>(TEXT("WallAndDeck"));
+    SetRootComponent(Field);
+}
+
+void AIslandMudProbeSurface::BeginPlay()
+{
+    Super::BeginPlay();
+    // The elevated ledge lets a standing thrower hit an ankle nearly horizontally.
+    Field->InitializeField(FBox(FVector(-340,-580,-120),FVector(470,365,320)),10.,[](FVector P)
+    {
+        const auto Box = [P](FVector Center, FVector Extent)
+        {
+            return ((P - Center).GetAbs() - Extent).GetMax();
+        };
+        const double Wall = Box({-15,0,140},{15,195,160});
+        // Expose the sides of both boots. A wide tabletop would intercept every low side shot.
+        const double Deck = Box({0,-400,100},{26,95,30});
+        const double Landing = Box({65,-105,-52},{385,455,52});
+        return FRouteVoxelSample{FMath::Min3(Wall,Deck,Landing), FColor(142,126,104)};
+    });
+}
+
+namespace
+{
+    uint32 MudDigest(const AVoxelCharacter& Hero)
+    {
+        const auto* Mud=Hero.FindComponentByClass<UExpeditionBodyMudComponent>();
+        uint32 Hash=0;
+        for (int32 I=0; I<Mud->Num(); ++I)
+        {
+            FVector Center;
+            float R=0.f;
+            if (!Mud->GetClodWorld(I,Center,R)) continue;
+            const FVector Local=Hero.GetActorTransform().InverseTransformPosition(Center);
+            const FIntVector Q(FMath::RoundToInt(Local.X*10.), FMath::RoundToInt(Local.Y*10.), FMath::RoundToInt(Local.Z*10.));
+            Hash=HashCombineFast(Hash,GetTypeHash(Q));
+        }
+        return Hash;
+    }
+
+    TOptional<FVector> AnkleShot(const AVoxelCharacter& Shooter, const AVoxelCharacter& Victim)
+    {
+        const FVector Origin=Shooter.GetAimOrigin();
+        const FVector Foot=Feet(Victim);
+        const FVector Near=(Origin-Foot).GetSafeNormal2D();
+        const FVector Side=FVector::CrossProduct(FVector::UpVector,Near);
+        // Select an aimed point on the exposed lower hemisphere. Sample the actual flight,
+        // including scenery in front of both the projectile and its intended target.
+        for (double Height : {8.,10.,12.,14.,16.,18.,20.,5.,1.,-4.,-9.})
+        for (double Offset : {26.,34.,18.,10.,0.,-15.})
+        for (double Lateral : {0.,12.,-12.,22.,-22.})
+        {
+            const FVector Aim=AExpeditionMudBall::AimAtPoint(Origin,Foot+Near*Offset+Side*Lateral+FVector::UpVector*Height);
+            const FVector V=AExpeditionMudBall::LaunchVelocity(Aim);
+            FVector From=Origin;
+            for (int32 N=1; N<=70; ++N)
+            {
+                const double T=N/60.;
+                const FVector To=Origin+V*T-FVector::UpVector*(.5*AExpeditionMudBall::FallAcceleration*T*T);
+                FHitResult Hit;
+                if (AExpeditionMudBall::TraceContact(*Shooter.GetWorld(),Shooter,From,To,AExpeditionMudBall::Radius,Hit))
+                {
+                    if (Hit.GetActor()==&Victim && Hit.Item==INDEX_NONE && Hit.ImpactPoint.Z-Foot.Z<25.)
+                    {
+                        TArray<FOverlapResult> Surfaces;
+                        const FVector Center=Hit.ImpactPoint+Hit.ImpactNormal*2.;
+                        Shooter.GetWorld()->OverlapMultiByChannel(Surfaces,Center,FQuat::Identity,ECC_Visibility,
+                            FCollisionShape::MakeSphere(UExpeditionBodyMudComponent::ClodRadius),
+                            FCollisionQueryParams(SCENE_QUERY_STAT(MudAnkleTarget),false,&Victim));
+                        if (Surfaces.ContainsByPredicate([](const FOverlapResult& Part)
+                            { return AIslandAttachedMud::CanReceive(Part.GetComponent()); })) return Aim;
+                    }
+                    break;
+                }
+                From=To;
+            }
+        }
+        return {};
+    }
+}
+
+void AIslandProbePeer::ClientBodyMudInspect_Implementation(int32 Stage, AVoxelCharacter* Subject, FName Photo)
+{
+    if (!Subject) return;
+    auto* Mud=Subject->FindComponentByClass<UExpeditionBodyMudComponent>();
+    if (!Mud) return;
+    const uint32 Digest=MudDigest(*Subject);
+    UE_LOG(LogTemp,Display,TEXT("MUD_QA_BODY_LOCAL stage=%d clods=%d anchored=%d digest=%08x"),
+        Stage,Mud->Num(),Mud->IsAnchored(),Digest);
+    ServerBodyMudReport(Stage,Digest,Mud->Num(),Mud->IsAnchored());
+    if (!Photo.IsNone() && FParse::Param(FCommandLine::Get(),TEXT("IslandScreenshot")))
+    {
+        auto* PC=CastChecked<AIslandPlayerController>(GetOwner());
+        if (PC->GetHero()==Subject && Photo==TEXT("MudFoot") && !Subject->IsInFirstPersonView())
+        {
+            PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Pressed,1.f));
+            PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Released,0.f));
+        }
+        if (PC->GetHero()!=Subject)
+            PC->SetControlRotation(PC->GetHero()->GetViewRotationForTarget(Subject->GetActorLocation(),PC->GetHero()->GetActorLocation()));
+        FTimerHandle Shot;
+        GetWorldTimerManager().SetTimer(Shot,[Photo](){MudPhoto(*Photo.ToString());},.1f,false);
+    }
+}
+
+void AIslandProbePeer::ServerBodyMudReport_Implementation(int32 Stage,uint32 Digest,int32 Clods,bool bAnchored)
+{
+    BodyMudStage=Stage;
+    BodyMudDigest=Digest;
+    BodyMudClods=Clods;
+    bBodyMudAnchored=bAnchored;
+}
+
+bool AIslandProbe::SharedBodyMud(int32 Stage,AVoxelCharacter& Victim,FName Photo,double Now)
+{
+    const auto* Mud=Victim.FindComponentByClass<UExpeditionBodyMudComponent>();
+    const uint32 Digest=MudDigest(Victim);
+    bool All=true;
+    for (auto& Peer : Peers)
+    {
+        if (Peer->BodyMudStage==Stage && Peer->BodyMudDigest==Digest && Peer->BodyMudClods==Mud->Num()
+            && Peer->bBodyMudAnchored==Mud->IsAnchored()) continue;
+        All=false;
+        if (Now-LastAction>.3) Peer->ClientBodyMudInspect(Stage,&Victim,Photo);
+    }
+    if (!All && Now-LastAction>.3) LastAction=Now;
+    if (All)
+        UE_LOG(LogTemp,Display,TEXT("MUD_QA_AGREED stage=%d peers=%d clods=%d anchored=%d digest=%08x"),
+            Stage,Peers.Num(),Mud->Num(),Mud->IsAnchored(),Digest);
+    return All;
+}
+
 void AIslandProbe::TickMudCheck(double Now)
 {
     auto& Terrain=*Mode->GetTerrain();
-    FString ExitRoute;
-    FParse::Value(FCommandLine::Get(),TEXT("MudExit="),ExitRoute);
-    const bool Rescue=ExitRoute==TEXT("rescue");
-    const int32 ShooterSeat=Rescue ? 2 : 1;
-    const int32 VictimSeat=Rescue ? 1 : 2;
-    auto* Attacker=CastChecked<AIslandPlayerController>(Mode->GetPlayers()[ShooterSeat]);
-    auto* Target=CastChecked<AIslandPlayerController>(Mode->GetPlayers()[VictimSeat]);
-    auto& Victim=*Target->GetHero();
+    auto* Attacker=CastChecked<AIslandPlayerController>(Mode->GetPlayers()[1]); // Also the pit climber.
+    auto& Victim=*Attacker->GetHero();
+    auto& Shooter=*Mode->GetPlayers()[2]->GetHero();
+    auto& Mud=*Victim.FindComponentByClass<UExpeditionBodyMudComponent>();
     const double Age=Now-StepAt;
-    auto AimAt=[&](int32 Seat,bool bThrow,const FVector& Point)
+    auto FireMud=[&](FVector Aim)
     {
-        Peers[Seat]->ClientMudStroke(bThrow,(Point-Mode->GetPlayers()[Seat]->GetHero()->GetAimOrigin()).GetSafeNormal());
+        Peers[2]->ClientMudStroke(true,Aim);
         LastAction=Now;
         ++MudShots;
     };
@@ -119,144 +259,210 @@ void AIslandProbe::TickMudCheck(double Now)
         }
         return false;
     };
+    auto OnLanding=[&](int32 Seat,FVector Near)
+    {
+        const auto* Hero = Mode->GetPlayers()[Seat]->GetHero();
+        Place(Seat, FVector(Near.X,Near.Y,MudFoot.Z+Hero->GetSimpleCollisionHalfHeight()+4.));
+    };
+    auto WallMud=[&](double Y)
+    {
+        FHitResult Hit;
+        const FVector Point=MudFoot+FVector(0,Y,95);
+        return GetWorld()->LineTraceSingleByChannel(Hit,Point+FVector(220,0,0),Point-FVector(40,0,0),ECC_Visibility)
+            && Cast<AIslandAttachedMud>(Hit.GetActor());
+    };
     if (Age>20.)
     {
-        UE_LOG(LogTemp,Error,TEXT("ISLAND_QA_TIMEOUT mud=%d shots=%d seq=%u victim=%s stunned=%d compact=%d"),
-            MudStep,MudShots,Terrain.GetAppliedSequence(),*Feet(Victim).ToCompactString(),Victim.IsMudStunned(),Victim.IsMudCompact());
+        UE_LOG(LogTemp,Error,TEXT("ISLAND_QA_TIMEOUT mud=%d shots=%d clods=%d anchored=%d feet=%s muzzle=%s"),
+            MudStep,MudShots,Mud.Num(),Mud.IsAnchored(),*Feet(Victim).ToCompactString(),*Shooter.GetAimOrigin().ToCompactString());
         Require(false,TEXT("mud interaction completed within the scenario deadline"));
         return;
     }
     if (MudStep==0)
     {
-        // Find an actual flat patch, clear of previously generated landmarks and obstacles.
-        for (double X=-3200.; X<=3200.; X+=450.)
-            for (double Y=-3200.; Y<=3200.; Y+=450.)
-            {
-                const auto Floor=MudGround(Terrain,{X,Y,0.});
-                if (!Floor) continue;
-                const auto Shooter=MudGround(Terrain,*Floor-FVector(280,0,0));
-                const auto Pit=MudGround(Terrain,*Floor+FVector(0,550,0));
-                const auto Lip=MudGround(Terrain,*Floor+FVector(0,700,0));
-                if (!Shooter || !Pit || !Lip || FMath::Abs(Shooter->Z-Floor->Z)>8. || FMath::Abs(Pit->Z-Lip->Z)>8.) continue;
-                FHitResult Obstacle;
-                if (GetWorld()->LineTraceSingleByChannel(Obstacle,*Shooter+FVector(0,0,90),*Floor+FVector(0,0,90),ECC_Visibility)) continue;
-                MudFoot=*Floor;
-                MudShaft=*Pit;
-                Place(ShooterSeat,*Shooter+FVector(0,0,96));
-                Place(VictimSeat,*Floor+FVector(0,0,96));
-                Place(0,*Floor+FVector(-180,-330,105));
-                Mode->GetPlayers()[0]->ClientResetView(FRotator(-12,63,0));
-                SetMudStep(1,Now);
-                return;
-            }
-        Require(false,TEXT("found a flat expedition mud duel site"));
+        for (double X=-3200.;X<=3200.;X+=400.)
+        for (double Y=-3200.;Y<=3200.;Y+=400.)
+        {
+            const auto Floor=MudGround(Terrain,{X,Y,0.});
+            if (!Floor) continue;
+            const auto Pit=MudGround(Terrain,*Floor+FVector(0,650,0));
+            const auto Lip=MudGround(Terrain,*Floor+FVector(0,855,0));
+            if (!Pit || !Lip || FMath::Abs(Pit->Z-Lip->Z)>9.) continue;
+            // The wall approach and raised ankle lane share a repeatable walkable voxel
+            // surface. The adjacent shaft still uses the real excavatable island terrain.
+            double Top=Floor->Z;
+            for (int32 DX=-300;DX<=450;DX+=150)
+                for (int32 DY=-550;DY<=350;DY+=150)
+                {
+                    const FVector XY(Floor->X+DX,Floor->Y+DY,0);
+                    FHitResult Surface;
+                    if (GetWorld()->LineTraceSingleByChannel(Surface,XY+FVector(0,0,2400),XY-FVector(0,0,750),ECC_Visibility))
+                        Top=FMath::Max(Top,Surface.ImpactPoint.Z);
+                }
+            MudFoot=FVector(Floor->X,Floor->Y, Top + 85.);
+            MudShaft=*Pit;
+            MudWall=GetWorld()->SpawnActor<AIslandMudProbeSurface>(MudFoot,FRotator::ZeroRotator);
+            Require(MudWall.IsValid(),TEXT("the wall, walkable approach and raised deck use island voxel collision"));
+            OnLanding(0,MudFoot+FVector(330,260,0));
+            OnLanding(1,MudFoot+FVector(365,0,0));
+            Victim.SetActorRotation(FRotator(0,180,0));
+            OnLanding(2,MudFoot+FVector(110,0,0));
+            SetMudStep(1,Now);
+            return;
+        }
+        Require(false,TEXT("found a diggable natural shaft with an accessible rim"));
     }
     else if (MudStep==1)
     {
-        if (Age<.65) return;
-        if (!bIssued) { MudPhoto(TEXT("MudDuel")); bIssued=true; return; }
-        if (Age<1.5) return;
-        if (Victim.IsMudStunned())
-        {
-            Require(MudShots==3,TEXT("exactly three rival throws knock down the guest"));
-            MudFoot=Mode->BurialSites.FindChecked(Target).Foot;
-            MudKnockTime=GetWorld()->GetTimeSeconds();
-            SetMudStep(2,Now);
-            LastAction=Now-.13;
-            return;
-        }
-        if (MudShots<3 && Now-LastAction>.78) AimAt(ShooterSeat,true,Feet(Victim)+FVector(0,0,96));
+        if (Age<1.) return;
+        if (Mud.Num()==3) {SetMudStep(2,Now);return;}
+        // Input may reach the host while the previous throw is still cooling down.
+        // Advance on three deposited clods, and retry an unaccepted input after flight time.
+        if (Mud.Num()<3 && Now-LastAction>1.55)
+            FireMud(AExpeditionMudBall::AimAtPoint(Shooter.GetAimOrigin(),Victim.GetActorLocation()+FVector(0,0,15)));
     }
     else if (MudStep==2)
     {
-        const auto& Site=Mode->BurialSites.FindChecked(Target);
-        if (Site.Layers==3)
-        {
-            Require(Victim.IsMudStunned(),TEXT("single thrower closes the shell before the victim wakes"));
-            MudPhoto(TEXT("MudShell"));
-            SetMudStep(3,Now);
-            return;
-        }
-        if (Site.Layers>0 && MudShots<2 && Now-LastAction>.66)
-            AimAt(ShooterSeat,true,MudFoot+FVector(0,0,36));
+        if (Age<2.) return;
+        Require(Mud.Num()==3 && !Mud.IsAnchored(),TEXT("three real torso hits remain attached and leave the runner free"));
+        if (!SharedBodyMud(MudStep,Victim,TEXT("MudChest"),Now) || Age<2.6) return;
+        OnLanding(2,MudFoot+FVector(210,-270,0));
+        Peers[1]->ClientWalkToDig(MudFoot+FVector(45,0,0));
+        SetMudStep(3,Now);
     }
     else if (MudStep==3)
     {
-        const auto Top=MudGround(Terrain,MudFoot);
-        if (!Top || !Shared(MudFoot) || Victim.IsMudStunned()) return;
-        const double Height=Top->Z-MudFoot.Z;
-        const FVector Eye=Victim.GetAimOrigin();
-        FHitResult Wall;
-        Require(Height>=104. && Height<=134. && Victim.IsMudCompact() && Victim.IsMudImmune()
-            && Terrain.TraceRock(Eye,Eye+FVector(0,175,0),&Victim,Wall)
-            && GetWorld()->LineTraceTestByChannel(Attacker->GetHero()->GetAimOrigin(),Eye,ECC_Visibility,
-                FCollisionQueryParams(SCENE_QUERY_STAT(MudCoverSight),false,Attacker->GetHero())),TEXT("actual closed collision, low posture and wake immunity"));
-        UE_LOG(LogTemp,Display,TEXT("MUD_QA_COVER throws=5 peers=%d height_cm=%.1f stun_seconds=%.3f crc=%08x"),
-            Reports.Num(),Height,GetWorld()->GetTimeSeconds()-MudKnockTime,Terrain.GetChecksum());
-        if (!ExitRoute.IsEmpty())
-        {
-            if (Rescue) Place(0,*Top+FVector(0,0,96));
-            SetMudStep(40,Now);
-        }
-        else SetMudStep(4,Now);
-    }
-    else if (MudStep==40)
-    {
-        if (Age<.45) return;
-        const bool Below=ExitRoute==TEXT("under");
-        const FVector Eye=Victim.GetAimOrigin();
-        FHitResult Ceiling;
-        const bool Closed=Terrain.TraceRock(Eye,Eye+FVector::UpVector*300.,&Victim,Ceiling);
-        const auto Top=MudGround(Terrain,MudFoot);
-        const double Depth=MudFoot.Z-Feet(Victim).Z;
-        if (Below ? (Depth>30. && Closed && Top && Top->Z-MudFoot.Z>104.) : (!Closed && !Victim.IsMudCompact()))
-        {
-            UE_LOG(LogTemp,Display,TEXT("MUD_QA_ESCAPE_VARIANT route=%s strokes=%d floor_drop_cm=%.1f roof_closed=%d standing=%d"),
-                *ExitRoute,MudShots,Depth,Closed,!Victim.IsMudCompact());
-            UE_LOG(LogTemp,Display,TEXT("MUD_QA_DONE"));
-            Advance(EStep::Done);
-            SetActorTickEnabled(false);
-            return;
-        }
-        if (Now-LastAction>.68 && MudShots<9)
-        {
-            const int32 Digger=Rescue ? 0 : VictimSeat;
-            if (Rescue) Require(Mode->GetPlayers()[0]->GetPlayerState<AIslandPlayerState>()->Team
-                == Target->GetPlayerState<AIslandPlayerState>()->Team,TEXT("the rescuer belongs to the buried player's crew"));
-            Peers[Digger]->ClientMudStroke(false,Rescue || Below ? FVector::DownVector : FVector::UpVector);
-            LastAction=Now; ++MudShots;
-        }
+        if (!Mud.IsAnchored()) return;
+        Require(Mud.Num()==3 && (Feet(Victim)-MudFoot).X<180.,TEXT("the coated runner traversed open soil before reaching the wall"));
+        Peers[1]->ClientWalkToDig(Feet(Victim));
+        SetMudStep(4,Now);
     }
     else if (MudStep==4)
     {
-        // Open the lower side, move through it, then actually fire back from the exit.
-        const double Moved=FVector::Dist2D(Feet(Victim),MudFoot);
-        if (Moved>=175. && !Victim.IsMudCompact())
+        if (!SharedBodyMud(MudStep,Victim,TEXT("MudWall"),Now) || Age<.7) return;
+        // Reset this fixture through the normal recovery path, then shoot towards the opponent behind the wall.
+        OnLanding(1,MudFoot+FVector(-85,-125,0));
+        OnLanding(2,MudFoot+FVector(210,-125,0));
+        SetMudStep(20,Now);
+    }
+    else if (MudStep==20 || MudStep==21)
+    {
+        const double Lane=MudStep==20 ? -125. : 100.;
+        if (Age<.8) return;
+        if (!bIssued)
         {
-            AimAt(2,true,Feet(*Attacker->GetHero())+FVector(0,0,95));
-            UE_LOG(LogTemp,Display,TEXT("MUD_QA_ESCAPE travelled_cm=%.1f elapsed=%.2f"),Moved,Age);
-            SetMudStep(5,Now);
+            const FVector Point=MudFoot+FVector(0,Lane,95);
+            FireMud(AExpeditionMudBall::AimAtPoint(Shooter.GetAimOrigin(),Point));
+            bIssued=true;
             return;
         }
-        if (Now-LastAction>.55)
+        if (!WallMud(Lane)) return;
+        Require(!Mud.Num() && !Mud.IsAnchored(),TEXT("actual clay remained on the near side of the wall and did not coat the bystander"));
+        if (MudStep==20)
         {
-            const FVector Aim=FVector(0,1, (MudShots%3==1) ? -.42 : (MudShots%3==2 ? .26 : 0.)).GetSafeNormal();
-            Peers[2]->ClientMudStroke(false,Aim);
-            Peers[2]->ClientWalkToDig(MudFoot+FVector(0,215,0));
-            LastAction=Now;
-            ++MudShots;
+            UE_LOG(LogTemp,Display,TEXT("MUD_QA_WALL_OCCLUSION behind_clods=%d wall_pad=1"),Mud.Num());
+            OnLanding(1,MudFoot+FVector(43,32,0));
+            OnLanding(2,MudFoot+FVector(230,130,0));
+            SetMudStep(21,Now);
+        }
+        else
+        {
+            UE_LOG(LogTemp,Display,TEXT("MUD_QA_CLIPPED wall_pad=1 bystander_clods=%d"),Mud.Num());
+            const FVector Deck=MudFoot+FVector(0,-400,130);
+            Place(1,Deck+FVector(0,0,Victim.GetSimpleCollisionHalfHeight()+4.));
+            OnLanding(2,Deck+FVector(-215,0,0));
+            OnLanding(0,Deck+FVector(0,-220,0));
+            SetMudStep(22,Now);
         }
     }
-    else if (MudStep==5)
+    else if (MudStep==22 || MudStep==24)
     {
-        if (Mode->GetMudMarks(*Attacker->GetHero())!=1)
+        if (Age<.9) return;
+        if (!bIssued)
         {
-            if (Age>1. && Now-LastAction>1.) AimAt(2,true,Feet(*Attacker->GetHero())+FVector(0,0,90));
+            const auto Aim=AnkleShot(Shooter,Victim);
+            if (!Aim) {Require(false,TEXT("a clear projectile ray reaches the supporting ankle on the raised deck"));return;}
+            FireMud(*Aim);
+            bIssued=true;
+        }
+        const int32 Expected=MudStep==22 ? 1 : 2;
+        if (Mud.Num()!=Expected || !Mud.IsAnchored()) return;
+        SetMudStep(MudStep+1,Now);
+    }
+    else if (MudStep==23 || MudStep==25)
+    {
+        if (!SharedBodyMud(MudStep,Victim,MudStep==23 ? TEXT("MudFoot") : TEXT("MudDouble"),Now) || Age<.7) return;
+        if (MudStep==23)
+        {
+            OnLanding(2,MudFoot+FVector(215,-400,0));
+            SetMudStep(24,Now);
+        }
+        else
+        {
+            FVector A,B; float R=0;
+            Require(Mud.GetClodWorld(0,A,R) && Mud.GetClodWorld(1,B,R) && FVector::Dist(A,B)>2.*R,
+                TEXT("two distinct ankle deposits connect opposite sides to the deck independently"));
+            Peers[1]->ClientMudHold(false,true,FRotator(40,0,0));
+            SetMudStep(26,Now);
+        }
+    }
+    else if (MudStep==26)
+    {
+        if (Age<.35) return;
+        if (!bIssued) {Peers[1]->ClientMudHold(false,false,FRotator(40,0,0));bIssued=true;return;}
+        if (Mud.Num()!=1 || !Mud.IsAnchored()) return;
+        if (!SharedBodyMud(MudStep,Victim,NAME_None,Now)) return;
+        FVector Center;float R=0;
+        Mud.GetClodWorld(0,Center,R);
+        const FVector Out=(Center-Victim.GetActorLocation()).GetSafeNormal2D();
+        OnLanding(0,Center+Out*160.);
+        SetMudStep(27,Now);
+    }
+    else if (MudStep==27)
+    {
+        if (Age<.8) return;
+        if (!bIssued)
+        {
+            FVector Center; float R=0;
+            if (!Mud.GetClodWorld(0,Center,R)) {Require(false,TEXT("one intact connection remains for the teammate"));return;}
+            const auto* Friend=Mode->GetPlayers()[0]->GetHero();
+            Peers[0]->ClientMudStroke(false,(Center-Friend->GetAimOrigin()).GetSafeNormal());
+            bIssued=true;
             return;
         }
-        // A teammate excavates the shaft with the same shallow shovel as the player.
-        // The second guest enters empty-handed and only uses throw and ordinary walking.
-        Place(0,MudShaft+FVector(0,0,96));
+        if (Mud.Num() || Mud.IsAnchored() || !SharedBodyMud(MudStep,Victim,TEXT("MudFreed"),Now)) return;
+        UE_LOG(LogTemp,Display,TEXT("MUD_QA_RESCUE self_removed=1 teammate_removed=1 supports=0"));
+        // The duelling deck sits above the scenery. Choose the independent pit from
+        // real, exposed island soil with standing clearance along the exit route.
+        auto FindPit = [&](FVector Near)
+        {
+            if (FVector::Dist2D(Near,MudFoot)<720.) return false;
+            const auto Pit=MudGround(Terrain,Near);
+            if (!Pit) return false;
+            const FCollisionQueryParams FloorQuery(SCENE_QUERY_STAT(MudPitGround),false);
+            FCollisionQueryParams ClearanceQuery(SCENE_QUERY_STAT(MudPitClearance),false);
+            ClearanceQuery.AddIgnoredActor(&Terrain);
+            for (int32 Offset : {0,90,205})
+            {
+                const auto Ground=MudGround(Terrain,*Pit+FVector(0,Offset,0));
+                if (!Ground || FMath::Abs(Ground->Z-Pit->Z)>12.) return false;
+                FHitResult Surface;
+                if (!AIslandNeutralProp::TraceShovel(*GetWorld(),Surface,*Ground+FVector(0,0,240),
+                    *Ground-FVector(0,0,12),FloorQuery) || Surface.GetActor()!=&Terrain) return false;
+                TArray<FHitResult> Parts;
+                GetWorld()->SweepMultiByChannel(Parts,*Ground+FVector(0,0,210),*Ground-FVector(0,0,180),
+                    FQuat::Identity,ECC_Visibility,FCollisionShape::MakeSphere(48.f),ClearanceQuery);
+                if (Parts.ContainsByPredicate([](const FHitResult& Part)
+                    { return Part.bBlockingHit || AIslandAttachedMud::CanReceive(Part.GetComponent()) || Cast<AIslandNeutralProp>(Part.GetActor()); })) return false;
+            }
+            MudShaft=*Pit;
+            return true;
+        };
+        bool Found=FindPit({-1850,-850,0});
+        for (int32 X=-2800; !Found && X<=2800; X+=350)
+            for (int32 Y=-2800; !Found && Y<=2800; Y+=350) Found=FindPit({double(X),double(Y),0});
+        if (!Found) { Require(false,TEXT("the pit has exposed soil and clear walking space up to its rim")); return; }
+        UE_LOG(LogTemp,Display,TEXT("MUD_QA_SHAFT_SITE surface=%s"),*MudShaft.ToCompactString());
         SetMudStep(6,Now);
     }
     else if (MudStep==6)
@@ -265,41 +471,63 @@ void AIslandProbe::TickMudCheck(double Now)
         if (!Floor || Terrain.IsBusy() || Age<.65) return;
         if (MudShaft.Z-Floor->Z<145.)
         {
-            if (Now-LastAction > (bIssued ? 1.32 : .18))
+            // Arrange the shaft through the replicated terrain edit queue. Throwing,
+            // lifting, collision replay and walking out below are all real guest input.
+            if (Now-LastAction > .7)
             {
-                bIssued = !bIssued;
-                Peers[0]->ClientMudHold(false,bIssued,FRotator(-89.,0.,0.));
+                Mode->EnqueueEdit(*Mode->GetPlayers()[0], EVoxelAction::Punch,FVector::DownVector,
+                    VoxelPlayground::QuantizeCenter(*Floor-FVector(0,0,45)));
                 LastAction = Now;
             }
             return;
         }
-        if (bIssued) Peers[0]->ClientMudHold(false,false,FRotator(-89.,0.,0.));
+        const auto Lip=MudGround(Terrain,MudShaft+FVector(0.,205.,0.));
+        if (!Lip) { Require(false,TEXT("a walkable shaft rim exists above the climber")); return; }
+        MudExitLip=*Lip;
+        MudShaftSequence=Terrain.GetAppliedSequence();
         UE_LOG(LogTemp,Display,TEXT("MUD_QA_SHAFT dig_depth_cm=%.1f"),MudShaft.Z-Floor->Z);
         MudBase=Floor->Z;
+        // Keep the spectator out of the shaft while placing the climber. Two solid
+        // capsules on the same spawn point would intercept the underfoot throw.
+        Place(0,*Lip+FVector(0,170,200));
         Place(1,*Floor+FVector(0,0,96));
         MudShaft.Z=MudBase;
+        Attacker->ClientSetRotation(FRotator(-82.,0.,0.));
         UE_LOG(LogTemp,Display,TEXT("MUD_QA_PIT prepared=1 bottom_z=%.1f"),MudBase);
-        Place(0,*Floor+FVector(-225,-290,275));
-        Mode->GetPlayers()[0]->ClientResetView(FRotator(-19.,52.,0.));
+        const auto* Observer=Mode->GetPlayers()[0]->GetHero();
+        Mode->GetPlayers()[0]->ClientResetView(Observer->GetViewRotationForTarget(*Floor,Observer->GetActorLocation()));
+        UE_LOG(LogTemp,Display,TEXT("MUD_QA_PIT_CREW observer=%s climber=%s thrower=%s"),
+            *Feet(*Observer).ToCompactString(),*Feet(Victim).ToCompactString(),*Feet(Shooter).ToCompactString());
         SetMudStep(7,Now);
     }
     else if (MudStep==7)
     {
         const auto Floor=MudGround(Terrain,MudShaft);
         if (!Floor || Age<.7) return;
-        if (bIssued && Floor->Z-MudBase>104. && FMath::Abs(Feet(*Attacker->GetHero()).Z-Floor->Z)<12.)
+        const auto& Climber=*Attacker->GetHero();
+        const double FootZ=Feet(Climber).Z;
+        // The pad slopes away from the centre. Keep half a walking step for its edge.
+        const double StepBudget=Climber.GetCharacterMovement()->MaxStepHeight*.5;
+        if (bIssued && Climber.GetCharacterMovement()->IsMovingOnGround() && FMath::Abs(FootZ-Floor->Z)<12.
+            && MudExitLip.Z-FMath::Min(FootZ, Floor->Z)<=StepBudget)
         {
             Peers[1]->ClientMudHold(true,false,FRotator(-89.,0.,0.));
             SetMudStep(8,Now);
             return;
         }
         if (!bIssued) { Peers[1]->ClientMudHold(true,true,FRotator(-89.,0.,0.)); bIssued=true; }
+        if (Now-LastAction>.3)
+        {
+            Attacker->ClientSetRotation(FRotator(-82.,0.,0.));
+            LastAction=Now;
+        }
     }
     else if (MudStep==8)
     {
         const auto Floor=MudGround(Terrain,MudShaft);
         if (!Floor || !Shared(MudShaft)) return;
-        UE_LOG(LogTemp,Display,TEXT("MUD_QA_STEPS throws=3 rise_cm=%.1f peers=%d crc=%08x"),Floor->Z-MudBase,Reports.Num(),Terrain.GetChecksum());
+        UE_LOG(LogTemp,Display,TEXT("MUD_QA_STEPS placed_pads=%u rise_cm=%.1f rim_above_pad_cm=%.1f peers=%d crc=%08x"),
+            Terrain.GetAppliedSequence()-MudShaftSequence,Floor->Z-MudBase,MudExitLip.Z-Floor->Z,Reports.Num(),Terrain.GetChecksum());
         MudPhoto(TEXT("MudSteps"));
         SetMudStep(9,Now);
     }
@@ -307,116 +535,21 @@ void AIslandProbe::TickMudCheck(double Now)
     {
         const FVector Actual=Feet(*Attacker->GetHero());
         const auto Floor=MudGround(Terrain,Actual);
-        if (Floor && FVector::Dist2D(Actual,MudShaft)>165. && FMath::Abs(Actual.Z-Floor->Z)<14. && Actual.Z-MudBase>=146.)
+        if (Floor && Attacker->GetHero()->GetCharacterMovement()->IsMovingOnGround()
+            && FVector::Dist2D(Actual,MudExitLip)<32. && FMath::Abs(Actual.Z-Floor->Z)<14.
+            && FMath::Abs(Actual.Z-MudExitLip.Z)<14.)
         {
             UE_LOG(LogTemp,Display,TEXT("MUD_QA_EXIT walked_cm=%.1f rise_cm=%.1f"),FVector::Dist2D(Actual,MudShaft),Actual.Z-MudBase);
-            SetMudStep(10,Now);
+            SetMudStep(16,Now);
             return;
         }
         // The natural lip is uneven. Try adjacent ways out with ordinary walking only.
         if (Now-LastAction<2.1) return;
         const FVector Dir=FRotator(0.,90.+45.*MudShots,0.).Vector();
         const auto Lip=MudGround(Terrain,MudShaft+Dir*205.);
-        if (Lip) Peers[1]->ClientWalkToDig(*Lip);
+        if (Lip) { MudExitLip=*Lip; Peers[1]->ClientWalkToDig(MudExitLip); }
         UE_LOG(LogTemp,Display,TEXT("MUD_QA_LIP attempt=%d feet=%s gain=%.1f"),MudShots,*Actual.ToCompactString(),Actual.Z-MudBase);
         ++MudShots; LastAction=Now;
-    }
-    else if (MudStep==10)
-    {
-        // Re-run on exposed ground to distinguish immunity from a shot merely striking the roof.
-        // A fresh, level site also ends the previous movement inputs, far outside their route.
-        for (double X=-3200.; X<=3200.; X+=370.)
-            for (double Y=-3200.; Y<=3200.; Y+=370.)
-            {
-                const auto V=MudGround(Terrain,{X,Y,0.});
-                if (!V || FVector::Dist2D(*V,MudShaft)<1300. || FVector::Dist2D(*V,MudFoot)<1300.) continue;
-                const auto A=MudGround(Terrain,*V+FVector(-220.,-85.,0.));
-                const auto B=MudGround(Terrain,*V+FVector(-220.,85.,0.));
-                if (!A || !B || FMath::Abs(A->Z-V->Z)>8. || FMath::Abs(B->Z-V->Z)>8.) continue;
-                const FVector Headroom(0,0,95);
-                if (GetWorld()->LineTraceTestByChannel(*A+Headroom,*V+Headroom,ECC_Visibility)
-                    || GetWorld()->LineTraceTestByChannel(*B+Headroom,*V+Headroom,ECC_Visibility)) continue;
-                Place(0,*A+FVector(0,0,96)); Place(1,*B+FVector(0,0,96)); Place(2,*V+FVector(0,0,96));
-                SetMudStep(11,Now);
-                return;
-            }
-        Require(false,TEXT("found clear lines for both teammates"));
-    }
-    else if (MudStep==11)
-    {
-        if (Age<.8) return;
-        if (!bIssued)
-        {
-            const auto* First = CastChecked<AIslandPlayerController>(Mode->GetPlayers()[0]);
-            const auto* Second = CastChecked<AIslandPlayerController>(Mode->GetPlayers()[1]);
-            Require(First->GetTeam()==Second->GetTeam() && First->GetTeam()!=Target->GetTeam() && Mode->GetMudMarks(Victim)==0,
-                TEXT("two teammates face a fresh opposing target"));
-            UE_LOG(LogTemp,Display,TEXT("MUD_QA_ROSTER first=%s second=%s target=%s"),
-                *First->GetName(),*Second->GetName(),*Target->GetName());
-            const FVector To=Victim.GetActorLocation();
-            AimAt(0,true,To); AimAt(1,true,To); bIssued=true;
-        }
-        else if (Age>1.65)
-        {
-            Require(Mode->GetMudMarks(Victim)==1,TEXT("two simultaneous hits give one shared mud mark"));
-            SetMudStep(12,Now);
-        }
-    }
-    else if (MudStep==12)
-    {
-        if (Mode->GetMudMarks(Victim)!=0) return;
-        UE_LOG(LogTemp,Display,TEXT("MUD_QA_STACK_CLEAR time=%.4f"),GetWorld()->GetTimeSeconds());
-        SetMudStep(13,Now);
-    }
-    else if (MudStep==13)
-    {
-        if (Victim.IsMudStunned())
-        {
-            MudKnockTime=GetWorld()->GetTimeSeconds();
-            SetMudStep(14,Now);
-            return;
-        }
-        // Choose the next thrower from confirmed marks. A delayed or missed request
-        // cannot substitute one teammate for the other when verifying a shared stack.
-        if (Now-LastAction>.72 && MudShots<7)
-            AimAt(Mode->GetMudMarks(Victim)%2,true,Victim.GetActorLocation());
-    }
-    else if (MudStep==14)
-    {
-        if (Victim.IsMudStunned()) return;
-        Require(Victim.IsMudImmune(),TEXT("target receives the post-stun Gameplay Effect"));
-        UE_LOG(LogTemp,Display,TEXT("MUD_QA_WAKE time=%.4f"),GetWorld()->GetTimeSeconds());
-        SetMudStep(15,Now);
-    }
-    else if (MudStep==15)
-    {
-        if (Age<3.5)
-        {
-            if (!Victim.IsMudImmune() || Victim.IsMudStunned() || Mode->GetMudMarks(Victim)!=0)
-            {
-                Require(false,TEXT("wake protection prevents pre-stacking"));
-                return;
-            }
-            if (Now-LastAction>.55) AimAt(MudShots%2,true,Victim.GetActorLocation());
-            return;
-        }
-        if (Victim.IsMudImmune()) return;
-        Require(!Victim.IsMudStunned() && Mode->GetMudMarks(Victim)==0,TEXT("protected hits left no stored stack"));
-        UE_LOG(LogTemp,Display,TEXT("MUD_QA_GROUP simultaneous_marks=1 expired=1 protected_throws=%d immunity_end_since_knock=%.2f end_time=%.4f"),
-            MudShots,GetWorld()->GetTimeSeconds()-MudKnockTime,GetWorld()->GetTimeSeconds());
-        SetMudStep(150,Now);
-    }
-    else if (MudStep==150)
-    {
-        if (!bIssued)
-        {
-            AimAt(1,true,Victim.GetActorLocation());
-            bIssued=true;
-            return;
-        }
-        if (Mode->GetMudMarks(Victim)!=1) return;
-        Require(!Victim.IsMudImmune() && !Victim.IsMudStunned(),TEXT("the first actual hit after protection starts a new stack"));
-        SetMudStep(16,Now);
     }
     else if (MudStep==16)
     {

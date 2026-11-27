@@ -5,6 +5,9 @@
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
+#include "CanvasTypes.h"
+#include "Components/StaticMeshComponent.h"
+#include "Materials/MaterialInterface.h"
 #include "TimerManager.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
@@ -17,10 +20,12 @@
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandRoomPanel.h"
 #include "Island/IslandRoomSession.h"
+#include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandState.h"
 #include "Island/IslandWorld.h"
 #include "Tests/IslandUIProbe.h"
 #include "PartyVoxelArena.h"
+#include "PartyCrewRig.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
 #include "Widgets/SWeakWidget.h"
@@ -37,6 +42,41 @@ namespace IslandHudColors
 
 namespace
 {
+    constexpr float DockToPawnSeconds = .56f;
+
+    bool HasDrawnWithMaterials(const UPrimitiveComponent* Mesh, float Since)
+    {
+        if (!Mesh || !Mesh->IsVisible() || Mesh->GetLastRenderTimeOnScreen() <= 0.f
+            || Mesh->GetLastRenderTimeOnScreen() < Since) return false;
+        for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+            if (const auto* Material = Mesh->GetMaterial(Slot); Material && !Material->IsComplete()) return false;
+        return true;
+    }
+
+    FString ExcavationEchoCaption(const AIslandPlayerController& Player)
+    {
+        const FVector Direction = Player.GetEchoDirection();
+        if (Direction.IsNearlyZero()) return EXPEDITION_TEXT("空响 · 就在这里", "Echo · Right here");
+
+        const float Proximity = Player.GetEchoProximity();
+        FString Caption = Proximity < .33f ? EXPEDITION_TEXT("微弱回音", "Faint echo")
+            : Proximity > .75f ? EXPEDITION_TEXT("清晰回音", "Clear echo") : EXPEDITION_TEXT("回音", "Echo");
+        if (FMath::Abs(Direction.Z) < .88)
+        {
+            const double Bearing = FMath::FindDeltaAngleDegrees(Player.GetControlRotation().Yaw, Direction.Rotation().Yaw);
+            const int32 Sector = (FMath::RoundToInt(Bearing / 45.) + 8) % 8;
+            const TCHAR* const SidesZh[] = {TEXT("前方"), TEXT("右前方"), TEXT("右侧"), TEXT("右后方"),
+                TEXT("后方"), TEXT("左后方"), TEXT("左侧"), TEXT("左前方")};
+            const TCHAR* const SidesEn[] = {TEXT("Ahead"), TEXT("Front right"), TEXT("Right"), TEXT("Back right"),
+                TEXT("Behind"), TEXT("Back left"), TEXT("Left"), TEXT("Front left")};
+            Caption += TEXT(" · ");
+            Caption += ExpeditionText::IsEnglish() ? SidesEn[Sector] : SidesZh[Sector];
+        }
+        if (Direction.Z < -.32) Caption += EXPEDITION_TEXT(" · 往下挖", " · Dig down");
+        if (Direction.Z >  .32) Caption += EXPEDITION_TEXT(" · 往上挖", " · Dig up");
+        return Caption;
+    }
+
     const TCHAR* DecoyResult(EIslandDecoyEvent Event, bool bWon, bool bHasMate)
     {
         switch (Event)
@@ -52,7 +92,7 @@ namespace
         case EIslandDecoyEvent::SpringTide:
             return EXPEDITION_TEXT("按空格跳得更高，可以试着越过石坎", "Press Space to jump higher and clear ledges");
         case EIslandDecoyEvent::Ceasefire:
-            return EXPEDITION_TEXT("泥团仍可堆土，命中对手暂时不留泥印", "Mud still builds paths. Hits leave no marks on rivals.");
+            return EXPEDITION_TEXT("泥团仍可堆土，暂时不会粘在对手身上", "Mud still builds paths. Rivals shed incoming mud.");
         case EIslandDecoyEvent::CrewRally:
             return bHasMate
                 ? EXPEDITION_TEXT("队友在原先的勘探点附近集合，看看谁在身边", "Look around for crewmates at your crew’s search site.")
@@ -140,12 +180,12 @@ bool AIslandHUD::IsMenuOpen() const { return Panel && Panel->Current()!=EIslandP
 
 bool AIslandHUD::IsAcceptingWorldInput() const
 {
-    return !bFront && !IsMenuOpen() && FPlatformTime::Seconds()>=HandoffUntil;
+    return !bFront && !IsMenuOpen() && !bTakingControl;
 }
 
 void AIslandHUD::ToggleMenu()
 {
-    if (!Panel || bLegacyProbe) return;
+    if (!Panel || bLegacyProbe || bTakingControl) return;
     if (Panel->Current()==EIslandPanel::Hidden) Panel->Show(EIslandPanel::Pause);
     else Panel->Back();
     if (auto* Player=Cast<AIslandPlayerController>(GetOwningPlayerController())) UpdateInput(*Player,IsMenuOpen());
@@ -153,14 +193,16 @@ void AIslandHUD::ToggleMenu()
 
 void AIslandHUD::UpdateInput(AIslandPlayerController& Player,bool bMenu)
 {
-    const bool bHandingOff=!bMenu && HandoffUntil>FPlatformTime::Seconds();
-    if (bSetInput && bMenuInput==bMenu && bHandoffInput==bHandingOff) return;
-    bHandoffInput=bHandingOff;
+    const bool bChangeFocus = !bSetInput || bMenuInput != bMenu;
+    if (!bChangeFocus && bHandoffInput==bTakingControl) return;
+    bHandoffInput=bTakingControl;
     bSetInput=true;
     bMenuInput=bMenu;
     Player.ClearHeldIslandActions();
-    Player.SetIslandUIInput(bMenu);
-    if (bHandingOff || Player.IsPartyTravelLocked() || Cast<APartyPawn>(Player.GetPawn())) Player.SetVoxelInputEnabled(false);
+    Player.SetIslandUIInput(bMenu || bTakingControl || Player.IsPartyTravelLocked() || Cast<APartyPawn>(Player.GetPawn()));
+    // The viewport already captured the mouse at the start of the blend. Requesting
+    // precision capture again on unlock can deliver a cursor warp as the first aim delta.
+    if (!bChangeFocus) return;
     Player.bShowMouseCursor=bMenu;
     if (bMenu)
     {
@@ -187,7 +229,7 @@ void AIslandHUD::UpdateDockCamera(AIslandPlayerController& Player,bool bRoom)
     if (bRoom)
     {
         if (!Player.GetHero() || Player.GetTeam()<0) return;
-        const auto* Dock=AExpeditionDock::FindForTeam(GetWorld(),OccupiedTeams(*GS),Player.GetTeam());
+        auto* Dock=AExpeditionDock::FindForTeam(GetWorld(),OccupiedTeams(*GS),Player.GetTeam());
         if (!Dock || (bRoomCamera && CameraDock==Dock->DockIndex && DockCamera.IsValid())) return;
         const FTransform Target=Dock->GetPreviewView();
         // Retarget a new camera so a seat change blends from the previous viewpoint.
@@ -195,16 +237,25 @@ void AIslandHUD::UpdateDockCamera(AIslandPlayerController& Player,bool bRoom)
         Params.ObjectFlags|=RF_Transient;
         auto* Camera=GetWorld()->SpawnActor<ACameraActor>(ACameraActor::StaticClass(),Target,Params);
         if (!Camera) return;
+        Camera->GetCameraComponent()->SetConstraintAspectRatio(false);
         Camera->GetCameraComponent()->SetFieldOfView(65.f);
         Camera->GetCameraComponent()->PostProcessSettings.bOverride_MotionBlurAmount=true;
         Camera->GetCameraComponent()->PostProcessSettings.MotionBlurAmount=0.f;
+        const bool bFirstDock=!bRoomCamera;
         const bool bDistant=bRoomCamera && DockCamera.IsValid() && Player.PlayerCameraManager
             && FVector::DistSquared(DockCamera->GetActorLocation(),Target.GetLocation())>FMath::Square(2500.0);
         if (DockCamera.IsValid()) DockCamera->SetLifeSpan(.55f);
         DockCamera=Camera;
         CameraDock=Dock->DockIndex;
+        ArrivalDock=Dock;
+        DockViewWorldTime=GetWorld()->GetTimeSeconds();
         bRoomCamera=true;
-        if (bDistant)
+        if (bFirstDock)
+        {
+            // The travel screen owns the viewport until this exact view has drawn.
+            Player.SetViewTarget(Camera);
+        }
+        else if (bDistant)
         {
             // Keep the roster interactive while moving between distant shores.
             const FLinearColor HarbourGray(.15f,.20f,.21f);
@@ -229,14 +280,69 @@ void AIslandHUD::UpdateDockCamera(AIslandPlayerController& Player,bool bRoom)
     }
     else if (bRoomCamera && Player.GetPawn())
     {
+        // The owning-client RPC and the replicated phase can arrive in either order.
+        if (GS->Phase == EIslandPhase::Hunting && (!Player.IsPlaying() || !Player.GetHero())) return;
         bRoomCamera=false;
         CameraDock=INDEX_NONE;
-        HandoffUntil=FPlatformTime::Seconds()+.33;
         if (Player.PlayerCameraManager) Player.PlayerCameraManager->StopCameraFade();
-        Player.SetViewTargetWithBlend(Player.GetPawn(),.33f,VTBlend_Cubic,0.f,true);
-        if (DockCamera.IsValid()) DockCamera->SetLifeSpan(.48f);
+        bTakingControl = GS->Phase == EIslandPhase::Hunting;
+        if (bTakingControl)
+        {
+            HandoffProgress = 0.f;
+            Panel->SetVisibility(EVisibility::HitTestInvisible);
+            Player.SetViewTargetWithBlend(Player.GetPawn(),DockToPawnSeconds,VTBlend_Cubic,0.f,true);
+            UE_LOG(LogTemp, Display, TEXT("ISLAND_PRESENTATION handoff_begin"));
+        }
+        else Player.SetViewTarget(Player.GetPawn());
+        if (DockCamera.IsValid()) DockCamera->SetLifeSpan(DockToPawnSeconds + .2f);
         DockCamera.Reset();
     }
+}
+
+void AIslandHUD::UpdateHuntHandoff(AIslandPlayerController& Player)
+{
+    if (!bTakingControl) return;
+    const auto* Camera = Player.PlayerCameraManager.Get();
+    const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
+    if (Round && Round->Phase == EIslandPhase::Hunting && Camera && Camera->PendingViewTarget.Target == Player.GetPawn() && Player.GetPawn())
+    {
+        HandoffProgress = FMath::Clamp(1.f - Camera->BlendTimeToGo / DockToPawnSeconds, 0.f, 1.f);
+        Panel->SetRenderOpacity(1.f - FMath::SmoothStep(0.f, .65f, HandoffProgress));
+        return;
+    }
+
+    bTakingControl = false;
+    if (Round && Round->Phase == EIslandPhase::Hunting) Panel->Show(EIslandPanel::Hidden);
+    Panel->SetRenderOpacity(1.f);
+    UE_LOG(LogTemp, Display, TEXT("ISLAND_PRESENTATION handoff_complete"));
+}
+
+void AIslandHUD::PresentRoomView(const AIslandPlayerController& Player)
+{
+    if (bRoomPresented) return;
+    const auto* State = GetWorld()->GetGameState<AIslandGameState>();
+    if (LobbyShownAt < 0.)
+    {
+        // A client that catches up after countdown may receive Hunting in its first snapshot.
+        if (!State || State->Phase == EIslandPhase::Waiting || State->Phase == EIslandPhase::Starting
+            || !Player.GetPawn() || Player.GetTeam() < 0) return;
+        bRoomPresented = true;
+        GetGameInstance()->GetSubsystem<UIslandRoomSession>()->RevealTravelScreen();
+        return;
+    }
+    const auto* Camera = Player.PlayerCameraManager.Get();
+    const bool bDockView = Camera && DockCamera.IsValid() && Player.GetViewTarget() == DockCamera.Get()
+        && Camera->GetCameraLocation().Equals(DockCamera->GetActorLocation(), 2.);
+    const auto* Hero = Player.GetHero();
+    const auto* Crew = Hero ? Hero->FindComponentByClass<UPartyCrewRig>() : nullptr;
+    const auto* Deck = ArrivalDock.IsValid() ? IslandSceneryVoxels::SurfaceFor(&ArrivalDock->GetMesh()) : nullptr;
+    const bool bSceneDrawn = bDockView && HasDrawnWithMaterials(Deck, DockViewWorldTime)
+        && HasDrawnWithMaterials(Crew, DockViewWorldTime);
+    // A malformed custom map must still expose the leave-room action.
+    if (!bSceneDrawn && FPlatformTime::Seconds() - LobbyShownAt < 3.) return;
+    bRoomPresented = true;
+    GetGameInstance()->GetSubsystem<UIslandRoomSession>()->RevealTravelScreen();
+    UE_LOG(LogTemp, Display, TEXT("ISLAND_PRESENTATION dock_ready dock=%d framed=%d scene_drawn=%d"), CameraDock, bDockView, bSceneDrawn);
 }
 
 void AIslandHUD::UpdateResultCamera(AIslandPlayerController& Player)
@@ -345,13 +451,42 @@ void AIslandHUD::UpdateResultCamera(AIslandPlayerController& Player)
     else Player.SetViewTargetWithBlend(Camera,.42f,VTBlend_Cubic,0.f,true);
 }
 
+void AIslandHUD::ShowLocalPartyBriefing(AIslandPlayerController& Player)
+{
+    if (!Panel || !Player.GetLocalPartyBriefingRound()) return;
+    if (Panel->Current() == EIslandPanel::PartyBrief)
+    {
+        Panel->Refresh();
+        return;
+    }
+    // The opaque briefing replaces any remaining dock handoff, including its input capture.
+    bTakingControl = false;
+    Panel->SetRenderOpacity(1.f);
+    Panel->Show(EIslandPanel::PartyBrief);
+    if (auto* Room = GetGameInstance()->GetSubsystem<UIslandRoomSession>()) Room->RevealTravelScreen(true);
+    UpdateInput(Player, true);
+}
+
 void AIslandHUD::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
     auto* PC=Cast<AIslandPlayerController>(GetOwningPlayerController());
     if (!PC || !Panel) return;
     const auto* Round=GetWorld()->GetGameState<AIslandGameState>();
+    if (PC->GetLocalPartyBriefingRound())
+    {
+        ShowLocalPartyBriefing(*PC);
+#if !UE_BUILD_SHIPPING
+        TickIslandUIProbe(*PC, Panel.ToSharedRef());
+#endif
+        return;
+    }
     if (Round && Round->bRoomLobby) UpdateTreasureFeedback(*PC,*Round,DeltaSeconds);
+    if (Panel->Current() == EIslandPanel::PartyBrief)
+    {
+        Panel->Show(EIslandPanel::Hidden);
+        UpdateInput(*PC, false);
+    }
     if (bLegacyProbe && (!Round || Round->Phase!=EIslandPhase::Finished ||
         !FParse::Param(FCommandLine::Get(),TEXT("ExpeditionInteractionQA")))) return;
     if (!bFront)
@@ -366,18 +501,23 @@ void AIslandHUD::Tick(float DeltaSeconds)
                 if (bRoom && !(GS->Phase==EIslandPhase::Waiting && Panel->Current()==EIslandPanel::Character)
                     && Panel->Current()!=EIslandPanel::Lobby && Panel->Current()!=EIslandPanel::Settings
                     && Panel->Current()!=EIslandPanel::ClientSettings)
+                {
                     Panel->Show(EIslandPanel::Lobby);
+                    if (LobbyShownAt < 0.) LobbyShownAt = FPlatformTime::Seconds();
+                }
                 else if (GS->Phase==EIslandPhase::Finished)
                 {
                     Panel->Show(EIslandPanel::Result);
                 }
-                else if (!bRoom) Panel->Show(EIslandPanel::Hidden);
+                else if (!bRoom && !(GS->Phase == EIslandPhase::Hunting && bRoomCamera))
+                    Panel->Show(EIslandPanel::Hidden);
             }
             UpdateDockCamera(*PC,bRoom);
+            UpdateHuntHandoff(*PC);
             if (GS->Phase==EIslandPhase::Finished) UpdateResultCamera(*PC);
         }
     }
-    UpdateInput(*PC, IsMenuOpen());
+    UpdateInput(*PC, IsMenuOpen() && !bTakingControl);
     const bool bFocus=FSlateApplication::Get().IsActive();
     if (!bFocus && bHadFocus) PC->ClearHeldIslandActions();
     bHadFocus=bFocus;
@@ -404,8 +544,10 @@ void AIslandHUD::DrawHUD()
     auto* PC=Cast<AIslandPlayerController>(GetOwningPlayerController());
     const auto* GS=GetWorld()->GetGameState<AIslandGameState>();
     if (!Canvas || !PC || !GS || bFront) return;
+    if (PC->GetLocalPartyBriefingRound()) return;
+    if (GS->bRoomLobby && !bLegacyProbe) PresentRoomView(*PC);
     const bool bAnonymous = GS->IsIdentityDisguised();
-    if (GS->Phase == EIslandPhase::PartyPlaying || GS->Phase == EIslandPhase::PartyLoading)
+    if (GS->Phase == EIslandPhase::PartyPlaying)
     {
         for (const auto& Entry : GS->PlayerArray)
         {
@@ -414,21 +556,6 @@ void AIslandHUD::DrawHUD()
                 Pawn->SetCrewTint(bAnonymous ? FLinearColor(FColor(143,161,155)) : IslandRules::TeamColor(Crew->Team));
         }
     }
-    const auto Passage=PC->GetPartyTransitionView();
-    const bool bLocalEntry=!Passage.bReturning && (Passage.Phase==EIslandPartyVeil::Closing || Passage.Phase==EIslandPartyVeil::Black);
-    if (GS->bRoomLobby && (GS->Phase==EIslandPhase::PartyLoading || bLocalEntry) && PC->GetHero())
-    {
-        if (!PC->IsPartyTravelLocked() && !IsMenuOpen())
-        {
-            const float S=FMath::Clamp(Canvas->ClipY/720.f,.70f,1.65f);
-            const FString Status=EXPEDITION_TEXT("宝箱已开启 · 仍可移动","Chest opened · You can still move");
-            float W,H;
-            GetTextSize(Status,W,H,GEngine->GetMediumFont(),S);
-            DrawRect(IslandHudColors::Panel,14*S,13*S,W+16*S,H+10*S);
-            DrawText(Status,IslandHudColors::Ink,22*S,18*S,GEngine->GetMediumFont(),S);
-        }
-        return;
-    }
     if (GS->bRoomLobby && GS->Phase==EIslandPhase::Finished && PC->GetTeam()>=0)
     {
         // The result menu occupies the left side. Keep the vault camera visible in the middle.
@@ -436,7 +563,7 @@ void AIslandHUD::DrawHUD()
         if (Canvas->ClipX-FMath::Min(Canvas->ClipX*.48f,262.f*S)-16*S>=500.f) DrawChart(*PC,1.f,true);
         return;
     }
-    if (IsMenuOpen()) return;
+    if (IsMenuOpen() && !bTakingControl) return;
     if (const auto* Pawn=Cast<APartyPawn>(PC->GetPawn()))
     {
         if (GS->Phase==EIslandPhase::PartyPlaying)
@@ -456,7 +583,13 @@ void AIslandHUD::DrawHUD()
                 :FString::Format(EXPEDITION_TEXT("第 {0} 队找到宝藏", "Team {0} found the treasure"), {GS->Winner+1}),IslandHudColors::Ink,20,20,GEngine->GetMediumFont(),1);
         return;
     }
-    DrawHunt(*PC);
+    if (bTakingControl && Canvas->Canvas)
+    {
+        TGuardValue<float> HudOpacity(Canvas->Canvas->AlphaModulate,
+            Canvas->Canvas->AlphaModulate * FMath::SmoothStep(.42f, 1.f, HandoffProgress));
+        DrawHunt(*PC);
+    }
+    else DrawHunt(*PC);
 }
 
 void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
@@ -558,8 +691,7 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     {
         if (!bAnonymous) DrawNearbyCrews(PC,S);
         const auto* Hero = PC.GetHero();
-        if (Hero && Hero->IsMudStunned()) Box(EXPEDITION_TEXT("晕啦！醒来后重新按左键出拳", "Stunned! Press LMB again after recovering"),X,Y+75*S,IslandHudColors::Amber,true);
-        else if (Hero && Hero->IsMudCompact()) Box(EXPEDITION_TEXT("瞄准土壁或脚下，松开左键出拳开路", "Aim at dirt or your feet and release LMB to punch out"),X,Y+75*S,IslandHudColors::Ally,true);
+        if (Hero && Hero->IsMudAnchored()) Box(EXPEDITION_TEXT("左键出拳脱困", "Punch with LMB to break free"),X,Y+75*S,IslandHudColors::Amber,true);
     }
     FVector Rally;
     bool bAtChest;
@@ -612,8 +744,7 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     }
     else if (bExpedition && PC.GetEchoAge() < 1.05)
     {
-        Box(PC.HasStrongEcho() ? EXPEDITION_TEXT("清晰的空响 · 箱子很近", "Strong echo · Chest nearby") : EXPEDITION_TEXT("微弱的空响", "Faint echo"),
-            X,Y+30*S,IslandHudColors::Amber,true);
+        Box(ExcavationEchoCaption(PC), X, Y+30*S, FMath::Lerp(IslandHudColors::Ink, IslandHudColors::Amber, PC.GetEchoProximity()), true);
     }
     else if (bExpedition)
     {
@@ -639,7 +770,7 @@ void AIslandHUD::DrawHunt(AIslandPlayerController& PC)
     {
         if (bExpedition)
         {
-            Box(EXPEDITION_TEXT("凿岩时空响越清，埋箱越近", "A louder echo means a buried chest is closer"),X,H-182*S,IslandHudColors::Amber,true);
+            Box(EXPEDITION_TEXT("朝回音方向挖，越响越近。露出箱盖就能点开", "Dig toward the echo. Louder means closer. Click the exposed lid."),X,H-182*S,IslandHudColors::Amber,true);
             Box(EXPEDITION_TEXT("大奖箱可双人合撬；独自撬锁时，对手可抢一次", "Two teammates secure the treasure lock. A rival can steal a solo lock once."),X,H-148*S,IslandHudColors::Ally,true);
         }
         Box(bExpedition ? EXPEDITION_TEXT("左键 点按出拳，长按蓄力后松开    右键 连续丢    向脚边丢土可垫高", "Tap LMB to punch · Hold to charge, release to strike    Hold RMB to throw    Throw at your feet to climb") : EXPEDITION_TEXT("WASD 移动    空格 跳跃    左键 凿岩    右键 挖脚下", "WASD move    Space jump    LMB break rock    RMB dig down"),X,H-115*S,IslandHudColors::Ink,true);

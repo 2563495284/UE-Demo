@@ -207,7 +207,7 @@ bool APartyVoxelSession::ApplyStructureBrush(const FPartyVoxelChange& Brush)
     for (auto* Part:Parts)
     {
         TArray<int32> Cells;
-        Part->SelectBrush(Point,Normal,62.*PartyPunch::RadiusScale(Brush.Power),40.,false,Cells);
+        Part->SelectBrush(Point,Normal,62.*PartyPunch::RadiusScale(Brush.Power),PartyPunch::DepthCm(Brush.Power),false,Cells);
         Changed |= Part->SetCells(Cells,false);
     }
     if (Changed) UPartyCarvableMesh::DropUnsupported(Parts,[this](FVector P){ return TerrainDensityAt(P)<=2.; });

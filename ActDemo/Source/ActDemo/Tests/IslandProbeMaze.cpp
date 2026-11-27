@@ -5,6 +5,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
+#include "Voxel/VoxelCharacter.h"
 #include "PartyVoxelArena.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -60,20 +61,29 @@ bool InspectLayout(const APartyVoxelSession& Arena, uint32& Digest)
 
 void AIslandProbePeer::ClientCheckMaze_Implementation(int32 Round, int32 Stage, FVector Midpoint, FVector Normal)
 {
-    const auto* PC = Cast<AIslandPlayerController>(GetOwner());
+    auto* PC = Cast<AIslandPlayerController>(GetOwner());
     const auto* Pawn = PC ? Cast<APartyVoxelPawn>(PC->GetPawn()) : nullptr;
     const auto* Game = Pawn ? Pawn->GetSession() : nullptr;
     if (!Game || !Game->IsChaseGame() || Game->GetPhase() != EPartyVoxelPhase::Playing) return;
     if (Stage == 6)
     {
         if (Game->GetRemainingRunners() != 1) return;
+        // A stationary teammate can look sideways while their body still faces the passage.
+        constexpr double SpectatorYawOffset = 85.;
+        if (Game->IsRunner(Pawn->GetSeat()) && !Game->IsCaught(Pawn->GetSeat()))
+            PC->SetControlRotation(FRotator(0., Pawn->GetActorRotation().Yaw + SpectatorYawOffset, 0.));
         if (Game->IsCaught(Pawn->GetSeat()))
         {
             const auto* Watching = Cast<APartyVoxelPawn>(PC->GetViewTarget());
             if (!Watching || Watching->GetSession() != Game || Watching == Pawn || !Game->IsRunner(Watching->GetSeat())
                 || Game->IsCaught(Watching->GetSeat()) || Pawn->GetCharacterMovement()->MovementMode != MOVE_None) return;
-            UE_LOG(LogTemp, Display, TEXT("MAZE_QA_SPECTATE round=%d caught=%d watching=%d frozen=1"),
-                Round, Pawn->GetSeat(), Watching->GetSeat());
+            FVector Eye;
+            FRotator View;
+            PC->GetPlayerViewPoint(Eye, View);
+            const double Yaw = FMath::FindDeltaAngleDegrees(Watching->GetActorRotation().Yaw, View.Yaw);
+            if (FMath::Abs(Yaw - SpectatorYawOffset) > 3.) return;
+            UE_LOG(LogTemp, Display, TEXT("MAZE_QA_SPECTATE round=%d caught=%d watching=%d frozen=1 view_body_yaw=%.2f"),
+                Round, Pawn->GetSeat(), Watching->GetSeat(), Yaw);
         }
     }
     else
@@ -184,10 +194,26 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
     const auto Capture = [&](APartyVoxelPawn& Pawn) { Peer->ClientGameTool(Pawn.GetActorLocation(), true); };
     const FVector AlongWall=FVector::CrossProduct(MazeWallNormal,FVector::UpVector);
     const FVector NarrowHole=AlongWall*195.;
+    const auto CheckCut = [&](FVector Center, const TCHAR* Grade, double MinDepth, double MaxDepth)
+    {
+        const double Fresh = MazeWallDepth(Arena,Center+FVector(0.,0.,235.),MazeWallNormal);
+        const double Back = MazeWallDepth(Arena,Center,MazeWallNormal);
+        const double Cut = Back-Fresh;
+        Require(Fresh>=0. && Back>=0. && Cut>=MinDepth && Cut<=MaxDepth,
+            TEXT("the first maze punch leaves a back wall at its charge-dependent depth"));
+        UE_LOG(LogTemp,Display,TEXT("MAZE_PUNCH_DENT round=%d grade=%s depth_cm=%.1f"),GameCount+1,Grade,Cut);
+    };
     switch (GameAction)
     {
     case 0:
     {
+        for (int32 Seat = 0; Seat < Players.Num(); ++Seat)
+        {
+            const auto* IslandHero = CastChecked<AVoxelCharacter>(OriginalPawns[Seat].Get());
+            const auto* Player = CastChecked<APartyVoxelPawn>(Players[Seat]->GetPawn());
+            Require(FMath::IsNearlyEqual(Player->GetCharacterMovement()->MaxWalkSpeed, IslandHero->GetCharacterMovement()->MaxWalkSpeed),
+                TEXT("each runner and hunter retains their island movement speed"));
+        }
         TInlineComponentArray<UStaticMeshComponent*> Meshes(&Arena);
         auto* const* Chosen = Meshes.FindByPredicate([](const UStaticMeshComponent* Mesh)
         { return Mesh->ComponentHasTag(TEXT("MazeWall")) && Mesh->IsVisible() && Mesh->IsCollisionEnabled(); });
@@ -227,6 +253,7 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
         if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
         Require(HasMazeWall(Arena,MazeWallCenter,MazeWallNormal),TEXT("first full punch retains a solid back wall"));
         if (!Observe(10) || !CaptureMazeStage(Arena,10,TEXT("MazePunchDent"))) return;
+        CheckCut(MazeWallCenter,TEXT("full"),42.,52.);
         MazeLastEdit=Arena.GetAppliedEditCount();
         Peer->ClientTryArenaPunch(GameCount+1,4,MazeWallCenter);
         GameAction=3;
@@ -291,6 +318,7 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
     case 18:
         if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
         Require(HasMazeWall(Arena,MazeWallCenter-NarrowHole,MazeWallNormal),TEXT("half charge dents an untouched part of the wall"));
+        CheckCut(MazeWallCenter-NarrowHole,TEXT("half"),33.,42.);
         // Move to untouched stone on the same slab. A small through-hole should transmit a tag
         // ray without allowing the actual character capsule to follow.
         Position(*Hunter,NarrowHole-MazeWallNormal*165.);
@@ -308,6 +336,7 @@ void AIslandProbe::PlayMazeChase(APartyVoxelSession& Arena)
         return;
     case 14:
         if (Arena.GetAppliedEditCount()==MazeLastEdit) return;
+        CheckCut(MazeWallCenter+NarrowHole,TEXT("light"),24.,33.);
         MazeBlockedAt=FPlatformTime::Seconds();
         ++GameAction;
         return;

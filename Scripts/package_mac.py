@@ -58,7 +58,16 @@ def check_eos_package(app, unreal_pak, scratch, expected):
 
 
 def check_island_content(app, unreal_pak, scratch):
-    required = {"treasureisland/l_islandfront.umap", "treasureisland/l_expeditionisland.umap",
+    # Media Framework opens these tutorials as ordinary files in the signed bundle.
+    movies = Path("Content/Movies")
+    for feature in (ROOT / "ActDemo/Plugins/GameFeatures").glob("Party*/*.uplugin"):
+        relative = movies / (feature.stem + ".mp4")
+        source = ROOT / "ActDemo" / relative
+        staged = app / "Contents/UE/ActDemo" / relative
+        if not source.is_file() or not staged.is_file() or staged.read_bytes() != source.read_bytes():
+            raise RuntimeError(f"Missing or stale packaged minigame tutorial: {relative}")
+    required = {"actdemo/audio/ms_excavationecho.uasset", "actdemo/audio/rockecho.uasset",
+                "treasureisland/l_islandfront.umap", "treasureisland/l_expeditionisland.umap",
                 "treasureisland/fx/m_islandpassage.uasset", "treasureisland/fx/m_islandground.uasset",
                 "treasureisland/fx/m_arenaground.uasset", "treasureisland/art/m_lagoon.uasset",
                 "treasureisland/art/harbour/sm_reefshelf.uasset", "treasureisland/art/neutral/sm_windcanvas.uasset",

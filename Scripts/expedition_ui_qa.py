@@ -53,15 +53,21 @@ def recording_encoder(override=None):
     raise RuntimeError("No working ffmpeg video encoder. Supply --ffmpeg /path/to/ffmpeg or set FFMPEG_BINARY.")
 
 
-def encode_replay(directory, role, destination, encoder=None, audio=None):
+def encode_replay(directory, role, destination, encoder=None, audio=None, departure=False, source=None):
     binary, codec_options = encoder or recording_encoder()
-    frames = sorted((directory / (role + "_frames")).glob("*.png"))
+    folder = role + ("_frames_viewport" if source == "game_viewport" else "_frames")
+    frames = sorted((directory / folder).glob("*.png"))
     if len(frames) < 5:
         raise RuntimeError("Not enough viewport frames for " + role)
     lines = ["ffconcat version 1.0"]
     for first, second in zip(frames, frames[1:]):
-        lines.extend([f"file '{first.name}'", f"duration {(int(second.stem) - int(first.stem)) / 1000:.3f}"])
+        lines.append(f"file '{first.name}'")
+        if departure:
+            lines.append("option framerate 1000")
+        lines.append(f"duration {(int(second.stem) - int(first.stem)) / 1000:.3f}")
     lines.append(f"file '{frames[-1].name}'")
+    if departure:
+        lines.append("option framerate 1000")
     manifest = frames[0].parent / "timing.ffconcat"
     manifest.write_text("\n".join(lines) + "\n")
     movie = destination / (role + ".mp4")
@@ -71,10 +77,59 @@ def encode_replay(directory, role, destination, encoder=None, audio=None):
         # The mixer starts with the camera change. The first captured frame may arrive later.
         audio_input = ["-ss", f"{int(frames[0].stem) / 1000:.3f}", "-i", str(audio)]
         audio_output = ["-map", "0:v", "-map", "1:a", "-af", "apad", "-c:a", "aac", "-shortest"]
-    subprocess.run([binary, "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "1",
-                    "-i", str(manifest), *audio_input, "-vf", "fps=24,format=yuv420p", *codec_options, *audio_output,
+    video = ["-vf", "format=yuv420p", "-fps_mode", "vfr"] if departure else ["-vf", "fps=24,format=yuv420p"]
+    subprocess.run([binary, "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0" if departure else "1",
+                    "-i", str(manifest), *audio_input, *video, *codec_options, *audio_output,
                     "-movflags", "+faststart", str(movie)], check=True)
     return movie.name
+
+
+def inspect_departure(directory, role, log):
+    from PIL import Image, ImageChops, ImageStat
+    count = re.search(r"ISLAND_UI_DEPARTURE_FRAMES saved=(\d+) source=(\w+)", log)
+    if not count:
+        raise RuntimeError(f"{role} did not report its recording source")
+    folder = role + ("_frames_viewport" if count[2] == "game_viewport" else "_frames")
+    frames = sorted((directory / folder).glob("*.png"))
+    if len(frames) != int(count[1]) or len(frames) < 5:
+        raise RuntimeError(f"{role} did not capture its window throughout departure")
+    stray = []
+    checker = []
+    caption_sizes = set()
+    detailed = 0
+    for frame in frames:
+        with Image.open(frame) as image:
+            rgb = image.convert("RGB")
+        sample = rgb.resize((96, 54))
+        detailed += min(ImageStat.Stat(sample).stddev) > 10
+        # The default spawn camera briefly showed open blue-gray water with a black right pillar.
+        water = ImageStat.Stat(sample.crop((43, 38, 72, 50)))
+        r, g, b = water.mean
+        black_edge = max(ImageStat.Stat(sample.crop((93, 15, 96, 49))).mean) < 8
+        sky = ImageStat.Stat(sample.crop((43, 13, 72, 28))).mean
+        if black_edge and max(water.stddev) < 12 and 65 < r < 170 and g > r + 12 and b > g + 5 and min(sky) > r + 30:
+            stray.append(frame.name)
+        # The untextured terrain covered the center of the dock view in repeating gray squares.
+        ground = sample.crop((34, 11, 79, 31))
+        colors = list(ground.getdata())
+        gray = sum(max(c)-min(c) < 28 for c in colors)
+        if gray > .94 * len(colors) and min(ImageStat.Stat(ground).mean) > 120:
+            luma = ground.convert("L")
+            step = ImageChops.difference(luma.crop((1, 1, 45, 20)), luma.crop((0, 0, 44, 19)))
+            if ImageStat.Stat(step).mean[0] > 3.5:
+                checker.append(frame.name)
+        # Measure actual caption ink only when the whole image outside the center matches the matte.
+        if max(ImageStat.Stat(sample.crop((0, 0, 96, 12))).stddev) < 1:
+            matte = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
+            ink = ImageChops.difference(rgb, matte).convert("L").point(lambda value: 255 if value > 25 else 0).getbbox()
+            if ink and rgb.width * .2 < ink[0] < ink[2] < rgb.width * .8 and rgb.height * .4 < ink[1] < ink[3] < rgb.height * .6:
+                caption_sizes.add((ink[2]-ink[0], ink[3]-ink[1]))
+    times = [int(frame.stem) for frame in frames]
+    if detailed < 5 or times[-1]-times[0] < 3000:
+        raise RuntimeError(f"{role} did not record recognizable game scenes across the countdown")
+    return dict(source=count[2], frames=len(times), duration_ms=times[-1]-times[0],
+                longest_present_interval_ms=max(b-a for a, b in zip(times, times[1:])),
+                default_camera_frames=stray, untextured_dock_frames=checker, caption_ink_sizes_px=sorted(caption_sizes))
 
 
 def verify_chart_walk(directory, role, log, foreground):
@@ -133,6 +188,8 @@ def main():
     parser.add_argument("--chart-move", action="store_true", help="check mouse look and held W across a Tab press and release, including the rendered player marker")
     parser.add_argument("--shots", action="store_true")
     parser.add_argument("--record", action="store_true", help="record the game viewport and encode a replay using ffmpeg")
+    parser.add_argument("--departure", action="store_true",
+                        help="record every presented game-window frame from startup through crew control (solo or pair)")
     parser.add_argument("--ffmpeg", help="path to a working ffmpeg executable for --record")
     parser.add_argument("--output", type=Path, default=ROOT / "ActDemo/Saved/ExpeditionUI")
     parser.add_argument("--viewport", metavar=("WIDTH", "HEIGHT"), type=int, nargs=2, default=(1280, 720),
@@ -140,6 +197,10 @@ def main():
     parser.add_argument("--port", type=int, default=7817)
     parser.add_argument("--seed", type=int, help="Replay a known layout in the chart or full walking scenario")
     args = parser.parse_args()
+    if args.departure:
+        if (args.scenario not in ("solo", "pair") or args.foreground or args.perspective
+                or args.chart_move or args.shots or args.record):
+            parser.error("--departure requires a solo or pair run and performs its own recording")
     internet = args.scenario == "internet"
     if internet:
         if not args.role or (args.role in ("host","guest") and not args.room_name):
@@ -161,7 +222,7 @@ def main():
         args.shots = True
     if args.scenario == "chart":
         args.shots = True
-    encoder = recording_encoder(args.ffmpeg) if args.record else None
+    encoder = recording_encoder(args.ffmpeg) if args.record or args.departure else None
     # One directory per run keeps earlier captures and exposes the exact processes/logs under test.
     scenario_label = f"internet-{args.role}" if internet else args.scenario
     directory = args.output.resolve() / (scenario_label + ("-weak-" if args.weak else "-normal-") + time.strftime("%Y%m%d-%H%M%S"))
@@ -227,6 +288,8 @@ def main():
         if args.shots:
             parser.error("Use separate runs for recording and named screenshots.")
         shared.append("-IslandUIRecord")
+    if args.departure:
+        shared.append("-IslandUIDeparture")
     if args.weak:
         shared += ["-PktLag=40", "-PktLoss=2"]
 
@@ -332,7 +395,7 @@ def main():
                 for role, log in logs.items():
                     if args.weak and ("PktLag set to 40" not in log or "PktLoss set to 2" not in log):
                         raise RuntimeError("Packet simulation was not active on " + role)
-                    needs_chart = not (role.startswith(("Internet","Directory")) or role in ("Recovery", "Walkthrough", "Settings", "SettingsReload", "Character"))
+                    needs_chart = not (args.departure or role.startswith(("Internet","Directory")) or role in ("Recovery", "Walkthrough", "Settings", "SettingsReload", "Character"))
                     if "ISLAND_UI_PRESS" not in log or (needs_chart and "ISLAND_UI_CHART" not in log):
                         raise RuntimeError("Actual UI and chart input evidence missing on " + role)
                     if args.perspective:
@@ -369,6 +432,17 @@ def main():
                                    or "ISLAND_UI_TEXT tag=Island.DecoyCount value=0 matches=1" not in logs["Host"]
                                    or "ready_cancelled=1 team_switch=1 settings_received=1 visible_decoys=0" not in logs["Guest"]):
                     raise RuntimeError("Missing confirmed room edit or guest team/readiness transition")
+                if args.edges:
+                    host = logs["Host"]
+                    cancelled = re.search(r"ISLAND_UI_EDGE countdown_cancelled=1 staged=([1-9]\d*) remaining=0", host)
+                    restarted = re.search(r"ISLAND_UI_EDGE restarted=1 routes=(\d+) facilities=(\d+) visible=(\d+)", host)
+                    routes = re.findall(r"ROUTE_SCENERY_LAYOUT sites=(\d+)", host)
+                    facilities = re.findall(r"NEUTRAL_LAYOUT count=(\d+) routes=", host)
+                    if (not cancelled or not restarted or len(routes) < 2 or len(facilities) < 2
+                            or restarted[1] != routes[-1] or restarted[2] != facilities[-1]
+                            or int(restarted[3]) != int(routes[-1]) + int(facilities[-1])
+                            or "ISLAND_UI_EDGE countdown_cancelled=1 staged=0 remaining=0" not in logs["Guest"]):
+                        raise RuntimeError("Countdown cancellation must clear the first layout and reveal exactly the new layout")
                 if args.scenario == "recovery" and ("join_failed=1 search_focus=1" not in logs["Recovery"]
                                                     or "retry_ok=1" not in logs["Recovery"]):
                     raise RuntimeError("Recovery did not restore search focus and allow a successful retry")
@@ -399,6 +473,9 @@ def main():
                                 raise RuntimeError(f"Missing {view} screenshot on {role}")
                 result = dict(scenario=args.scenario, edges=args.edges, simulated_weak_network=args.weak, roles=roles, events=events,
                               captures=sorted(p.name for p in directory.glob("*.png")))
+                if args.edges:
+                    result["countdown_retry"] = dict(cancelled_staged=int(cancelled[1]), remaining_after_cancel=0,
+                                                      restarted_routes=int(restarted[1]), restarted_facilities=int(restarted[2]))
                 if internet:
                     result.update(room=args.room_name, role=args.role, force_relay=args.force_relay)
                     if args.role == "directory":
@@ -407,10 +484,17 @@ def main():
                     result["chart_walk"] = {role: verify_chart_walk(directory, role, logs[role], args.foreground) for role in roles}
                 if args.foreground:
                     result["foreground_verified"] = sorted(activated)
-                if args.record:
-                    result["recordings"] = [encode_replay(game_output, role, directory, encoder) for role in roles]
+                if args.departure:
+                    result["departure"] = {role: inspect_departure(game_output, role, logs[role]) for role in roles}
+                if args.record or args.departure:
+                    result["recordings"] = [encode_replay(game_output, role, directory, encoder, departure=args.departure,
+                                                         source=result["departure"][role]["source"] if args.departure else None)
+                                            for role in roles]
                 (directory / "summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
                 print(directory / "summary.json", flush=True)
+                if args.departure and any(run["default_camera_frames"] or run["untextured_dock_frames"]
+                                          for run in result["departure"].values()):
+                    raise RuntimeError("Detected frames with the default ocean camera or untextured dock; see summary.json")
                 break
             time.sleep(.2)
         else:

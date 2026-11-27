@@ -1,6 +1,8 @@
 #include "Tests/IslandUIProbe.h"
 #if !UE_BUILD_SHIPPING
+#include "Tests/IslandViewportRecording.h"
 #include "Island/ExpeditionDock.h"
+#include "Island/IslandNeutralProp.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandRoomPanel.h"
 #include "Island/IslandClientSettings.h"
@@ -9,8 +11,10 @@
 #include "Island/IslandState.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
+#include "Voxel/IslandRouteVoxel.h"
 #include "PartyCrewRig.h"
 #include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/GameInstance.h"
 #include "Engine/StaticMesh.h"
@@ -69,8 +73,9 @@ namespace
     {
         // Internet probes can run independently on background monitors while the user keeps playing.
         // Enter invokes the focused button's normal Slate callback without moving the system cursor.
-        static const bool bInternetQA=FParse::Param(FCommandLine::Get(),TEXT("IslandUIInternet"));
-        if (bInternetQA) bPointer=false;
+        static const bool bBackgroundKeys = FParse::Param(FCommandLine::Get(), TEXT("IslandUIInternet"))
+            || FParse::Param(FCommandLine::Get(), TEXT("IslandUIDeparture"));
+        if (bBackgroundKeys) bPointer=false;
         auto Button=FindButton(Panel,Tag,Label);
         if (!Button || !Button->IsEnabled()) { InputDiagnostic(Tag,TEXT("missing_or_disabled")); return false; }
         auto& Slate=FSlateApplication::Get();
@@ -220,6 +225,86 @@ namespace
             ++Stage;
         }
         return Stage==4;
+    }
+
+    struct FDepartureObjects
+    {
+        int32 Routes = 0;
+        int32 Facilities = 0;
+        int32 Visible = 0;
+        explicit FDepartureObjects(UWorld* World)
+        {
+            for (TActorIterator<AIslandRouteVoxel> It(World); It; ++It)
+                if (!It->IsNetStartupActor()) { ++Routes; Visible += !It->IsHidden(); }
+            for (TActorIterator<AIslandNeutralProp> It(World); It; ++It)
+                if (!It->IsNetStartupActor()) { ++Facilities; Visible += !It->IsHidden(); }
+        }
+    };
+
+    void TraceDepartureCamera(const AIslandPlayerController& PC, bool bFinal)
+    {
+        const auto* State = PC.GetWorld()->GetGameState<AIslandGameState>();
+        if (!State || State->Phase != EIslandPhase::Hunting || !PC.GetPawn() || !PC.PlayerCameraManager) return;
+        const FRotator Control = PC.GetControlRotation();
+        const FRotator Camera = PC.PlayerCameraManager->GetCameraRotation();
+        const FVector Pawn = PC.GetPawn()->GetActorLocation();
+        const bool bInput = PC.IsVoxelInputEnabled();
+        static bool bLogged = false, bPreviousInput = false;
+        static FRotator PrevControl, PrevCamera;
+        static FVector PrevPawn;
+        if (bFinal || !bLogged || bInput != bPreviousInput || !Control.Equals(PrevControl, 2.)
+            || !Camera.Equals(PrevCamera, 2.) || !Pawn.Equals(PrevPawn, 30.))
+        {
+            UE_LOG(LogTemp, Display, TEXT("ISLAND_UI_DEPARTURE_VIEW input=%d final=%d control=%s camera=%s pawn=%s"),
+                bInput, bFinal, *Control.ToCompactString(), *Camera.ToCompactString(), *Pawn.ToCompactString());
+            PrevControl = Control;
+            PrevCamera = Camera;
+            PrevPawn = Pawn;
+            bLogged = true;
+            bPreviousInput = bInput;
+        }
+    }
+
+    bool CancelFirstDeparture(AIslandPlayerController& PC, const TSharedRef<SIslandRoomPanel>& Panel,
+                              AIslandGameState& GS, bool bGuest, int32 Want)
+    {
+        static int32 Stage = 0;
+        static int32 Staged = 0;
+        if (Stage == 3) return true;
+        if (Stage == 0)
+        {
+            if (Panel->Current() != EIslandPanel::Lobby || GS.JoinedCount < Want) return false;
+            if (bGuest ? Press(Panel, "Island.Ready", false) : GS.CanLaunch() && Press(Panel, "Island.Start", false))
+                Stage = 1;
+            return false;
+        }
+        if (GS.Phase == EIslandPhase::Starting)
+        {
+            if (!bGuest)
+            {
+                const FDepartureObjects Objects(PC.GetWorld());
+                Staged = FMath::Max(Staged, Objects.Routes + Objects.Facilities);
+                if (Objects.Visible)
+                {
+                    UE_LOG(LogTemp, Error, TEXT("ISLAND_UI_FAIL scenery visible during countdown=%d"), Objects.Visible);
+                }
+            }
+            else if (Stage == 1 && GS.StartAtServerTime - GS.GetServerWorldTimeSeconds() < 1.9
+                && Press(Panel, "Island.Ready", false))
+            {
+                Stage = 2;
+            }
+            return false;
+        }
+        if (GS.Phase != EIslandPhase::Waiting || (bGuest ? Stage != 2 : Staged == 0)) return false;
+        const auto* Self = PC.GetPlayerState<AIslandPlayerState>();
+        if (!Self || (bGuest && Self->bRoomReady)) return false;
+        const FDepartureObjects Remaining(PC.GetWorld());
+        // The replicated cancellation and destruction can arrive in separate guest updates.
+        if (Remaining.Routes || Remaining.Facilities) return false;
+        UE_LOG(LogTemp, Display, TEXT("ISLAND_UI_EDGE countdown_cancelled=1 staged=%d remaining=0"), Staged);
+        Stage = 3;
+        return true;
     }
 
     void Key(AIslandPlayerController& PC,FKey Button,bool Down)
@@ -372,9 +457,108 @@ namespace
     }
 }
 
+// The existing automated hunts now read and confirm the same page as a player.
+// NullRHI peers have no painted hit grid, but still submit through their own controller.
+static void DrivePartyBriefing(AIslandPlayerController& PC, const TSharedRef<SIslandRoomPanel>& Panel)
+{
+    auto* GS = PC.GetWorld()->GetGameState<AIslandGameState>();
+    const auto* Self = PC.GetPlayerState<AIslandPlayerState>();
+    const uint32 Round = PC.GetLocalPartyBriefingRound();
+    if (!GS || !Self || !Round) return;
+    const auto& Members = PC.GetPartyBriefingMembers();
+    const auto* Member = Members.FindByPredicate([Self](const auto& Entry)
+        { return Entry.PlayerId == Self->GetPlayerId(); });
+    if (!Member) return;
+
+    static TWeakObjectPtr<AIslandGameState> PreviousState;
+    static uint32 PreviousRound = 0;
+    static double OpenedAt = 0.;
+    static bool bShot = false, bEntryShot = false, bWaitingShot = false, bSubmitted = false;
+    static int32 PlaybackChecks = 0;
+    static const bool bHeadless = FParse::Param(FCommandLine::Get(), TEXT("nullrhi"));
+    static const bool bForce = FParse::Param(FCommandLine::Get(), TEXT("PartyBriefForceQA"));
+    static const bool bHold = FParse::Param(FCommandLine::Get(), TEXT("PartyBriefHoldQA"));
+    static const bool bInspect = FParse::Param(FCommandLine::Get(), TEXT("PartyBriefInspectQA"));
+    const FName Feature = PC.GetLocalPartyBriefingFeature();
+    if (PreviousState.Get() != GS || PreviousRound != Round)
+    {
+        PreviousState = GS;
+        PreviousRound = Round;
+        OpenedAt = FPlatformTime::Seconds();
+        bShot = bEntryShot = bWaitingShot = bSubmitted = false;
+        PlaybackChecks = 0;
+        UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_PAGE round=%u feature=%s host=%d players=%d"), Round,
+            *Feature.ToString(), Member->bHost, Members.Num());
+        if (bInspect)
+        {
+            PC.ServerAgreeParty(Round - 1);
+            if (!Member->bHost) PC.ServerForceStartParty(Round);
+        }
+    }
+    const double Elapsed = FPlatformTime::Seconds() - OpenedAt;
+    if (!bEntryShot && Round == 1 && !bHeadless && Elapsed > .12 && FParse::Param(FCommandLine::Get(), TEXT("IslandScreenshot")))
+    {
+        FString Directory;
+        if (FParse::Value(FCommandLine::Get(), TEXT("FieldShotsDir="), Directory))
+            FScreenshotRequest::RequestScreenshot(Directory / TEXT("PartyEntry.png"), true, false);
+        bEntryShot = true;
+    }
+    if (bInspect && !bHeadless && PlaybackChecks < 2)
+    {
+        const FString Label = PlaybackChecks == 0 ? EXPEDITION_TEXT("暂停演示", "Pause demo") : EXPEDITION_TEXT("播放演示", "Play demo");
+        if (Elapsed > .6 + .3 * PlaybackChecks && Press(Panel, TEXT("Island.PartyBrief.Demo"), false, Label))
+            ++PlaybackChecks;
+        return;
+    }
+    if (bInspect && !bHeadless && !bShot && Elapsed > 1.2)
+    {
+        FString Directory;
+        if (FParse::Value(FCommandLine::Get(), TEXT("PartyBriefShots="), Directory))
+        {
+            IFileManager::Get().MakeDirectory(*Directory, true);
+            FScreenshotRequest::RequestScreenshot(Directory / FString::Printf(TEXT("Brief-%u-%s.png"), Round,
+                *Feature.ToString()), true, false);
+        }
+        bShot = true;
+    }
+    if (bInspect && !bHeadless && bShot && !bWaitingShot && GS->Phase == EIslandPhase::PartyBriefing
+        && GS->PartyBriefingRound == Round && (GS->bPartyForceStartRequested || !Members.ContainsByPredicate(
+            [](const auto& Participant) { return !Participant.bAgreed; }))
+        && Members.ContainsByPredicate([](const auto& Participant) { return !Participant.bAssetsReady; }))
+    {
+        FString Directory;
+        if (FParse::Value(FCommandLine::Get(), TEXT("PartyBriefShots="), Directory))
+            FScreenshotRequest::RequestScreenshot(Directory / FString::Printf(TEXT("Waiting-%u-%s.png"), Round,
+                *Feature.ToString()), true, false);
+        bWaitingShot = true;
+    }
+    if (Member->bAgreed || bSubmitted || bHold || (bForce && !Member->bHost)) return;
+    if (Round == 1 && FParse::Param(FCommandLine::Get(), TEXT("PartyBriefReadQA")) && Elapsed < 50.) return;
+    if (Elapsed < (bInspect ? (Member->bHost ? 4.0 : 2.4) : .35)) return;
+    if (bHeadless)
+    {
+        if (bForce) PC.ServerForceStartParty(Round);
+        else PC.ServerAgreeParty(Round);
+        bSubmitted = true;
+    }
+    else
+    {
+        const FName Button = bForce ? TEXT("Island.PartyBrief.Force") : TEXT("Island.PartyBrief.Agree");
+        bSubmitted = Press(Panel, Button, false);
+    }
+    if (bSubmitted)
+        UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_INPUT round=%u forced=%d slate=%d"), Round, bForce, !bHeadless);
+}
+
 void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomPanel>& Panel)
 {
     static const FString Role=[] {FString R;FParse::Value(FCommandLine::Get(),TEXT("IslandUIProbe="),R);return R;}();
+    static const bool bHuntQA = FParse::Param(FCommandLine::Get(), TEXT("IslandQA"));
+    if ((!Role.IsEmpty() || bHuntQA) && Panel->Current() == EIslandPanel::PartyBrief)
+    {
+        DrivePartyBriefing(PC, Panel);
+        return;
+    }
     if (Role.IsEmpty()) return;
     static double PreviousFrame=0.0;
     static double StartClicked=0.0;
@@ -387,6 +571,8 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     static double LastChange=FPlatformTime::Seconds();
     static bool Done=false;
     if (Done) return;
+    static const bool bDeparture=FParse::Param(FCommandLine::Get(),TEXT("IslandUIDeparture"));
+    if (bDeparture) TraceDepartureCamera(PC, false);
     const double Now=FPlatformTime::Seconds();
     if (PreviousFrame>0.0) FrameMs.Add((Now-PreviousFrame)*1000.);
     PreviousFrame=Now;
@@ -397,7 +583,7 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     const auto Page=Panel->Current();
     // A real recording needs rendered, readable pages before the next input is dispatched.
     static const bool bRecording=FParse::Param(FCommandLine::Get(),TEXT("IslandUIRecord"));
-    if ((bRecording || bShots) && Page!=EIslandPanel::Hidden)
+    if ((bRecording || bDeparture || bShots) && Page!=EIslandPanel::Hidden)
     {
         static TWeakObjectPtr<UWorld> SeenWorld;
         static EIslandPanel SeenPage=EIslandPanel::Hidden;
@@ -845,7 +1031,8 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     }
     if (bEdges && Step==1 && Guest && Page==EIslandPanel::Search && Session && !CancelThenSearch(Panel,*Session)) return;
     if (bEdges && Step==2 && GS && !RoomEdits(PC,Panel,*GS,Guest,Want)) return;
-    if (Role == TEXT("Solo") && (Step == 2 || Step == 7))
+    if (bEdges && Step==2 && GS && !CancelFirstDeparture(PC,Panel,*GS,Guest,Want)) return;
+    if (!bDeparture && Role == TEXT("Solo") && (Step == 2 || Step == 7))
     {
         // A room member and a player in a live hunt must be able to inspect local settings and return.
         static int32 CheckedStep = -1;
@@ -909,11 +1096,26 @@ void TickIslandUIProbe(AIslandPlayerController& PC,const TSharedRef<SIslandRoomP
     }
     else if (Step==3 && GS && GS->Phase==EIslandPhase::Hunting && PC.IsVoxelInputEnabled() && PC.GetViewTarget()==PC.GetPawn() && Page==EIslandPanel::Hidden)
     {
+        if (bEdges && !Guest)
+        {
+            const FDepartureObjects Objects(PC.GetWorld());
+            UE_LOG(LogTemp, Display, TEXT("ISLAND_UI_EDGE restarted=1 routes=%d facilities=%d visible=%d"),
+                Objects.Routes, Objects.Facilities, Objects.Visible);
+        }
         if (bChartWalk) UE_LOG(LogTemp, Display, TEXT("ISLAND_UI_MOUSE_BASELINE_READY"));
         Playable=Now; Next=Now+.75; Advance();
     }
     else if (Step==4)
     {
+        if (bDeparture)
+        {
+            TraceDepartureCamera(PC, true);
+            FinishIslandDepartureRecording();
+            UE_LOG(LogTemp, Display, TEXT("ISLAND_UI_DONE role=%s departure_control=1 to_control_ms=%.3f"),
+                *Role, (Playable-StartClicked)*1000.);
+            Done=true;
+            return;
+        }
         if (bViews && !CheckViews(PC,Want,Shot)) return;
         if (bChartWalk)
         {

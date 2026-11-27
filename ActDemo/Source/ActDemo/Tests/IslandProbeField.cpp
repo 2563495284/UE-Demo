@@ -6,6 +6,7 @@
 #include "InputKeyEventArgs.h"
 #include "HAL/FileManager.h"
 #include "Island/ExpeditionMudBall.h"
+#include "Island/ExpeditionBodyMud.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
@@ -99,6 +100,12 @@ void AIslandProbePeer::ClientFieldRally_Implementation()
     PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::G, IE_Pressed, 1.f));
     PC->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::G, IE_Released, 0.f));
     UE_LOG(LogTemp, Display, TEXT("FIELD_QA_RALLY_INPUT"));
+}
+
+void AIslandProbePeer::ClientFieldEchoStrike_Implementation(int32 Trial)
+{
+    UE_LOG(LogTemp, Display, TEXT("FIELD_QA_ECHO_STRIKE trial=%d"), Trial);
+    CastChecked<AIslandPlayerController>(GetOwner())->SubmitEdit(EVoxelAction::Punch, -FVector::UpVector);
 }
 
 void AIslandProbePeer::TickFieldInput()
@@ -215,49 +222,173 @@ void AIslandProbe::StartFieldCheck(double Now)
     SetFieldStage(EFieldStep::Aim, Now);
 }
 
-void AIslandProbe::BeginLockCheck(double Now)
+bool AIslandProbe::BeginLockCheck(double Now)
 {
-    const FVector Chest = Mode->HiddenLayout.GetCenter(NextDig);
-    const FVector Offsets[] = {{-30, 52, 62}, {-25,-48,62}, {46,0,55}};
     const auto& Players = Mode->GetPlayers();
-    // Probe the actual excavated walls. The deeper vault can have an uneven rim on
-    // one side; rotate all three poses together so the rival can still target either worker.
-    for (const double Height : {0., 24., -16., 44.})
+    auto* Vault = Mode->Exposed[NextDig].Get();
+    auto* Host = CastChecked<AIslandPlayerController>(Players[0]);
+    auto* Hero = Host->GetHero();
+    const auto* Capsule = Hero->GetCapsuleComponent();
+    const auto* Terrain = Mode->GetTerrain();
+    const FVector Chest = Vault->GetActorLocation();
+    const FVector Lid = Chest + IslandRules::ClosedLidCenter;
+    const FVector EyeOffset = Hero->GetAimOrigin() - Hero->GetActorLocation();
+    const FVector StartPose = Hero->GetActorLocation();
+    const FCollisionQueryParams Query(SCENE_QUERY_STAT(FieldLockPoses), false, Hero);
+    const FCollisionShape Shape = Capsule->GetCollisionShape();
+    const FCollisionResponseParams Responses(Capsule->GetCollisionResponseToChannels());
+
+    // Record a real line of sight on the first exposed frame, before enlarging the pit for the contest.
+    const auto SeeFirstLid = [&](FVector Eye)
+    {
+        if (bFieldLidSighted) return;
+        for (double X = -44.; X <= 44.; X += 11.)
+            for (double Y = -32.; Y <= 32.; Y += 8.)
+            {
+                const FVector End = Lid + FVector(X,Y,-5.);
+                FHitResult Sight;
+                if (!GetWorld()->LineTraceSingleByChannel(Sight, Eye, End, ECC_Visibility, Query) || Sight.GetActor() != Vault) continue;
+                bFieldLidSighted = true;
+                const bool bCovered = !Terrain->IsVolumeClear(FBox::BuildAABB(Chest, IslandRules::ChestExtent));
+                UE_LOG(LogTemp, Display, TEXT("FIELD_QA_FIRST_LID sight=1 body_covered=%d distance_cm=%.1f"), bCovered, Sight.Distance);
+                return;
+            }
+    };
+    SeeFirstLid(Hero->GetAimOrigin());
+
+    TArray<FVector> Stands;
+    for (double Radius : {45., 75., 105., 135., 165.})
     {
         for (int32 Heading = 0; Heading < 24; ++Heading)
         {
-            bool bReachable = true;
-            for (int32 Seat = 0; Seat < Peers.Num(); ++Seat)
+            const double Angle = Heading * UE_TWO_PI / 24.;
+            const FVector Column = Chest + Radius * FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.);
+            FHitResult Floor;
+            if (!GetWorld()->SweepSingleByChannel(Floor, Column + FVector(0,0,1400.), Column - FVector(0,0,900.),
+                FQuat::Identity, Capsule->GetCollisionObjectType(), Shape, Query, Responses)
+                || Floor.bStartPenetrating || !Hero->GetCharacterMovement()->IsWalkable(Floor)) continue;
+            const FVector Stand = Floor.Location + FVector(0,0,3.);
+            const FVector Eye = Stand + EyeOffset;
+            SeeFirstLid(Eye);
+            if (Vault->GetInteractionDistanceSquared(Eye) > FMath::Square(IslandRules::OpenReach)) continue;
+            Hero->TeleportTo(Stand, FRotator::ZeroRotator, false, true);
+            FVector Target;
+            if (Vault->IsReachableFrom(*Hero,&Target) && Host->GetChestAlongAim((Target-Eye).GetSafeNormal()) == Vault)
+                Stands.Add(Stand);
+        }
+    }
+    Hero->TeleportTo(StartPose, FRotator::ZeroRotator, false, true);
+    if (!bFieldLidSighted) { Require(false, TEXT("the newly exposed lid is visible before any further punch")); return false; }
+
+    for (const FVector Rival : Stands)
+    {
+        TArray<FVector> Workers;
+        for (const FVector Stand : Stands)
+        {
+            const double Separation = FVector::Dist2D(Rival, Stand);
+            if (Separation < 82. || Separation > 185. || FMath::Abs(Rival.Z-Stand.Z)>65.) continue;
+            if (GetWorld()->SweepTestByChannel(Rival+EyeOffset, Stand+FVector(0,0,30.), FQuat::Identity,
+                ECC_Visibility, FCollisionShape::MakeSphere(AExpeditionMudBall::Radius), Query)) continue;
+            // Keep both capsules outside the throw to the other worker, so misses in the lock test are meaningful.
+            for (const FVector First : Workers)
             {
-                auto* PC = CastChecked<AIslandPlayerController>(Players[Seat]);
-                auto* Hero = PC->GetHero();
-                const FVector Offset = Offsets[Seat].RotateAngleAxis(15. * Heading, FVector::UpVector);
-                Hero->TeleportTo(Chest + Offset + FVector(0., 0., Height), FRotator::ZeroRotator, false, true);
-                Hero->GetCharacterMovement()->DisableMovement();
-                bReachable &= PC->GetReachableChest() == Mode->Exposed[NextDig];
+                if (FVector::Dist2D(First,Stand)<82. || FMath::PointDistToSegment(First,Rival,Stand)<68.
+                    || FMath::PointDistToSegment(Stand,Rival,First)<68.) continue;
+                const FVector Locations[] = {First, Stand, Rival};
+                for (int32 Seat=0; Seat<3; ++Seat)
+                {
+                    auto* PC = CastChecked<AIslandPlayerController>(Players[Seat]);
+                    PC->GetHero()->TeleportTo(Locations[Seat],FRotator::ZeroRotator,false,true);
+                    PC->GetHero()->GetCharacterMovement()->DisableMovement();
+                    FVector Target;
+                    if (Seat!=1 && Vault->IsReachableFrom(*PC->GetHero(),&Target))
+                        PC->ClientResetView((Target-PC->GetHero()->GetAimOrigin()).Rotation());
+                }
+                Require(true, TEXT("all three ground poses can aim at the exposed vault and the rival can throw at either worker"));
+                if (!Peers[1]->bHeldLidObserved)
+                {
+                    Peers[1]->ClientWatchHeldLid();
+                    SetFieldStage(EFieldStep::HoldThroughReveal, Now);
+                }
+                return true;
             }
-            if (!bReachable) continue;
-            auto* Rival = Players[2]->GetHero();
-            const FCollisionQueryParams Query(SCENE_QUERY_STAT(FieldLockThrow), false, Rival);
-            for (int32 Seat = 0; Seat < 2; ++Seat)
+            Workers.Add(Stand);
+        }
+    }
+
+    // A single visible corner does not guarantee standing room for three capsules. Widen
+    // only the soil around the sides by punching from the ground above that column.
+    TOptional<FVector> Cut;
+    for (double Radius : {90.,130.})
+        for (int32 Heading=0; Heading<12; ++Heading)
+        {
+            const double Angle = Heading*UE_TWO_PI/12.;
+            const FVector Column = Chest + Radius*FVector(FMath::Cos(Angle),FMath::Sin(Angle),0.);
+            FHitResult Floor;
+            if (!Terrain->TraceRock(Column+FVector(0,0,1500.),Column-FVector(0,0,1100.),Hero,Floor)
+                || Floor.ImpactPoint.Z <= Chest.Z-35.) continue;
+            if (!Cut || Floor.ImpactPoint.Z < Cut->Z) Cut=Floor.ImpactPoint;
+        }
+    if (Cut && Now-StepAt<98.)
+    {
+        Hero->TeleportTo(*Cut+FVector(0,0,105.),FRotator::ZeroRotator,false,true);
+        Hero->GetCharacterMovement()->DisableMovement();
+        Host->SubmitEdit(EVoxelAction::Punch,-FVector::UpVector);
+        UE_LOG(LogTemp,Display,TEXT("FIELD_QA_WIDEN_VAULT previous_stands=%d point=%s"),Stands.Num(),*Cut->ToCompactString());
+        LastAction=Now;
+        return false;
+    }
+    Require(false, TEXT("widening the vault rim makes room for three visible lock poses"));
+    return false;
+}
+
+void AIslandProbe::PlaceFieldEchoDig(double Now)
+{
+    const auto& Layout = Mode->HiddenLayout;
+    const auto* Terrain = Mode->GetTerrain();
+    const double Radii[] = {680., 400., 130., 400., 130.};
+    const bool bDecoy = FieldEchoTrial >= 3;
+    const bool bFirstOfKind = FieldEchoTrial == 0 || FieldEchoTrial == 3;
+    for (int32 Site = 0; Site < Layout.Num(); ++Site)
+    {
+        if (Site == IslandRules::PrizeIndex || Layout.IsDecoy(Site) != bDecoy
+            || (!bFirstOfKind && Site != FieldEchoTarget) || Mode->Exposed[Site] || !Mode->CanClaimChest(0, Site)) continue;
+        for (int32 Heading = 0; Heading < 48; ++Heading)
+        {
+            const double Angle = (Heading + FieldEchoTrial * 16) * UE_TWO_PI / 48.;
+            FVector Floor;
+            if (!FieldFloor(*Terrain, Layout.GetCenter(Site) + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.) * Radii[FieldEchoTrial], Floor)) continue;
+            const FVector Dig(VoxelPlayground::QuantizeCenter(Floor));
+            // Independently measure the three-dimensional distance from this cut to each eligible lid.
+            // Test both kinds on the real layout, including locations where their hearing ranges overlap.
+            double Nearest = MAX_dbl;
+            int32 NearestSite = INDEX_NONE, Audible = 0;
+            FVector Direction = FVector::ZeroVector;
+            for (int32 Index = 0; Index < Layout.Num(); ++Index)
             {
-                const FVector Target = Players[Seat]->GetHero()->GetActorLocation() + FVector(0.,0.,30.);
-                bReachable &= !GetWorld()->SweepTestByChannel(Rival->GetAimOrigin(), Target, FQuat::Identity,
-                    ECC_Visibility, FCollisionShape::MakeSphere(AExpeditionMudBall::Radius), Query);
+                if (Mode->Exposed[Index] || !Mode->CanClaimChest(0, Index)) continue;
+                const FVector Delta = Layout.GetCenter(Index) + FVector(0, 0, 25.) - Dig;
+                const double Distance = Delta.Length();
+                if (Distance < 1000.) ++Audible;
+                if (Distance >= Nearest) continue;
+                NearestSite = Index;
+                Nearest = Distance;
+                Direction = Delta.GetSafeNormal();
             }
-            if (!bReachable) continue;
-            for (const auto& PC : Players)
-                if (PC != Players[1]) PC->ClientResetView((Chest - PC->GetHero()->GetAimOrigin()).Rotation());
-            Require(true, TEXT("all three players can reach the vault and the rival can throw at each worker"));
-            if (!Peers[1]->bHeldLidObserved)
-            {
-                Peers[1]->ClientWatchHeldLid();
-                SetFieldStage(EFieldStep::HoldThroughReveal, Now);
-            }
+            if (NearestSite != Site || Nearest > Radii[FieldEchoTrial] + 120.) continue;
+            Place(1, Floor + FVector(0, 0, 103.));
+            auto* Hero = Mode->GetPlayers()[1]->GetHero();
+            if (FVector::Dist2D(Hero->GetActorLocation(), Floor) > 3.) continue;
+            Hero->GetCharacterMovement()->DisableMovement();
+            FieldEchoTarget = Site;
+            FieldEchoSequence = Terrain->GetAppliedSequence();
+            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_ECHO_EXPECT trial=%d site=%d decoy=%d candidates=%d distance_cm=%.1f direction=%.4f,%.4f,%.4f"),
+                FieldEchoTrial, Site, bDecoy, Audible, Nearest, Direction.X, Direction.Y, Direction.Z);
+            SetFieldStage(EFieldStep::EchoApproach, Now);
             return;
         }
     }
-    Require(false, TEXT("the excavated vault has three reachable poses and two clear mud trajectories"));
+    Require(false, TEXT("a reachable search column for the directional echo trial"));
 }
 
 void AIslandProbe::TickFieldCheck(double Now)
@@ -286,27 +417,29 @@ void AIslandProbe::TickFieldCheck(double Now)
     const auto& PartnerLock = Players[1]->GetPlayerState<AIslandPlayerState>()->LockView;
     const auto& RivalLock = Players[2]->GetPlayerState<AIslandPlayerState>()->LockView;
     auto Rate = [Time](const auto& Lock) { return (Lock.ProgressAt(Time + .08) - Lock.ProgressAt(Time)) / .08; };
-    // A rival sends the same right-button ability request used in play. Follow the
-    // actual marks instead of assuming its client RPC, projectile and GAS effect are simultaneous.
-    auto ThrowAtLockWorker = [&](int32 Seat, const FIslandLockView& Lock)
+    // Front-load the torso throws before starting the four-second vault clock, so
+    // editor frame rate and render readback cannot turn this test into a lock-time race.
+    const auto AnchorWorker = [&](int32 Seat, const FIslandLockView& Lock)
     {
         auto* Worker = Players[Seat]->GetHero();
-        const int32 Marks = Mode->GetMudMarks(*Worker);
-        const auto* Thrower = Players[2]->GetHero()->GetAbilitySystemComponent();
-        static const FGameplayTag Cooldown = FGameplayTag::RequestGameplayTag(TEXT("Expedition.Cooldown.Throw"));
-        if ((Now - LastAction < .12 && LastAction != StepAt) || Thrower->HasMatchingGameplayTag(Cooldown)) return;
-        if (Marks == 2)
-        {
-            Require(Lock.Chest && Lock.bAssisted && Lock.Team == 0 && !Lock.bSeized &&
-                (Lock.Role == EIslandLockRole::Leader || Lock.Role == EIslandLockRole::Helper),
-                TEXT("two physical mud hits leave both chest workers making progress"));
-            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_TWO_HITS worker=%d role=%d progress=%.3f"),
-                Seat, int32(Lock.Role), Lock.ProgressAt(Time));
-        }
-        const FVector Origin = Players[2]->GetHero()->GetAimOrigin();
-        const FVector Aim = (Worker->GetActorLocation() + FVector(0,0,30.) - Origin).GetSafeNormal();
-        Peers[2]->ClientMudStroke(true, Aim);
-        LastAction = Now;
+        Require(Worker->GetBodyMud()->Num() >= 2 && Lock.Chest && Lock.bAssisted && Lock.Team == 0 && !Lock.bSeized,
+            TEXT("two physical torso hits still allow full assisted chest progress"));
+        UE_LOG(LogTemp, Display, TEXT("FIELD_QA_TWO_HITS worker=%d role=%d progress=%.3f"), Seat, int32(Lock.Role), Lock.ProgressAt(Time));
+        // Keep the client looking at its real vault. Submit an ankle impact geometrically,
+        // then allow the body component to test the actual supporting surface.
+        const auto* Capsule = Worker->GetCapsuleComponent();
+        const FVector Position = Capsule->GetComponentLocation();
+        FHitResult Floor;
+        const bool Grounded = GetWorld()->SweepSingleByChannel(Floor,Position+FVector::UpVector*6.,Position-FVector::UpVector*14.,
+            FQuat::Identity,Capsule->GetCollisionObjectType(),Capsule->GetCollisionShape(),
+            FCollisionQueryParams(SCENE_QUERY_STAT(FieldAnkle),false,Worker),FCollisionResponseParams(Capsule->GetCollisionResponseToChannels()));
+        Require(Grounded && !Floor.bStartPenetrating,TEXT("the chest worker has a real standing contact"));
+        if (!Grounded || Floor.bStartPenetrating) return;
+        // On an inclined rim the capsule meets the ground on the side of its lower hemisphere.
+        const FVector Contact = Floor.ImpactPoint + Position - Floor.Location;
+        const FHitResult Ankle(Worker,Worker->GetCapsuleComponent(),Contact,-Floor.ImpactNormal);
+        Mode->ResolveMudImpact(*CastChecked<AIslandPlayerController>(Players[2]),Ankle);
+        Require(Worker->IsMudAnchored(),TEXT("the ankle deposit actually connects the worker to the floor"));
     };
     switch (FieldStage)
     {
@@ -381,45 +514,29 @@ void AIslandProbe::TickFieldCheck(double Now)
             UE_LOG(LogTemp, Display, TEXT("FIELD_QA_WALK advance=%d depth=%d"),
                 FMath::RoundToInt(FVector::Dist2D(Foot, FieldStand)), FMath::RoundToInt(OriginalFloor.Z - Foot.Z));
             Mode->RecoverPlayer(*Players[1]);
-            // With up to 24 additional boxes, any buried chest can contribute a strong echo.
-            const FVector Chest = Mode->HiddenLayout.GetCenter(1);
-            for (int32 Heading = 0; Heading < 48; ++Heading)
-            {
-                const double Angle = Heading * UE_TWO_PI / 48.;
-                FVector Stand;
-                if (!FieldFloor(*Terrain, Chest + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.) * 530., Stand)) continue;
-                const FVector Center(VoxelPlayground::QuantizeCenter(Stand));
-                double Gap = MAX_dbl;
-                for (int32 Index = 0; Index < Mode->HiddenLayout.Num(); ++Index)
-                {
-                    if (Mode->Exposed[Index] || !Mode->CanClaimChest(0, Index)) continue;
-                    const FBox Bounds = FBox::BuildAABB(Mode->HiddenLayout.GetCenter(Index), IslandRules::ChestExtent);
-                    const double Distance = FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(Center));
-                    Gap = FMath::Min(Gap, Distance - VoxelPlayground::RadiusFor(VoxelPlayground::ShallowCut));
-                }
-                if (Gap < 310. || Gap > 490.) continue;
-                Place(0, Stand + FVector(0,0,96.));
-                UE_LOG(LogTemp, Display, TEXT("FIELD_QA_ECHO_SEARCH predicted_gap=%.1f"), Gap);
-                SetFieldStage(EFieldStep::EchoApproach, Now);
-                return;
-            }
-            Require(false, TEXT("missing shallow search column for proximity echo"));
+            PlaceFieldEchoDig(Now);
         }
         break;
     }
     case EFieldStep::EchoApproach:
-        if (Age > .45)
+        if (Age > .65)
         {
-            Players[0]->SubmitEdit(EVoxelAction::Punch, -FVector::UpVector);
+            Peers[1]->ClientFieldEchoStrike(FieldEchoTrial);
             SetFieldStage(EFieldStep::HearEcho, Now);
         }
         break;
     case EFieldStep::HearEcho:
     {
-        const auto* PC = CastChecked<AIslandPlayerController>(Players[0]);
-        if (PC->GetEchoAge() < 1.)
+        if (Terrain->GetAppliedSequence() > FieldEchoSequence && Age > .65)
         {
-            Require(!PC->HasStrongEcho(), TEXT("a distant dig gives a weak echo to its excavator"));
+            ++FieldEchoTrial;
+            if (FieldEchoTrial < (Mode->HiddenLayout.Decoys.IsEmpty() ? 3 : 5))
+            {
+                PlaceFieldEchoDig(Now);
+                return;
+            }
+            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_ECHO_END trials=%d"), FieldEchoTrial);
+            Mode->RecoverPlayer(*Players[1]);
             // This probe exercises the final vault and physical lock interference. Its starting
             // inventory is a fixture; the games probe obtains the fragments through live arenas.
             for (int32 Site = 0; Site < IslandRules::ClueCount; ++Site) Mode->GiveClue(0, Site);
@@ -461,10 +578,29 @@ void AIslandProbe::TickFieldCheck(double Now)
                 TEXT("a physically present rival with a key and three sites cannot start the vault"));
             Mode->GiveClue(1, IslandRules::ClueCount - 1);
             UE_LOG(LogTemp, Display, TEXT("FIELD_QA_VAULT_KEYS three_rejected=1 crews=2"));
-            Peers[1]->ClientOpenChest();
-            SetFieldStage(EFieldStep::Open, Now);
+            SetFieldStage(EFieldStep::CoatLeader, Now);
         }
         break;
+    case EFieldStep::CoatLeader:
+    case EFieldStep::CoatHelper:
+    {
+        const bool Leader = FieldStage == EFieldStep::CoatLeader;
+        const auto* Worker = Players[Leader ? 1 : 0]->GetHero();
+        if (Worker->GetBodyMud()->Num() >= 2)
+        {
+            Require(!Worker->IsMudAnchored(),TEXT("torso mud by itself does not anchor the worker"));
+            if (Leader) Peers[1]->ClientOpenChest();
+            SetFieldStage(Leader ? EFieldStep::Open : EFieldStep::Cancel, Now);
+        }
+        else if (Now-LastAction>.75)
+        {
+            const FVector Eye = Players[2]->GetHero()->GetAimOrigin();
+            const FVector Aim = AExpeditionMudBall::AimAtPoint(Eye,Worker->GetActorLocation()+FVector(0,0,30.));
+            Peers[2]->ClientMudStroke(true,Aim);
+            LastAction = Now;
+        }
+        break;
+    }
     case EFieldStep::Open:
         if (PartnerLock.Chest && PartnerLock.Role == EIslandLockRole::Leader && PartnerLock.Team == 0)
         {
@@ -483,16 +619,17 @@ void AIslandProbe::TickFieldCheck(double Now)
         }
         break;
     case EFieldStep::Defend:
-        if (Players[1]->GetHero()->IsMudStunned())
+        if (Players[1]->GetHero()->IsMudAnchored())
         {
-            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_STUN_LOCK worker=leader next=helper"));
+            FieldPeelInitial=Players[1]->GetHero()->GetBodyMud()->Num();
+            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_ANCHORED_LOCK worker=leader next=helper"));
             SetFieldStage(EFieldStep::TakeOver, Now);
         }
         else
         {
             Require(HostLock.Team == 0 && HostLock.bAssisted && !HostLock.bSeized, TEXT("opponent cannot seize a crewed lock"));
             if (LastAction == StepAt) FieldPhoto(TEXT("Field03Assist"));
-            ThrowAtLockWorker(1, PartnerLock);
+            if (Age > .48) AnchorWorker(1, PartnerLock);
         }
         break;
     case EFieldStep::TakeOver:
@@ -512,7 +649,7 @@ void AIslandProbe::TickFieldCheck(double Now)
         }
         break;
     case EFieldStep::PreventReseize:
-        if (Age > .35)
+        if (Age > .35 && Peers[0]->HasReleasedChestClick())
         {
             Require(HostLock.Team == 1 && HostLock.bSeized && RivalLock.Role == EIslandLockRole::Leader,
                 TEXT("former crew cannot seize the same attempt back"));
@@ -523,27 +660,53 @@ void AIslandProbe::TickFieldCheck(double Now)
         }
         break;
     case EFieldStep::Award:
-        if (!HostLock.Chest && !PartnerLock.Chest && !RivalLock.Chest && !Players[1]->GetHero()->IsMudStunned())
+        if (HostLock.Chest || PartnerLock.Chest || RivalLock.Chest)
         {
+            if (FieldPeelPrevious != INDEX_NONE)
+                Require(false,TEXT("a self-peel at the lid cannot reopen the abandoned chest"));
+            break;
+        }
+        if (Players[1]->GetHero()->IsMudAnchored())
+        {
+            const int32 Count=Players[1]->GetHero()->GetBodyMud()->Num();
+            if (Age<.35 || Now-LastAction<.7) break;
+            if (Count!=FieldPeelPrevious)
+            {
+                UE_LOG(LogTemp,Display,TEXT("FIELD_QA_PEEL_PRESS remaining=%d anchored=1"),Count);
+                FieldPeelPrevious=Count;
+                Peers[1]->ClientOpenChest(); // Real press/release at the eligible visible vault lid.
+                LastAction=Now;
+            }
+            else if (Now-LastAction>2.)
+            {
+                UE_LOG(LogTemp,Error,TEXT("FIELD_QA_PEEL_STALLED remaining=%d initial=%d"),Count,FieldPeelInitial);
+                Require(false,TEXT("clicking the lid while bound peels an actual clod"));
+            }
+            break;
+        }
+        if (Age>.5 && Now-LastAction>.65 && !Terrain->IsBusy())
+        {
+            const int32 Remaining=Players[1]->GetHero()->GetBodyMud()->Num();
+            Require(FieldPeelPrevious!=INDEX_NONE && Remaining<FieldPeelInitial,TEXT("the vault-side physical click peeled clay and left the lock closed"));
             Require(Mode->TeamClues[0].HasKey() && Mode->TeamClues[1].HasKey()
-                && Round->Winner == INDEX_NONE, TEXT("abandoning a contested final vault preserves both keys"));
-            BeginLockCheck(Now);
-            SetFieldStage(EFieldStep::Cancel, Now);
+                && Round->Winner==INDEX_NONE,TEXT("abandoning a contested final vault preserves both keys"));
+            UE_LOG(LogTemp,Display,TEXT("FIELD_QA_PEEL_AT_CHEST released=1 assisted=0 before=%d remaining=%d"),FieldPeelInitial,Remaining);
+            if (BeginLockCheck(Now)) SetFieldStage(EFieldStep::CoatHelper,Now);
         }
         break;
     case EFieldStep::Cancel:
-        if (Players[0]->GetHero()->IsMudStunned())
+        if (Players[0]->GetHero()->IsMudAnchored())
         {
             Require(PartnerLock.Chest && PartnerLock.Role == EIslandLockRole::Leader &&
                 !PartnerLock.bAssisted && PartnerLock.Team == 0 && Rate(PartnerLock) > 0.,
-                TEXT("the active leader keeps working at solo speed when the helper is stunned"));
-            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_STUN_LOCK worker=helper next=leader"));
+                TEXT("the active leader keeps working at solo speed when the helper is connected to the floor"));
+            UE_LOG(LogTemp, Display, TEXT("FIELD_QA_ANCHORED_LOCK worker=helper next=leader"));
             Mode->RecoverPlayer(*Players[1]);
             SetFieldStage(EFieldStep::Reset, Now);
         }
         else if (HostLock.Role == EIslandLockRole::Helper && HostLock.bAssisted)
         {
-            ThrowAtLockWorker(0, HostLock);
+            AnchorWorker(0, HostLock);
         }
         else if (!PartnerLock.Chest && Age > .6 && Now - LastAction > .35)
         {
@@ -683,8 +846,9 @@ bool AIslandProbe::TickFieldPunchTrials()
     auto* Terrain=Mode->GetTerrain();
     if (!bTerrainSampleRequested && !bAfter)
     {
-        // Select untouched ground and a standing spot clear of props. The same local sample-grid
-        // alignment on every strip lets us compare independent full and overcharged cuts.
+        // Use level ground at the same grid alignment for each one-punch profile.
+        // A slope changes the vertical depth even for identical surface-normal cuts.
+        constexpr double LevelToleranceCm = .5;
         bool bFound=false;
         for (int32 Y=-13; Y<=13 && !bFound; ++Y)
             for (int32 X=-13; X<=13 && !bFound; ++X)
@@ -693,12 +857,13 @@ bool AIslandProbe::TickFieldPunchTrials()
                 if (PunchSites.ContainsByPredicate([&Near](const FVector& P){ return FVector::DistSquared2D(P,Near)<FMath::Square(335.); })) continue;
                 FVector Center,Stand;
                 if (!FieldFloor(*Terrain,Near,Center) || !FieldFloor(*Terrain,Near-FVector(112,0,0),Stand)
-                    || FMath::Abs(Center.Z-Stand.Z)>18. || Center.Z<70.) continue;
+                    || FMath::Abs(Center.Z-Stand.Z)>LevelToleranceCm || Center.Z<70.) continue;
                 bool bClear=true;
                 for (int32 R=0; R<=160 && bClear; R+=10)
                 {
                     FVector Sample;
-                    bClear=FieldFloor(*Terrain,Center+FVector(0,R,0),Sample) && FMath::Abs(Center.Z-Sample.Z)<18.;
+                    bClear=FieldFloor(*Terrain,Center+FVector(0,R,0),Sample)
+                        && FMath::Abs(Center.Z-Sample.Z)<=LevelToleranceCm;
                 }
                 if (!bClear) continue;
                 const auto* Hero=Mode->GetPlayers()[1]->GetHero();

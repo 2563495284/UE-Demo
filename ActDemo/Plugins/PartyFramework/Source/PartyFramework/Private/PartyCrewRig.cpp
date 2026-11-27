@@ -74,9 +74,9 @@ void UPartyCrewRig::Apply(const FPartyCrewPose& P)
     }
     BoneSpaceTransforms=Rest;
     const float Hit=P.Extension, W=P.Load, G=P.Gait, Bob=P.Idle;
-    Turn(TEXT("spine"),{-3.f*P.Speed-10.f*P.Pry+3.f*W,7.f*W-10.f*Hit,2.f*G});
-    Turn(TEXT("chest"),{-3.f*P.Landing+.65f*Bob,12.f*W-15.f*Hit,-4.f*W+3.f*Hit});
-    Turn(TEXT("neck"),{4.f*P.Speed+7.f*P.Pry,-12.f*W+15.f*Hit,2.f*G});
+    Turn(TEXT("spine"),{-3.f*P.Speed-10.f*P.Pry+3.f*W,7.f*W-10.f*Hit+3.f*P.Recoil,2.f*G});
+    Turn(TEXT("chest"),{-3.f*P.Landing+.65f*Bob-3.f*P.Toss,12.f*W-15.f*Hit+4.f*P.Recoil+5.f*P.Toss,-4.f*W+3.f*Hit});
+    Turn(TEXT("neck"),{4.f*P.Speed+7.f*P.Pry,-12.f*W+15.f*Hit-4.f*P.Recoil-4.f*P.Toss,2.f*G});
     Turn(TEXT("head"),{.5f*Bob+4.f*P.Brake+2.f*P.Air-4.3f*P.WorkLook,-16.f*W+17.f*Hit+6.8f*P.WorkLook,
         1.5f*G+.65f*P.WorkLook});
     Turn(TEXT("hat_brim"),{P.BrimPitch*.7f,0.,0.});
@@ -102,7 +102,9 @@ void UPartyCrewRig::Apply(const FPartyCrewPose& P)
         Hand.Z+=I ? 14.f*Hit+10.f*W : 7.f*Hit+10.f*W;
         AimLimb(I ? TEXT("upperarm_r") : TEXT("upperarm_l"),I ? TEXT("lowerarm_r") : TEXT("lowerarm_l"),
             I ? TEXT("hand_r") : TEXT("hand_l"),Hand,FVector(-.75,Side*.8,-.65));
-        Turn(I ? TEXT("hand_r") : TEXT("hand_l"),{I ? -8.f*W+19.f*Hit : 8.f*W,-Side*3.f,0.});
+        Turn(I ? TEXT("hand_r") : TEXT("hand_l"),
+            {I ? -8.f*W+19.f*Hit-12.f*P.Recoil : 8.f*W+20.f*P.Toss,
+             -Side*3.f,I ? 0.f : -28.f*P.TossFollow});
         AimLimb(I ? TEXT("thigh_r") : TEXT("thigh_l"),I ? TEXT("calf_r") : TEXT("calf_l"),
             I ? TEXT("foot_r") : TEXT("foot_l"),P.Feet[I]+FootRest[I]-FVector(7.,Side*18.,13.),FVector(1.,Side*.12,0.));
     }

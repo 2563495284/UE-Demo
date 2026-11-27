@@ -18,14 +18,12 @@ enum class EExpeditionAction : uint8
 namespace ExpeditionAbilities
 {
     FGameplayTag ActionTag(EExpeditionAction Action);
-    FGameplayTag Stunned();
-    FGameplayTag Immune();
     void Grant(UAbilitySystemComponent& ASC);
     void ClearTimedTags(UAbilitySystemComponent& ASC);
     bool ApplyTimedTag(UAbilitySystemComponent& ASC, FGameplayTag Tag, float Seconds);
 }
 
-// One replicated duration effect is reused for stun, immunity and action cooldowns.
+// One replicated duration effect is reused for action cooldowns.
 // Each spec carries the relevant granted tag and its own duration.
 UCLASS()
 class UExpeditionTimedEffect : public UGameplayEffect
@@ -142,6 +140,5 @@ class UExpeditionCharacterMovement : public UCharacterMovementComponent
 public:
     float GetIslandJumpZVelocity() const;
     virtual bool DoJump(bool bReplayingMoves, float DeltaTime) override;
-    virtual void UpdateCharacterStateBeforeMovement(float DeltaSeconds) override;
     virtual float GetMaxSpeed() const override;
 };

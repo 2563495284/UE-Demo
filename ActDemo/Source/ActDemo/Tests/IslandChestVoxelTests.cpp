@@ -5,10 +5,50 @@
 #include "Engine/World.h"
 #include "Island/IslandSceneryVoxels.h"
 #include "Island/IslandPlayerController.h"
+#include "Island/IslandRules.h"
 #include "Island/IslandWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
 #include "Voxel/VoxelCharacter.h"
+#include "Voxel/VoxelDensity.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FIslandLidExposureTest, "ActDemo.Voxel.RouteScenery.ChestLidExposure",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FIslandLidExposureTest::RunTest(const FString&)
+{
+    FVoxelDensity Field(EVoxelLayout::Expedition);
+    const FVector2D XY(6600.,0.);
+    const FVector Center(XY, Field.SurfaceAt(XY).GetValue() - 150.);
+    const FBox ChestBounds = FBox::BuildAABB(Center,IslandRules::ChestExtent);
+    TestFalse(TEXT("Undisturbed ground conceals the lid"),AIslandChest::IsLidExposed(Field,Center));
+    FVoxelDensity Side(Field);
+    FVoxelEdit Punch;
+    Punch.BrushId = VoxelPlayground::ShallowCut;
+    for (int32 Strike=0; Strike<7 && !AIslandChest::IsLidExposed(Field,Center); ++Strike)
+    {
+        Punch.Center = VoxelPlayground::QuantizeCenter(FVector(XY,Field.SurfaceAt(XY).GetValue()));
+        Field.Apply(Field.PrepareEdit(Punch));
+    }
+    TestTrue(TEXT("Punches from the surface uncover the closed lid"),AIslandChest::IsLidExposed(Field,Center));
+    TestTrue(TEXT("The box still has earth under its lid on discovery"),Field.SignedDistanceAt(Center-FVector(0,0,30))<0.);
+    TestFalse(TEXT("A full volume clear is not required"),Field.IsVolumeClear(ChestBounds));
+
+    // Dig a shaft just outside the front of the coffer, then punch its near wall.
+    const FVector2D Shaft = XY + FVector2D(0.,110.);
+    for (int32 Strike=0; Strike<8 && Side.SurfaceAt(Shaft).GetValue()>Center.Z-25.; ++Strike)
+    {
+        Punch.Center = VoxelPlayground::QuantizeCenter(FVector(Shaft,Side.SurfaceAt(Shaft).GetValue()));
+        Side.Apply(Side.PrepareEdit(Punch));
+    }
+    TestFalse(TEXT("A fully dug neighbouring shaft still leaves the lid concealed"),AIslandChest::IsLidExposed(Side,Center));
+    Punch.SurfaceNormal = {0,1000,0};
+    Punch.Center = VoxelPlayground::QuantizeCenter(Center + FVector(0,55,24));
+    Side.Apply(Side.PrepareEdit(Punch));
+    TestTrue(TEXT("A sideways punch exposes the near lip beneath the roof"),AIslandChest::IsLidExposed(Side,Center));
+    TestTrue(TEXT("The centre of the lid remains covered after the side cut"),Side.SignedDistanceAt(Center+FVector(0,0,32))<0.);
+    return !HasAnyErrors();
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FIslandChestVoxelTest, "ActDemo.Voxel.RouteScenery.ChestAndCompass",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -34,6 +74,20 @@ bool FIslandChestVoxelTest::RunTest(const FString&)
     if (!TestEqual(TEXT("All ten chest sections, clasp and ironwork included"),Shell.Num(),10)) return false;
     TestTrue(TEXT("The shovel reaches an actual board"),Trace() && Hit.GetActor()==Chest && Hit.GetComponent()->IsA<UIslandMeshVoxels>());
     TestTrue(TEXT("A nearby exposed clue can be opened"),Chest->IsReachableFrom(*Hero));
+    // Cover the body and its centre line, leaving a narrow view of the top from the side.
+    auto* Bank = World->SpawnActor<AActor>();
+    auto* Earth = NewObject<UBoxComponent>(Bank);
+    Bank->SetRootComponent(Earth);
+    Earth->SetBoxExtent({8.,55.,35.});
+    Earth->SetCollisionResponseToChannel(ECC_Visibility,ECR_Block);
+    Earth->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    Earth->SetWorldLocation(Origin+FVector(72.,0.,-26.));
+    Earth->RegisterComponent();
+    TestFalse(TEXT("The remaining bank covers the chest's centre"),Trace() && Hit.GetActor()==Chest);
+    const FVector LipAim=(Center+FVector(-44.,0.,27.)-Origin).GetSafeNormal();
+    TestTrue(TEXT("A visible lip beside the bank accepts an aimed click"),Player->GetChestAlongAim(LipAim)==Chest);
+    TestTrue(TEXT("A partly exposed lid remains reachable for a timed lock"),Chest->IsReachableFrom(*Hero));
+    Earth->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     auto* Nearer = World->SpawnActor<AIslandChest>(Origin + FVector(0,115,0),FRotator::ZeroRotator);
     IslandSceneryVoxels::Register(*Nearer);
     TestTrue(TEXT("A fresh click selects the aimed lid over a nearer neighbour"),Player->GetChestAlongAim(FVector::ForwardVector)==Chest);
@@ -107,6 +161,7 @@ bool FIslandPunchSectionsTest::RunTest(const FString&)
         else Plank->SetupAttachment(Owner.GetRootComponent());
         Owner.AddInstanceComponent(Plank);
         Plank->RegisterComponent();
+        Plank->SetWorldScale3D(FVector(2.,1.,1.));
         Plank->SetWorldLocation(Location);
         return Plank;
     };
@@ -123,10 +178,15 @@ bool FIslandPunchSectionsTest::RunTest(const FString&)
     FHitResult Hit;
     if (!TestTrue(TEXT("The fist selects the first board"),World->LineTraceSingleByChannel(Hit,FVector(-190,-55,0),
             FVector(60,-55,0),ECC_Visibility) && Hit.GetComponent()==A)) return false;
-    TestTrue(TEXT("A fully charged punch cuts the seam"),IslandSceneryVoxels::Strike(Hit,2.f));
+    TestTrue(TEXT("A fully charged punch cuts the seam"),IslandSceneryVoxels::Strike(Hit,2.f,2.f));
     TestTrue(TEXT("The two touching boards both lose a part"),A->RemainingCount()>0 && A->RemainingCount()<A->InitialCount()
         && B->RemainingCount()>0 && B->RemainingCount()<B->InitialCount());
     TestEqual(TEXT("The other owner did not lose any material"),C->RemainingCount(),C->InitialCount());
+    const FVector OtherContact=Hit.ImpactPoint+Separate->GetComponentLocation()-Center->GetComponentLocation();
+    TestTrue(TEXT("An equally wide light punch on a fresh board stops before 76 cm"),
+        C->Cut(OtherContact,Hit.ImpactNormal,2.f) && C->IsSolidWorld(OtherContact-Hit.ImpactNormal*76.));
+    TestFalse(TEXT("A full punch reaches 76 cm inside the original board"),
+        A->IsSolidWorld(Hit.ImpactPoint-Hit.ImpactNormal*76.));
     return !HasAnyErrors();
 }
 #endif

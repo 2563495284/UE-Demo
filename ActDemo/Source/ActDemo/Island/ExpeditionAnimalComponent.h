@@ -28,7 +28,7 @@ public:
     void SetPunchCharge(bool bHeld,float HeldSeconds=0.f);
     void PlayPunch(float Strength);
     void PlayThrow();
-    void SetMarks(int32 Count);
+    bool GetThrowHandLocation(FVector& OutLocation) const;
 #if !UE_BUILD_SHIPPING
     bool ShowsOutfit(bool bDisguised) const;
     const FPartyCrewPose& GetVisiblePose() const { return LastPose; }
@@ -39,7 +39,6 @@ private:
         FColor Color, UStaticMesh* Geometry = nullptr);
     UMaterialInstanceDynamic* Paint(FColor Color);
     UPROPERTY() TObjectPtr<UStaticMesh> Ball;
-    UPROPERTY() TObjectPtr<UStaticMesh> Cone;
     UPROPERTY() TObjectPtr<UStaticMesh> Mitten;
     UPROPERTY() TArray<TObjectPtr<UStaticMesh>> Animals;
     UPROPERTY() TObjectPtr<UMaterialInterface> Base;
@@ -52,16 +51,12 @@ private:
     int32 DisplayedModel = INDEX_NONE;
     UPROPERTY() TObjectPtr<USceneComponent> FogSuit;
     bool bFogged = false;
-    UPROPERTY() TObjectPtr<UStaticMeshComponent> CheekMud;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> Badge;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Hands;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> EyePaws;
     UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Feet;
-    UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> Marks;
     UPROPERTY() TMap<uint32,TObjectPtr<UMaterialInstanceDynamic>> Paints;
     int32 Team = INDEX_NONE;
-    int32 MudSpots = 0;
     FPartyCrewMotion Motion;
     FPartyCrewPose LastPose;
-    float MarkSeconds = 0.f;
 };

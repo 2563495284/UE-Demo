@@ -14,6 +14,7 @@ class UVoxelInputConfig : public UObject
 public:
     static UVoxelInputConfig* Create(UObject& Owner);
 
+    UPROPERTY() TObjectPtr<UInputMappingContext> CharacterControls;
     UPROPERTY() TObjectPtr<UInputMappingContext> Gameplay;
     UPROPERTY() TObjectPtr<UInputAction> Move;
     UPROPERTY() TObjectPtr<UInputAction> Look;

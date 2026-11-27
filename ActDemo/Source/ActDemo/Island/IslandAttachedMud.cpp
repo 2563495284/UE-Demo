@@ -11,7 +11,7 @@
 
 namespace
 {
-    constexpr double Step = 10.;
+    constexpr double MudCellSpacing = 10.;
     const FColor Clay(163, 102, 64);
 
     FIntVector RoundCell(FVector Cell)
@@ -38,7 +38,7 @@ namespace
 
         FIntVector CellAt(FVector World) const
         {
-            return RoundCell((Mud->GetActorTransform().InverseTransformPosition(World) - Start) / Step);
+            return RoundCell((Mud->GetActorTransform().InverseTransformPosition(World) - Start) / MudCellSpacing);
         }
     };
 
@@ -52,7 +52,7 @@ namespace
 
     bool StructuralContact(const UPrimitiveComponent& Part, FVector World)
     {
-        if (!Part.IsVisible() || !Part.Bounds.GetBox().ExpandBy(Step).IsInsideOrOn(World)) return false;
+        if (!Part.IsVisible() || !Part.Bounds.GetBox().ExpandBy(MudCellSpacing).IsInsideOrOn(World)) return false;
         const auto* Mesh = Cast<UIslandMeshVoxels>(&Part);
         const auto* Route = Cast<UIslandRouteVoxelComponent>(&Part);
         if (!Mesh && !Route) return false;
@@ -60,7 +60,7 @@ namespace
         if (Solid(World)) return true;
         // A thin plank or an oblique hull can cross the edge of a 10 cm mud sample.
         for (const FIntVector Offset : VoxelSurfaceKernel::FaceNeighbors)
-            if (Solid(World + FVector(Offset) * (Step * .85))) return true;
+            if (Solid(World + FVector(Offset) * (MudCellSpacing * .85))) return true;
         return false;
     }
 
@@ -81,8 +81,8 @@ bool UIslandRouteVoxelComponent::SubtractVolume(TFunctionRef<double(FVector)> Lo
     bool bChanged = false;
     for (int32 I = 0; I < Samples.Num(); ++I)
     {
-        const double Distance = LocalDistance(GridStart + FVector(Coordinates(I)) * Step);
-        const int8 Value = FMath::RoundToInt(FMath::Clamp(-Distance * VoxelSurfaceKernel::Spacing / Step,
+        const double Distance = LocalDistance(GridStart + FVector(Coordinates(I)) * MudCellSpacing);
+        const int8 Value = FMath::RoundToInt(FMath::Clamp(-Distance * VoxelSurfaceKernel::Spacing / MudCellSpacing,
             -double(VoxelSurfaceKernel::Band), double(VoxelSurfaceKernel::Band)));
         if (Value <= Samples[I]) continue;
         if (Samples[I] < 0 && Value >= 0) --SolidCount;
@@ -96,7 +96,7 @@ bool UIslandRouteVoxelComponent::SubtractVolume(TFunctionRef<double(FVector)> Lo
 void UIslandRouteVoxelComponent::VisitSolidSamples(TFunctionRef<void(FVector)> Visit) const
 {
     for (int32 I = 0; I < Samples.Num(); ++I)
-        if (Samples[I] < 0) Visit(GridStart + FVector(Coordinates(I)) * Step);
+        if (Samples[I] < 0) Visit(GridStart + FVector(Coordinates(I)) * MudCellSpacing);
 }
 
 AIslandAttachedMud::AIslandAttachedMud()
@@ -120,7 +120,7 @@ void AIslandAttachedMud::RebuildInitial()
 {
     if (Stamp.BrushId != VoxelPlayground::MudPad || Voxels->InitialCount()) return;
     const FBox Local = VoxelPlayground::PartyBrushBounds(Stamp).ShiftBy(-FVector(Stamp.Center));
-    Voxels->InitializeField(Local, Step, [&](FVector P)
+    Voxels->InitializeField(Local, MudCellSpacing, [&](FVector P)
     {
         const FIntVector Point = Stamp.Center + RoundCell(P);
         const int32 D = VoxelPlayground::PartyBrushDistance(Stamp, Point);
@@ -179,7 +179,7 @@ AIslandAttachedMud* AIslandAttachedMud::Place(const FHitResult& Hit, const FVoxe
     const FTransform Transform(FVector(Edit.Center));
     const FBox Area = VoxelPlayground::PartyBrushBounds(Edit);
     TArray<AIslandAttachedMud*> Nearby;
-    GatherNearby(World, Area.ExpandBy(Step), Nearby);
+    GatherNearby(World, Area.ExpandBy(MudCellSpacing), Nearby);
     // Different moving frames may later pull apart. Only clay carried by this
     // structure participates in its union and can transmit support to a new throw.
     Nearby.RemoveAll([&](const AIslandAttachedMud* Other) { return Other->GetAttachParentActor() != Support->GetOwner(); });
@@ -199,7 +199,7 @@ AIslandAttachedMud* AIslandAttachedMud::Place(const FHitResult& Hit, const FVoxe
             double D = VoxelSurfaceKernel::Band;
             for (const auto* Existing : Nearby)
             {
-                if (!Existing->Voxels->Bounds.GetBox().ExpandBy(Step * 2.).IsInsideOrOn(W)) continue;
+                if (!Existing->Voxels->Bounds.GetBox().ExpandBy(MudCellSpacing * 2.).IsInsideOrOn(W)) continue;
                 const FVector Local = Existing->GetActorTransform().InverseTransformPosition(W);
                 D = FMath::Min(D, Existing->Voxels->SignedDistanceLocal(Local));
             }
@@ -215,8 +215,8 @@ AIslandAttachedMud* AIslandAttachedMud::Place(const FHitResult& Hit, const FVoxe
         if (StructuralContact(*Support, W)) return true;
         return Nearby.ContainsByPredicate([&](AIslandAttachedMud* Other)
         {
-            return Other->Voxels->Bounds.GetBox().ExpandBy(Step).IsInsideOrOn(W) &&
-                Other->Voxels->SignedDistanceLocal(Other->GetActorTransform().InverseTransformPosition(W)) <= Step;
+            return Other->Voxels->Bounds.GetBox().ExpandBy(MudCellSpacing).IsInsideOrOn(W) &&
+                Other->Voxels->SignedDistanceLocal(Other->GetActorTransform().InverseTransformPosition(W)) <= MudCellSpacing;
         });
     });
     if (!Mud->Voxels->RemainingCount())
@@ -230,7 +230,7 @@ AIslandAttachedMud* AIslandAttachedMud::Place(const FHitResult& Hit, const FVoxe
     return Mud;
 }
 
-bool AIslandAttachedMud::Strike(const FHitResult& Hit, float RadiusScale)
+bool AIslandAttachedMud::Strike(const FHitResult& Hit, float RadiusScale, float DepthScale)
 {
     if (!HasAuthority() || Hit.GetComponent() != Voxels) return false;
     const double Radius = 62.*RadiusScale;
@@ -242,7 +242,7 @@ bool AIslandAttachedMud::Strike(const FHitResult& Hit, float RadiusScale)
     for (AIslandAttachedMud* Mud : Nearby)
     {
         // One shovel carves the entire contact volume, including neighbouring throws.
-        if (Mud->GetAttachParentActor()!=GetAttachParentActor() || !Mud->Voxels->ApplyWorldCut(Hit.ImpactPoint, Hit.ImpactNormal, Radius)) continue;
+        if (Mud->GetAttachParentActor()!=GetAttachParentActor() || !Mud->Voxels->ApplyWorldCut(Hit.ImpactPoint, Hit.ImpactNormal, Radius, DepthScale)) continue;
         if (AActor* Owner = Mud->GetAttachParentActor()) Owners.Add(Owner);
         Mud->Publish();
         bChanged = true;
@@ -269,10 +269,10 @@ void AIslandAttachedMud::RefreshFor(AActor& Structure)
         const int32 BodyIndex = Bodies.Num() - 1;
         Body.Mud = Mud;
         Body.Start = Mud->Voxels->GetFieldLocalBounds().Min;
-        Body.Bounds = Mud->Voxels->Bounds.GetBox().ExpandBy(Step * 1.5);
+        Body.Bounds = Mud->Voxels->Bounds.GetBox().ExpandBy(MudCellSpacing * 1.5);
         Mud->Voxels->VisitSolidSamples([&](FVector Local)
         {
-            const FIntVector Cell = RoundCell((Local - Body.Start) / Step);
+            const FIntVector Cell = RoundCell((Local - Body.Start) / MudCellSpacing);
             Body.Samples.Add(Cell, Nodes.Num());
             Nodes.Add({Cell, Mud->GetActorTransform().TransformPosition(Local), BodyIndex});
         });
@@ -300,7 +300,7 @@ void AIslandAttachedMud::RefreshFor(AActor& Structure)
         FMudNode& Node = Nodes[I];
         // Only the host or the terrain may seed the flood. A stack of mud cannot
         // keep itself suspended by feeding support back to its neighbour.
-        const bool TouchesSoil = Ground && Ground->SignedDistanceAt(Node.World) <= Step * .6;
+        const bool TouchesSoil = Ground && Ground->SignedDistanceAt(Node.World) <= MudCellSpacing * .6;
         if (TouchesSoil || Bodies[Node.Body].Contacts.ContainsByPredicate([&](const UPrimitiveComponent* Part)
             { return StructuralContact(*Part, Node.World); }))
         {
@@ -331,7 +331,7 @@ void AIslandAttachedMud::RefreshFor(AActor& Structure)
                     for (int32 X = -1; X <= 1; ++X)
                     {
                         const int32* N = Other.Samples.Find(Center + FIntVector(X,Y,Z));
-                        if (N && !Nodes[*N].Reached && FVector::DistSquared(Nodes[*N].World, Node.World) <= Step * Step * 2.15)
+                        if (N && !Nodes[*N].Reached && FVector::DistSquared(Nodes[*N].World, Node.World) <= MudCellSpacing * MudCellSpacing * 2.15)
                             Reach(N);
                     }
         }
@@ -345,7 +345,7 @@ void AIslandAttachedMud::RefreshFor(AActor& Structure)
         TArray<FIslandLooseSamples> Groups;
         if (Mud->Voxels->CullUnsupported([&](FVector Local)
         {
-            const int32* N = Body.Samples.Find(RoundCell((Local - Body.Start) / Step));
+            const int32* N = Body.Samples.Find(RoundCell((Local - Body.Start) / MudCellSpacing));
             return N && Nodes[*N].Reached;
         }, &Groups))
         {

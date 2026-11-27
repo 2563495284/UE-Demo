@@ -19,7 +19,7 @@ public:
     static void RefreshFor(AActor& Structure);
     static bool ContainsMud(const TArray<AIslandAttachedMud*>& Nearby, FVector WorldPoint);
     static void GatherNearby(UWorld& World, const FBox& Bounds, TArray<AIslandAttachedMud*>& Out);
-    bool Strike(const FHitResult& Hit, float RadiusScale);
+    bool Strike(const FHitResult& Hit, float RadiusScale, float DepthScale);
     UIslandRouteVoxelComponent* Field() const { return Voxels; }
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const override;
 

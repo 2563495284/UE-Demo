@@ -110,7 +110,8 @@ bool AIslandProbe::FindArenaPunchSite(APartyVoxelSession& Arena,APartyVoxelPawn&
     // Keep the reef's checkpoint and the bridge's bank and submerged footings pristine for the scoring run.
     const int32 MaxX=Mode->CurrentPartyFeature==TEXT("PartyReefRun") ? 3 :
         Mode->CurrentPartyFeature==TEXT("PartyBridgeDash") ? 1 : 12;
-    for (int32 Y=-4; Y<=13; ++Y)
+    for (bool RequireThick : {true,false})
+      for (int32 Y=-4; Y<=13; ++Y)
         for (int32 X=-6; X<=MaxX; ++X)
         {
             const FVector Near=Arena.CellCenter(Origin+FIntVector(X,Y,0));
@@ -120,6 +121,8 @@ bool AIslandProbe::FindArenaPunchSite(APartyVoxelSession& Arena,APartyVoxelPawn&
             if (!bSeparate) continue;
             FHitResult Center;
             if (!FlatFloor(Arena,Near,Center) || FMath::Abs(Center.ImpactPoint.Z-Original.Z+Pawn.GetCapsuleComponent()->GetScaledCapsuleHalfHeight())>12.) continue;
+            // Prefer a floor with solid samples below the deepest possible cut.
+            if (RequireThick && Arena.TerrainDensityAt(Center.ImpactPoint-FVector(0,0,125.))>=0.f) continue;
             bool bFlat=true;
             for (int32 R=0; R<=160 && bFlat; R+=10)
             {

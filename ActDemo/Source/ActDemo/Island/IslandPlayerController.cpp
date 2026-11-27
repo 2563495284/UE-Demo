@@ -1,10 +1,13 @@
 #include "Island/IslandPlayerController.h"
+#include "Island/IslandEchoAudio.h"
+#include "Island/IslandExcavationEcho.h"
 #include "Island/IslandLocalPlayer.h"
 #include "ExpeditionText.h"
 #include "Island/IslandNeutralProp.h"
 #include "Island/IslandNeutralLayout.h"
 
 #include "Components/InputComponent.h"
+#include "Components/AudioComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LevelStreamingDynamic.h"
@@ -17,10 +20,12 @@
 #include "Engine/StreamableManager.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
-#include "Sound/SoundWave.h"
+#include "Sound/SoundAttenuation.h"
+#include "Sound/SoundBase.h"
 #include "UObject/ConstructorHelpers.h"
 #include "GameFeaturesSubsystem.h"
 #include "Interfaces/IPluginManager.h"
+#include "RHIGlobals.h"
 #include "PartyMinigame.h"
 #include "PartyVoxelArena.h"
 #include "Island/IslandGameMode.h"
@@ -29,8 +34,20 @@
 AIslandPlayerController::AIslandPlayerController()
 {
     PlayerCameraManagerClass = AExpeditionImpactCamera::StaticClass();
-    static ConstructorHelpers::FObjectFinder<USoundWave> Echo(TEXT("/Game/ActDemo/Audio/RockEcho"));
+    static ConstructorHelpers::FObjectFinder<USoundBase> Echo(TEXT("/Game/ActDemo/Audio/MS_ExcavationEcho"));
     EchoSound = Echo.Object;
+    EchoAttenuation = CreateDefaultSubobject<USoundAttenuation>(TEXT("ExcavationEchoAttenuation"));
+    EchoAttenuation->Attenuation.bSpatialize = true;
+    EchoAttenuation->Attenuation.bAttenuate = false; // The strike-to-lid distance sets the gain.
+    EchoAttenuation->Attenuation.bEnableReverbSend = false;
+}
+
+void AIslandPlayerController::AutoManageActiveCameraTarget(AActor* SuggestedTarget)
+{
+    // ClientRestart can arrive after a networked crew has already framed its dock.
+    const auto* HUD = GetHUD<AIslandHUD>();
+    if (IsLocalController() && HUD && HUD->OwnsDockView()) return;
+    Super::AutoManageActiveCameraTarget(SuggestedTarget);
 }
 
 void AIslandPlayerController::SetupInputComponent()
@@ -67,7 +84,15 @@ int32 AIslandPlayerController::GetTeam() const
 bool AIslandPlayerController::CanUseIslandWorld() const
 {
     const auto* HUD=GetHUD<AIslandHUD>();
-    return PartyVeil == EIslandPartyVeil::Clear && IsPlaying() && (!HUD || HUD->IsAcceptingWorldInput());
+    return PartyVeil == EIslandPartyVeil::Clear && IsPlaying() && !IsInPartyBriefing() && (!HUD || HUD->IsAcceptingWorldInput());
+}
+
+bool AIslandPlayerController::IsInPartyBriefing() const
+{
+    if (IsLocalController()) return GetLocalPartyBriefingRound() != 0;
+    const auto* World = GetWorld();
+    const auto* Round = World ? World->GetGameState<AIslandGameState>() : nullptr;
+    return Round && Round->Phase == EIslandPhase::PartyBriefing;
 }
 
 void AIslandPlayerController::ToggleMenu()
@@ -109,7 +134,12 @@ void AIslandPlayerController::ClearHeldIslandActions()
 
 void AIslandPlayerController::Punch()
 {
-    if (!CanUseIslandWorld() || !IsVoxelInputEnabled() || bHelpOpen || WaterState >= 2) return;
+    if (!CanUseIslandWorld() || !IsVoxelInputEnabled() || bHelpOpen || bMapOpen || WaterState >= 2) return;
+    if (auto* Hero = GetHero(); Hero && Hero->IsMudAnchored())
+    {
+        Super::Punch();
+        return;
+    }
     FVector Aim;
     if (AIslandChest* Chest = GetAimedChest(&Aim))
         ServerClickChest(Chest, Aim);
@@ -185,7 +215,9 @@ AIslandChest* AIslandPlayerController::TraceChest(const FVector& Start, const FV
     const bool bHit = AIslandNeutralProp::TraceShovel(*GetWorld(), Hit, Start, End, Query);
     Impact = bHit ? Hit.ImpactPoint : End;
     AIslandChest* Result = bHit ? Cast<AIslandChest>(Hit.GetActor()) : nullptr;
-    if (Result && !Result->IsReachableFrom(*Hero)) Result = nullptr;
+    // Aim is checked again from the player's eyes before use. An exposed lip can
+    // be in reach while the centre of the chest is still behind the pit wall.
+    if (Result && FVector::DistSquared(Hero->GetAimOrigin(),Impact) > FMath::Square(IslandRules::OpenReach)) Result = nullptr;
 
     // An exposed chest can settle below its discovery point, or lose both wooden panels.
     // Keep a small target there, clipped by the same first occluder as the visible chest.
@@ -216,7 +248,7 @@ AIslandChest* AIslandPlayerController::TraceChest(const FVector& Start, const FV
 AIslandChest* AIslandPlayerController::GetAimedChest(FVector* OutAim) const
 {
     const AVoxelCharacter* Hero = GetHero();
-    if (!Hero) return nullptr;
+    if (!Hero || Hero->IsMudAnchored()) return nullptr;
     const FVector Eye = Hero->GetAimOrigin();
     FVector Camera, Point;
     FRotator View;
@@ -232,10 +264,17 @@ AIslandChest* AIslandPlayerController::GetAimedChest(FVector* OutAim) const
 AIslandChest* AIslandPlayerController::GetChestAlongAim(const FVector& Aim) const
 {
     const AVoxelCharacter* Hero = GetHero();
-    if (!Hero || Aim.ContainsNaN() || !Aim.IsUnit(.05)) return nullptr;
+    if (!Hero || Hero->IsMudAnchored() || Aim.ContainsNaN() || !Aim.IsUnit(.05)) return nullptr;
     FVector Impact;
     const FVector Eye = Hero->GetAimOrigin();
-    return TraceChest(Eye, Eye + Aim * (IslandRules::OpenReach + IslandRules::ChestExtent.Size()), Impact);
+    AIslandChest* Chest = TraceChest(Eye, Eye + Aim * (IslandRules::OpenReach + IslandRules::ChestExtent.Size()), Impact);
+    if (Chest && UsesExpeditionAbilities())
+    {
+        FHitResult CrewMud;
+        const double Distance = FMath::Min<double>(AVoxelGameMode::AimReach, FVector::Dist(Eye, Impact));
+        if (AIslandGameMode::TraceCrewMud(*Hero, Eye, Eye + Aim * Distance, CrewMud)) return nullptr;
+    }
+    return Chest;
 }
 
 void AIslandPlayerController::ServerClickChest_Implementation(AIslandChest* Chest, FVector_NetQuantizeNormal Aim)
@@ -248,7 +287,7 @@ void AIslandPlayerController::ServerClickChest_Implementation(AIslandChest* Ches
 FString AIslandPlayerController::GetNeutralHint() const
 {
     const auto* Hero = GetHero();
-    if (!Hero) return {};
+    if (!Hero || Hero->IsMudAnchored()) return {};
     FHitResult Hit;
     const FVector Eye = Hero->GetAimOrigin();
     const FVector Aim = GetExcavationAim(*Hero);
@@ -300,15 +339,43 @@ void AIslandPlayerController::ClientWaterState_Implementation(uint8 State)
     WaterChangedAt = FPlatformTime::Seconds();
 }
 
-void AIslandPlayerController::ClientExcavationEcho_Implementation(bool bStrong)
+float AIslandPlayerController::GetEchoProximity() const
 {
+    return EchoDistanceCm >= 0.f ? FIslandExcavationEcho::Proximity(EchoDistanceCm) : 0.f;
+}
+
+void AIslandPlayerController::ClientExcavationEcho_Implementation(float DistanceCm, FVector_NetQuantizeNormal DigDirection)
+{
+    EchoDistanceCm = DistanceCm;
+    EchoDirection = DigDirection.GetSafeNormal();
+    if (DistanceCm < 0.f)
+    {
+        LastEchoAt = -1e9;
+        EchoDirection = FVector::ZeroVector;
+        return;
+    }
     LastEchoAt = FPlatformTime::Seconds();
-    bStrongEcho = bStrong;
-    UGameplayStatics::PlaySound2D(this, EchoSound, bStrong ? .74f : .41f, bStrong ? 1.17f : .77f);
+    PlayExcavationEcho();
 #if !UE_BUILD_SHIPPING
     if (FParse::Param(FCommandLine::Get(), TEXT("IslandQA")))
-        UE_LOG(LogTemp, Display, TEXT("ISLAND_EXCAVATION_ECHO strong=%d"), bStrong);
+        UE_LOG(LogTemp, Display, TEXT("ISLAND_EXCAVATION_ECHO strong=%d distance_cm=%.1f proximity=%.4f direction=%.4f,%.4f,%.4f"),
+            HasStrongEcho(), DistanceCm, GetEchoProximity(), EchoDirection.X, EchoDirection.Y, EchoDirection.Z);
 #endif
+}
+
+void AIslandPlayerController::PlayExcavationEcho()
+{
+    if (!IsLocalController() || !EchoSound || !GEngine || !GEngine->UseSound() || IsPartyTravelLocked()) return;
+    FVector Ear, Forward, Right;
+    GetAudioListenerPosition(Ear, Forward, Right);
+    const FIslandEchoAudio Cue = FIslandEchoAudio::ForListener(Ear, Forward, EchoDirection, GetEchoProximity());
+    // Both attacks live on one MetaSound render clock. A late gameplay frame
+    // cannot stretch the spacing or drop the rising/falling reply.
+    auto* Params = NewObject<UInitialActiveSoundParams>(this);
+    Params->AudioParams.Emplace(TEXT("ImpactPitch"), 12.f * FMath::Log2(Cue.Pitch));
+    Params->AudioParams.Emplace(TEXT("AnswerPitch"), 12.f * FMath::Log2(Cue.AnswerPitch));
+    Params->AudioParams.Emplace(TEXT("AnswerDelay"), Cue.AnswerDelay);
+    UGameplayStatics::PlaySoundAtLocation(this, EchoSound, Cue.Position, Cue.Volume, 1.f, 0.f, EchoAttenuation, nullptr, Params);
 }
 
 bool AIslandPlayerController::HasChestClue(const AIslandChest& Chest) const
@@ -341,7 +408,6 @@ void AIslandPlayerController::PlayerTick(float DeltaTime)
     {
         if (auto* PartyPawn = Cast<APartyVoxelPawn>(GetPawn()))
         {
-            PartyPawn->SetLocalLookScale(GetLocalLookScale());
             PartyPawn->SetLocalFirstPersonView(WantsFirstPersonView());
         }
         UpdatePartyClient();
@@ -350,7 +416,6 @@ void AIslandPlayerController::PlayerTick(float DeltaTime)
 
 namespace
 {
-    constexpr double EnterVeilSeconds = 1.35;
     constexpr double ReturnVeilSeconds = 1.05;
     constexpr double RevealVeilSeconds = .85;
 }
@@ -361,22 +426,22 @@ FIslandPartyTransitionView AIslandPlayerController::GetPartyTransitionView() con
     float Coverage = 0.f;
     if (PartyVeil == EIslandPartyVeil::Black) Coverage = 1.f;
     else if (PartyVeil == EIslandPartyVeil::Closing)
-        Coverage = FMath::Clamp(Age / (bPartyReturning ? ReturnVeilSeconds : EnterVeilSeconds), 0., 1.);
+        Coverage = FMath::Clamp(Age / ReturnVeilSeconds, 0., 1.);
     else if (PartyVeil == EIslandPartyVeil::Opening)
         Coverage = 1. - FMath::Clamp(Age / RevealVeilSeconds, 0., 1.);
     return {PartyVeil, Coverage, bPartyReturning, LocalPartyRound};
 }
 
-void AIslandPlayerController::StartPartyVeil(bool bReturning)
+void AIslandPlayerController::StartPartyReturnVeil()
 {
-    // An aborted load can already be partly or entirely black. Continue from that picture.
-    const double PreviousCoverage = GetPartyTransitionView().Coverage;
-    bPartyReturning = bReturning;
+    // During a failed preparation the page stays up until the return veil paints solid black.
+    const bool bReturningFromBriefing = GetLocalPartyBriefingRound() != 0;
+    bPartyReturning = true;
     bBlackReported = false;
     bRevealRequested = false;
     PartyVeil = EIslandPartyVeil::Closing;
-    VeilStart = FPlatformTime::Seconds() - PreviousCoverage * (bReturning ? ReturnVeilSeconds : EnterVeilSeconds);
-    UE_LOG(LogTemp, Display, TEXT("PARTY_VEIL stage=close round=%u direction=%s"), LocalPartyRound, bReturning ? TEXT("out") : TEXT("in"));
+    VeilStart = FPlatformTime::Seconds() - (bReturningFromBriefing ? ReturnVeilSeconds : 0.);
+    UE_LOG(LogTemp, Display, TEXT("PARTY_VEIL stage=close round=%u direction=out"), LocalPartyRound);
 }
 
 void AIslandPlayerController::SetPartyTravelLocked(bool bLocked)
@@ -417,6 +482,7 @@ void AIslandPlayerController::TickPartyVeil()
         if (!Camera || !Camera->HasPaintedPassageBlack(LocalPartyRound, bPartyReturning)) return;
         PartyVeil = EIslandPartyVeil::Black;
         BlackAtFrame = GFrameCounter;
+        LocalPartyBriefingFeature = NAME_None;
         SetPartyTravelLocked(true);
         UE_LOG(LogTemp, Display, TEXT("PARTY_VEIL stage=black round=%u direction=%s"), LocalPartyRound, Direction);
     }
@@ -445,26 +511,65 @@ void AIslandPlayerController::TickPartyVeil()
     }
 }
 
-void AIslandPlayerController::ClientPrepareParty_Implementation(uint32 RoundId, FName Feature, bool bAnimate)
+const TArray<FIslandPartyBriefingMember>& AIslandPlayerController::GetPartyBriefingMembers() const
+{
+    const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
+    if (Round && Round->PartyBriefingRound == LocalPartyRound && !Round->PartyBriefingMembers.IsEmpty())
+        return Round->PartyBriefingMembers;
+    return InitialPartyMembers;
+}
+
+void AIslandPlayerController::NotifyPartyBriefingPainted(uint32 RoundId)
+{
+    if (RoundId && RoundId == GetLocalPartyBriefingRound() && !bPartyReturning && !GUsingNullRHI && FApp::CanEverRender())
+        RecordPartyBriefingPresentation(true);
+}
+
+void AIslandPlayerController::RecordPartyBriefingPresentation(bool bRendered)
+{
+    if (BriefingPresentedFrame != MAX_uint64) return;
+    BriefingPresentedFrame = GFrameCounter;
+    UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_PRESENTED round=%u rendered=%d"), LocalPartyRound, bRendered);
+#if !UE_BUILD_SHIPPING
+    EarliestPartyPreloadTime = FParse::Param(FCommandLine::Get(), TEXT("PartyBriefSlowLoadQA"))
+        ? FPlatformTime::Seconds() + 8. : 0.;
+#endif
+}
+
+void AIslandPlayerController::ClientPrepareParty_Implementation(uint32 RoundId, FName Feature, bool bAnimate,
+    const TArray<FIslandPartyBriefingMember>& Members)
 {
     if (RoundId <= LocalPartyRound)
     {
         return;
     }
     LocalPartyRound = RoundId;
+    LocalPartyBriefingFeature = Feature;
+    InitialPartyMembers = Members;
+    BriefingPresentedFrame = MAX_uint64;
+    bPartyPreloadStarted = false;
+    bPartyActivating = false;
+    bPartyReturning = false;
+    bBlackReported = false;
     bAnimateParty = bAnimate;
     bCanUnloadParty = false;
     bWaitingForVenue = false;
     bPartyUnloadStarted = false;
     bPartyPawnReadySent = false;
-    ClearHeldIslandActions();
-    if (bAnimateParty) StartPartyVeil(false);
-    else
-    {
-        bPartyReturning = false;
-        SetVoxelInputEnabled(false);
-    }
+    PartyVeil = EIslandPartyVeil::Clear;
+    SetPartyTravelLocked(true);
+    if (auto* HUD = GetHUD<AIslandHUD>()) HUD->ShowLocalPartyBriefing(*this);
+    if (GUsingNullRHI || !FApp::CanEverRender()) RecordPartyBriefingPresentation(false);
+}
 
+void AIslandPlayerController::StartPartyPreload(uint32 RoundId, FName Feature)
+{
+    // A return timeout can leave local cleanup pending. Even that work can
+    // wait until the next round's page has painted.
+    ReleasePartyAssets();
+    PartyVenue = nullptr;
+    const FString PreviousPluginURL = MoveTemp(PartyPluginURL);
+    PartyPluginURL.Reset();
     UGameFeaturesSubsystem& Features = UGameFeaturesSubsystem::Get();
     if (!Features.GetPluginURLByName(Feature.ToString(), PartyPluginURL))
     {
@@ -474,6 +579,8 @@ void AIslandPlayerController::ClientPrepareParty_Implementation(uint32 RoundId, 
             PartyPluginURL = UGameFeaturesSubsystem::GetPluginURL_FileProtocol(Plugin->GetDescriptorFileName());
         }
     }
+    if (!PreviousPluginURL.IsEmpty() && PreviousPluginURL != PartyPluginURL)
+        Features.UnloadGameFeaturePlugin(PreviousPluginURL);
     if (PartyPluginURL.IsEmpty())
     {
         ServerPartyAssetsReady(RoundId, false);
@@ -496,9 +603,9 @@ void AIslandPlayerController::ClientPrepareParty_Implementation(uint32 RoundId, 
             {
                 return;
             }
-            bPartyActivating = false;
             if (!bPartyReturning)
             {
+                bPartyActivating = false;
                 if (Result.HasValue())
                 {
                     LoadPartyAssets(RoundId);
@@ -573,7 +680,7 @@ void AIslandPlayerController::ReportPartyAssets(uint32 RoundId)
 void AIslandPlayerController::ClientBeginPartyReturn_Implementation(uint32 RoundId)
 {
     if (RoundId != LocalPartyRound || bPartyReturning) return;
-    if (bAnimateParty) StartPartyVeil(true);
+    if (bAnimateParty) StartPartyReturnVeil();
     else bPartyReturning = true;
 }
 
@@ -594,8 +701,11 @@ void AIslandPlayerController::ClientReturnFromParty_Implementation(uint32 RoundI
     ReleasePartyAssets();
     if (bPartyActivating)
     {
-        UGameFeaturesSubsystem::Get().CancelGameFeatureStateChange(PartyPluginURL);
-        bPartyActivating = false;
+        UGameFeaturesSubsystem::Get().CancelGameFeatureStateChange(PartyPluginURL,
+            FGameFeaturePluginChangeStateComplete::CreateWeakLambda(this, [this, RoundId](const UE::GameFeatures::FResult&)
+            {
+                if (LocalPartyRound == RoundId) bPartyActivating = false;
+            }));
     }
 }
 
@@ -604,6 +714,30 @@ void AIslandPlayerController::UpdatePartyClient()
     TickPartyVeil();
     if (!bPartyReturning)
     {
+        if (GetLocalPartyBriefingRound())
+        {
+            const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
+            if (Round && Round->PartyBriefingRound == LocalPartyRound && Round->Phase == EIslandPhase::PartyPlaying)
+            {
+                LocalPartyBriefingFeature = NAME_None;
+                SetPartyTravelLocked(false);
+            }
+            else if (!bPartyPreloadStarted && GFrameCounter > BriefingPresentedFrame)
+            {
+                // OnPaint only records the frame. Run GameFeatures on the next game tick,
+                // after Slate has submitted the opaque page and its controls.
+                if (!bBlackReported)
+                {
+                    bBlackReported = true;
+                    ServerPartyScreenBlack(LocalPartyRound, false);
+                }
+#if !UE_BUILD_SHIPPING
+                if (FPlatformTime::Seconds() < EarliestPartyPreloadTime) return;
+#endif
+                bPartyPreloadStarted = true;
+                StartPartyPreload(LocalPartyRound, LocalPartyBriefingFeature);
+            }
+        }
         if (bWaitingForVenue && PartyVenue && (PartyVenue->IsLevelVisible() ||
             PartyVenue->GetLevelStreamingState()==ELevelStreamingState::FailedToLoad))
             ReportPartyAssets(LocalPartyRound);
@@ -620,14 +754,19 @@ void AIslandPlayerController::UpdatePartyClient()
         return;
     }
 
-    if (!bCanUnloadParty || bPartyUnloadStarted || !GetHero() || TActorIterator<APartySession>(GetWorld()) || TActorIterator<APartyPawn>(GetWorld()))
+    if (!bCanUnloadParty || bPartyActivating || bPartyUnloadStarted || !GetHero() || TActorIterator<APartySession>(GetWorld()) || TActorIterator<APartyPawn>(GetWorld()))
     {
         return;
     }
     if (PartyVenue && (PartyVenue->HasLoadedLevel() || PartyVenue->IsStreamingStatePending())) return;
     PartyVenue=nullptr;
     bPartyUnloadStarted = true;
-    if (!bAnimateParty) SetVoxelInputEnabled(true);
+    if (!bAnimateParty)
+    {
+        LocalPartyBriefingFeature = NAME_None;
+        SetPartyTravelLocked(false);
+        SetVoxelInputEnabled(true);
+    }
     const uint32 RoundId = LocalPartyRound;
     UGameFeaturesSubsystem& Features = UGameFeaturesSubsystem::Get();
     if (PartyPluginURL.IsEmpty() || (Features.IsGameFeaturePluginInstalled(PartyPluginURL) && !Features.IsGameFeaturePluginMounted(PartyPluginURL)))
@@ -635,28 +774,16 @@ void AIslandPlayerController::UpdatePartyClient()
         FinishPartyUnload(RoundId, true);
         return;
     }
-    Features.DeactivateGameFeaturePlugin(PartyPluginURL,
-        FGameFeaturePluginDeactivateComplete::CreateWeakLambda(this, [this, RoundId](const UE::GameFeatures::FResult& Result)
+    // Unload targets the Installed state, including deactivation of any active feature.
+    Features.UnloadGameFeaturePlugin(PartyPluginURL,
+        FGameFeaturePluginUnloadComplete::CreateWeakLambda(this, [this, RoundId](const UE::GameFeatures::FResult& Result)
         {
-            if (RoundId != LocalPartyRound)
-            {
-                return;
-            }
+            if (RoundId != LocalPartyRound) return;
             if (!Result.HasValue())
-            {
-                UE_LOG(LogTemp, Warning, TEXT("PARTY_FEATURE_DEACTIVATE_FAILED round=%u %s"), RoundId, *Result.GetError());
-            }
-            UGameFeaturesSubsystem::Get().UnloadGameFeaturePlugin(PartyPluginURL,
-                FGameFeaturePluginUnloadComplete::CreateWeakLambda(this, [this, RoundId](const UE::GameFeatures::FResult& Unload)
-                {
-                    const UGameFeaturesSubsystem& Subsystem = UGameFeaturesSubsystem::Get();
-                    const bool bInstalled = Subsystem.IsGameFeaturePluginInstalled(PartyPluginURL) && !Subsystem.IsGameFeaturePluginMounted(PartyPluginURL);
-                    if (!Unload.HasValue())
-                    {
-                        UE_LOG(LogTemp, Warning, TEXT("PARTY_FEATURE_UNLOAD_FAILED round=%u %s"), RoundId, *Unload.GetError());
-                    }
-                    FinishPartyUnload(RoundId, Unload.HasValue() && bInstalled);
-                }));
+                UE_LOG(LogTemp, Warning, TEXT("PARTY_FEATURE_UNLOAD_FAILED round=%u %s"), RoundId, *Result.GetError());
+            const auto& Subsystem = UGameFeaturesSubsystem::Get();
+            const bool bInstalled = Subsystem.IsGameFeaturePluginInstalled(PartyPluginURL) && !Subsystem.IsGameFeaturePluginMounted(PartyPluginURL);
+            FinishPartyUnload(RoundId, Result.HasValue() && bInstalled);
         }));
 }
 
@@ -706,6 +833,18 @@ void AIslandPlayerController::ServerPartyAssetsReady_Implementation(uint32 Round
     {
         Mode->PartyAssetsReady(*this, RoundId, bSuccess);
     }
+}
+
+void AIslandPlayerController::ServerAgreeParty_Implementation(uint32 RoundId)
+{
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+        Mode->PartyBriefingResponse(*this, RoundId, false);
+}
+
+void AIslandPlayerController::ServerForceStartParty_Implementation(uint32 RoundId)
+{
+    if (auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>())
+        Mode->PartyBriefingResponse(*this, RoundId, true);
 }
 
 void AIslandPlayerController::ServerPartyScreenBlack_Implementation(uint32 RoundId, bool bReturning)

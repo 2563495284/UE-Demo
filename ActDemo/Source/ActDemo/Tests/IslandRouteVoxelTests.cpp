@@ -48,6 +48,18 @@ bool FIslandRouteObjectVolumeTest::RunTest(const FString&)
     Replica->ReadChanges(Snapshot);
     TestTrue(TEXT("Cleared collision and render sections agree across peers"), Field->RemainingCount() == 0 &&
         Replica->RemainingCount() == 0 && Field->GetNumSections() == 0 && Replica->GetNumSections() == 0);
+    auto* Thick = NewObject<UIslandRouteVoxelComponent>();
+    if (!TestTrue(TEXT("A solid object for measuring penetration"), Thick->InitializeField(Bounds, 10., Column))) return false;
+    const FVector Top(0.,0.,175.);
+    // Hold the contact and lateral radius constant to measure only the axial reach.
+    Thick->ApplyWorldCut(Top, FVector::UpVector, 124., 1.f);
+    TestTrue(TEXT("A broad light cut leaves material 70 cm behind the face"), Thick->IsSolidLocal(Top-FVector(0.,0.,70.)));
+    Thick->ApplyWorldCut(Top, FVector::UpVector, 124., 1.5f);
+    TestTrue(TEXT("Half charge reaches 70 cm and leaves material at 95 cm"),
+        !Thick->IsSolidLocal(Top-FVector(0.,0.,70.)) && Thick->IsSolidLocal(Top-FVector(0.,0.,95.)));
+    Thick->ApplyWorldCut(Top, FVector::UpVector, 124., 2.f);
+    TestTrue(TEXT("Full charge reaches 95 cm and leaves material at 125 cm"),
+        !Thick->IsSolidLocal(Top-FVector(0.,0.,95.)) && Thick->IsSolidLocal(Top-FVector(0.,0.,125.)));
     return true;
 }
 #endif

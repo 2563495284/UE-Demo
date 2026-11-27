@@ -21,4 +21,7 @@ namespace PartyPunch
     }
     inline float Alpha(uint8 Power) { return float(Power)/255.f; }
     inline float RadiusScale(uint8 Power,bool bBoost=false) { return (bBoost ? 2.f : 1.f)+Alpha(Power); }
+    constexpr int32 LightDepthCm = 40;
+    inline float DepthScale(uint8 Power) { return 1.f + Alpha(Power); }
+    inline int32 DepthCm(uint8 Power) { return FMath::RoundToInt(LightDepthCm * DepthScale(Power)); }
 }

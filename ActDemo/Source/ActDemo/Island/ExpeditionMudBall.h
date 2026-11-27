@@ -20,8 +20,6 @@ struct FExpeditionMudStop
     GENERATED_BODY()
     UPROPERTY() FVector_NetQuantize10 Point = FVector::ZeroVector;
     UPROPERTY() FVector_NetQuantizeNormal Normal = FVector::UpVector;
-    UPROPERTY() TObjectPtr<AVoxelCharacter> MarkedCharacter;
-    UPROPERTY() uint8 Marks = 0;
     UPROPERTY() double Time = -1.;
 };
 
@@ -33,6 +31,9 @@ public:
     AExpeditionMudBall();
     static constexpr double ThrowSpeed = 960., ArcLift = 220., FallAcceleration = 1150., Radius = 9.;
     static FVector LaunchVelocity(const FVector& Aim);
+    static FVector AimAtPoint(const FVector& From, const FVector& BallCenter);
+    static bool TraceContact(UWorld& World, const AVoxelCharacter& Thrower, const FVector& Start,
+        const FVector& End, float SweepRadius, FHitResult& Hit);
     void Launch(const FVector& Aim);
     virtual void Tick(float DeltaSeconds) override;
     virtual void BeginPlay() override;
@@ -41,15 +42,13 @@ public:
 private:
     double ServerNow() const;
     FVector PositionAt(double Age) const;
-    bool TraceSegment(const FVector& Start, const FVector& End, FHitResult& Hit) const;
     void DrawStop(double Now);
-    void ApplyLaunchPose();
+    void UpdateFlyingClod(double Age);
 
     UPROPERTY(Replicated) FExpeditionMudFlight Flight;
     UPROPERTY(Replicated) FExpeditionMudStop Stop;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> Clod;
     UPROPERTY() TObjectPtr<UMaterialInterface> ClayBase;
-    bool bPlayedThrow = false;
-    bool bPlayedMarks = false;
+    TOptional<FVector> HandOffset;
     double SimulatedAge = 0.;
 };

@@ -184,6 +184,7 @@ bool UPartyDensityTerrain::ApplyBrush(FIntVector Center, FIntVector Normal, bool
     using namespace VoxelSurfaceKernel;
     if (Samples.IsEmpty() || ProtectedMin.Num()!=ProtectedMax.Num()) return false;
     const int32 Radius = FMath::RoundToInt(62.f * PartyPunch::RadiusScale(Power));
+    const int32 CutDepth = PartyPunch::DepthCm(Power);
     const FIntVector Extent(bFill ? 185 : Radius+Band+Spacing);
     const FIntVector Lo = FloorVector(FVector(Center-Extent-Origin)/Spacing).ComponentMax(FIntVector(1));
     const FIntVector Hi = FloorVector(FVector(Center+Extent-Origin)/Spacing).ComponentMin(Dimensions-FIntVector(2));
@@ -206,7 +207,7 @@ bool UPartyDensityTerrain::ApplyBrush(FIntVector Center, FIntVector Normal, bool
             {
                 const FIntVector P(X,Y,Z);
                 const FIntVector World = Origin+P*Spacing;
-                int32 Distance = bFill ? ToolDistance(World-Center,Normal,true) : ToolDistanceWithRadius(World-Center,Normal,Radius);
+                int32 Distance = bFill ? ToolDistance(World-Center,Normal,true) : ToolDistanceWithRadius(World-Center,Normal,Radius,CutDepth);
                 if (bFill)
                     for (int32 B=0; B<ProtectedMin.Num(); ++B)
                         Distance = FMath::Max(Distance,-FMath::Max((ProtectedMin[B]-World).GetMax(),(World-ProtectedMax[B]).GetMax()));

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from contextlib import ExitStack
+from datetime import datetime
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -28,8 +29,7 @@ GAME_CASES = {
 }
 MAZE = "PartyMazeChase"
 VOXEL_GAMES = {"PartyReefRun", "PartyBeaconClimb", "PartyCrystalHunt", "PartyBridgeDash", "PartyFloodGates", "PartyCrownHold", MAZE}
-VEIL_SHOTS = ("PartyPull.png", "TransitionInBlack.png", "TransitionInArrival.png",
-              "TransitionOutClosing.png", "TransitionOutBlack.png", "TransitionOutArrival.png")
+VEIL_SHOTS = ("TransitionOutClosing.png", "TransitionOutBlack.png", "TransitionOutArrival.png")
 TREASURE_SHOTS = ("TreasureFragment.png", "TreasureForge.png", "TreasureVault.png")
 CHARACTER_CASES = {"character-pair": (2, False), "character-solo": (1, True)}
 ROOM_CASES = {**GAME_CASES, **CHARACTER_CASES, "solo": (1, True), "coop": (2, True), "duel": (2, False), "crew-drop": (3, False),
@@ -78,7 +78,7 @@ def verify_scenery_view(role, log):
 
 
 def verify_interaction(logs, rounds, allow_exit):
-    expected = {(int(r[0]), direction) for r in rounds for direction in ("in", "out")}
+    expected = {(int(r[0]), "out") for r in rounds}
     pattern = re.compile(r"VEIL_PROOF round=(\d+) direction=(in|out) moved=([\d.]+) early=(\d) black=(\d) unlocked=(\d) drift=([\d.]+) swap=(\d) destination_correction=([\d.]+) black_input=([\d.]+)")
     proof = {}
     for role, log in logs.items():
@@ -103,11 +103,6 @@ def verify_interaction(logs, rounds, allow_exit):
             observed = re.findall(rf"PARTY_VEIL stage=(\w+) round={n} direction={direction}\b", log)
             if observed != ["close", "black", "open", "clear"]:
                 raise RuntimeError(f"{role} missed a veil phase for round {n}/{direction}: {observed}")
-            if direction == "in":
-                begin = log.find(f"PARTY_FEATURE_BEGIN round={n} ")
-                black = log.find(f"PARTY_VEIL stage=black round={n} direction=in")
-                if begin < 0 or begin >= black:
-                    raise RuntimeError(f"{role} did not request the feature before round {n} reached full black")
         proof[role] = list(views.values())
     for n, direction in expected:
         host = logs["host"]
@@ -298,10 +293,10 @@ def verify_decoy_return(logs, winning_masks, events, count):
     physical_effects = []
     for n, event in events.items():
         if event == 5:
-            contact = re.search(rf"DECOY_QA_CEASEFIRE round={n} enemy_marks=0 stun=0 ground_rise_cm=([\d.]+)", host)
+            contact = re.search(rf"DECOY_QA_CEASEFIRE round={n} clods=0 anchored=0 ground_rise_cm=([\d.]+)", host)
             if not contact or not 35 < float(contact[1]) < 48:
                 raise RuntimeError(f"Missing ceasefire contact and ground geometry evidence in round {n}")
-            physical_effects.append(dict(round=n, enemy_marks=0, stunned=False, pad_height_cm=float(contact[1])))
+            physical_effects.append(dict(round=n, clods=0, anchored=False, pad_height_cm=float(contact[1])))
         if event == 4:
             jump = re.search(rf"DECOY_QA_JUMP round={n} normal_cm_s=([\d.]+) actual_cm_s=([\d.]+)", host)
             if not jump or float(jump[1]) <= 0 or abs(float(jump[2]) - float(jump[1]) * 1.5) > .1:
@@ -388,10 +383,11 @@ def verify_arena_views(log, rounds):
             raise RuntimeError(f"Round {n} {mode} camera has gap {gap}, body {body}, first person paws {paws}")
         observations.setdefault(int(n), {})[mode] = float(gap)
     targets = {(int(n), int(first)) for n, first in re.findall(r"ARENA_VIEW_TARGET round=(\d+) first=(\d) matched=1", log)}
+    entries = {int(n) for n in re.findall(r"ARENA_VIEW_ENTRY round=(\d+) first=\d", log)}
     returns = {int(n) for n in re.findall(r"ARENA_VIEW_RETURN round=(\d+) first=\d", log)}
     for n, *rest in rounds:
         n = int(n)
-        if (set(observations.get(n, {})) != {"first", "third"} or n not in returns
+        if (set(observations.get(n, {})) != {"first", "third"} or n not in entries or n not in returns
                 or not all((n, value) in targets for value in (0, 1))):
             raise RuntimeError(f"Round {n}: missing first/third view, center aimed block or matching island return")
     return observations
@@ -461,6 +457,20 @@ def punch_collision_radius(scan):
     raise RuntimeError(f"No crater edge in sampled collision {scan}")
 
 
+def verify_punch_depths(scans, location, authority=None):
+    # Engine traces report millimetres. Slight starting slopes and interpolated voxel
+    # collision cause a small difference from the brush's depth along the surface normal.
+    depths = [scan[0] / 10 for scan in scans]
+    powers = [trial["power"] for trial in authority[2:]] if authority else [0, 128, 255, 255]
+    targets = [40 + 40 * power / 255 for power in powers]
+    if any(abs(depth - target) > 6 for depth, target in zip(depths, targets)):
+        raise RuntimeError(f"{location}: measured punch depths {depths} cm, expected {targets} cm")
+    light, half, full, over = depths
+    if half - light < 8 or full - half < 8 or abs(full - over) > 4:
+        raise RuntimeError(f"{location}: tap, half, full and overcharge did not deepen then cap: {depths} cm")
+    return depths
+
+
 def punch_authority_samples(host, windows, marker, observed_sky_hold):
     result = []
     for trial, (start, end) in enumerate(windows):
@@ -511,10 +521,9 @@ def verify_field_punches(logs):
     if any(any(abs(d)>2 for d in depths) for depths in deltas[:2]):
         raise RuntimeError("Empty or cancelled island punch changed terrain")
     taps=deltas[2:]
-    centers=[scan[0] for scan in taps]
     widths=[punch_collision_radius(scan) for scan in taps]
-    if min(centers)<240 or max(centers)>540 or max(centers)-min(centers)>80 or any(abs(scan[-1])>8 for scan in taps):
-        raise RuntimeError(f"Island punch depth or untouched outside control failed: {deltas}")
+    if any(abs(scan[-1]) > 8 for scan in taps):
+        raise RuntimeError(f"Island punch changed the untouched outside control: {deltas}")
     if not (widths[0]+10 < widths[1] < widths[2]-10 and abs(widths[2]-widths[3])<8):
         raise RuntimeError(f"Island tap, half, full and overcharged collision radii failed: {widths}")
     inputs=re.findall(r"ARENA_PUNCH_INPUT round=81 trial=(\d+) held=([.\d]+) alpha=([.\d]+) sky=(\d) retarget=(\d) flush=(\d)", logs["guest1"])
@@ -523,13 +532,16 @@ def verify_field_punches(logs):
     if not (float(inputs[2][2])<.3 and .35<float(inputs[3][2])<.75 and float(inputs[4][2])==float(inputs[5][2])==1
             and float(inputs[5][1])>float(inputs[4][1])+.35):
         raise RuntimeError("Island charge display or cap did not follow the physical mouse on guest1")
-    evidence = dict(shooter="guest1", peers=len(logs), half_depth_radius_cm=widths, center_depth_cm=[d/10 for d in centers],
+    evidence = dict(shooter="guest1", peers=len(logs), half_depth_radius_cm=widths,
+                    radial_offsets_cm=list(range(0, 161, 10)),
+                    collision_depth_profiles_cm=[[d/10 for d in scan] for scan in taps],
                     no_edit_cases=["sky", "focus_flush"], actual_holds_seconds=[float(row[1]) for row in inputs])
     if "client_seconds=" in logs["host"]:
         # The lookahead captures power first so the two tool formats expose the same tuple.
         marker = r"EXPEDITION_PUNCH_RELEASE (?=[^\n]*?power=(\d+))seconds=([.\d]+) power=\d+ client_seconds=([.\d]+) ping_ms=([-\d.]+)"
         windows = [(f"FIELD_PUNCH_PROFILE trial={i} after=0 ", f"FIELD_PUNCH_PROFILE trial={i} after=1 ") for i in range(6)]
         evidence["authority"] = punch_authority_samples(logs["host"], windows, marker, float(inputs[0][1]))
+    evidence["center_depth_cm"] = verify_punch_depths(taps, "Main island", evidence.get("authority"))
     return evidence
 
 
@@ -539,12 +551,12 @@ def verify_arena_punches(logs, rounds):
     for role, log in logs.items():
         scans = {}
         for n, game, trial, seq, depths in re.findall(
-                r"ARENA_PUNCH_PROFILE round=(\d+) game=(\w+) trial=(\d+) seq=(\d+) depth_mm=([-\d,]+)", log):
+                r"ARENA_PUNCH_PROFILE round=(\d+) game=(\w+) trial=(\d+) seq=(\d+) depth_mm=([-\d,open]+)", log):
             key, trial = (int(n), game), int(trial)
             by_trial = scans.setdefault(key, {})
             if trial in by_trial or int(seq) != 3 + max(0, trial-1):
                 raise RuntimeError(f"{role}: duplicate or unexpected punch edit in {key} trial {trial}")
-            profile = tuple(map(int, depths.split(",")))
+            profile = tuple(None if d == "open" else int(d) for d in depths.split(","))
             if len(profile) != 17:
                 raise RuntimeError(f"{role}: incomplete 160 cm collision strip in {key}")
             by_trial[trial] = profile
@@ -563,22 +575,17 @@ def verify_arena_punches(logs, rounds):
         inputs[n, trial] = (float(held), float(alpha))
     evidence = {}
     for (n, game), by_trial in shared.items():
-        if any(abs(depth) > 8 for trial in (0, 1) for depth in by_trial[trial]):
+        if any(depth is None or abs(depth) > 8 for trial in (0, 1) for depth in by_trial[trial]):
             raise RuntimeError(f"{game}: empty swing or cancelling a live charge modified the floor")
         taps = [by_trial[i] for i in range(2,6)]
-        if any(not 220 <= scan[0] <= 500 or abs(scan[-1]) > 8 for scan in taps):
-            raise RuntimeError(f"{game}: unexpected center depth or damaged outside floor: {taps}")
-        if max(scan[0] for scan in taps) - min(scan[0] for scan in taps) > 42:
-            raise RuntimeError(f"{game}: charging changed inward depth")
-        widths = [punch_collision_radius(scan) for scan in taps]
-        if not (widths[0]+10 < widths[1] < widths[2]-10 and abs(widths[2]-widths[3]) <= 4):
-            raise RuntimeError(f"{game}: tap/half/full/over collision radii {widths} failed")
+        if any(scan[-1] is None or abs(scan[-1]) > 8 for scan in taps):
+            raise RuntimeError(f"{game}: punch changed the floor beyond the brush: {taps}")
         holds = [inputs[n,i] for i in range(6)]
         if not (holds[2][1] < .30 and .35 < holds[3][1] < .75 and holds[4][1] == holds[5][1] == 1
                 and holds[5][0] > holds[4][0]+.35):
             raise RuntimeError(f"{game}: the sender's charge display or hold cap did not match real input: {holds}")
-        evidence[str(n)] = dict(feature=game, shooter=shooter, peers=len(logs), collision_radius_at_half_depth_cm=widths,
-                                center_depth_cm=[scan[0]/10 for scan in taps], release_aim_changed=True,
+        evidence[str(n)] = dict(feature=game, shooter=shooter, peers=len(logs),
+                                release_aim_changed=True,
                                 empty_swing_edits=0, cancelled_edits=0)
         if "PARTY_PUNCH_RELEASE " in logs["host"]:
             first = f"ARENA_TERRAIN_PROFILE round={n} game={game} stage=3 "
@@ -587,7 +594,51 @@ def verify_arena_punches(logs, rounds):
             seat = 1 if shooter == "guest1" else 0
             marker = rf"PARTY_PUNCH_RELEASE seat={seat} (?=[^\n]*?power=(\d+))authority_seconds=([.\d]+) client_seconds=([.\d]+) ping_ms=([-\d.]+)"
             evidence[str(n)]["authority"] = punch_authority_samples(logs["host"], windows, marker, holds[0][0])
+        record = evidence[str(n)]
+        centers = [scan[0] for scan in taps]
+        if any(value is None for value in centers):
+            # The single-cell banks are thin enough to lose their bottom at full charge.
+            # Both high-power trials must show an open ray, while lighter punches retain a floor.
+            if centers[0] is None or centers[1] is None or centers[2:] != [None, None]:
+                raise RuntimeError(f"{game}: unexpected punch-through at the crater centers: {centers}")
+            powers = [trial["power"] for trial in record["authority"][2:4]] if "authority" in record else [0, 128]
+            expected_mm = [400 + 400 * power/255 for power in powers]
+            if any(abs(actual - target) > 60 for actual, target in zip(centers[:2], expected_mm)) or centers[1]-centers[0]<80:
+                raise RuntimeError(f"{game}: tap and half charge did not deepen as expected before punching through: {centers}")
+            record["center_depth_cm"] = [value / 10 if value is not None else None for value in centers]
+            record["open_center_trace_cm"] = 245
+        else:
+            record["center_depth_cm"] = verify_punch_depths(taps, game, record.get("authority"))
+        # Use half the intended 80 cm depth for a fully pierced bank. The collision
+        # edge still has a measured shoulder, even where there is no physical bottom.
+        widths = [punch_collision_radius([800 if d is None else d for d in scan]) for scan in taps]
+        if not (widths[0]+10 < widths[1] < widths[2]-10 and abs(widths[2]-widths[3]) <= 4):
+            raise RuntimeError(f"{game}: tap/half/full/over collision radii {widths} failed")
+        record["collision_radius_at_half_depth_cm"] = widths
     return evidence
+
+
+def verify_arena_controls(host):
+    samples = []
+    for line in host.splitlines():
+        if "ARENA_CONTROL_SAMPLE " in line:
+            fields = dict(entry.split("=") for entry in line.split("ARENA_CONTROL_SAMPLE ", 1)[1].split())
+            samples.append({field: float(value) for field, value in fields.items()})
+    if [sample["pass"] for sample in samples] != [0, 1, 2]:
+        raise RuntimeError("Missing control measurements before entry, inside the arena or after return")
+    island = samples[0]
+    if (min(abs(island["yaw"]), abs(island["pitch"])) < .1 or island["side_cm_s"] < 100
+            or abs(island["body_yaw"] - 90) > 1 or island["jump_cm"] < 30
+            or island["camera_x"] > -200 or island["camera_y"] < 10 or island["fov"] < 45
+            or abs(island["eye_x"]) > 1 or abs(island["eye_y"]) > 1 or island["eye_z"] < 10 or island["eye_fov"] < 45):
+        raise RuntimeError(f"The main island did not establish a valid walking, jumping and shoulder-camera baseline: {island}")
+    tolerance = dict(yaw=.1, pitch=.1, reverse_yaw=.1, reverse_pitch=.1, side_cm_s=1, body_yaw=1, jump_cm=4,
+                     camera_x=1, camera_y=1, camera_z=1, fov=.1, eye_x=1, eye_y=1, eye_z=1, eye_fov=.1)
+    for sample in samples[1:]:
+        for field, delta in tolerance.items():
+            if abs(sample[field] - island[field]) > delta:
+                raise RuntimeError(f"Control mismatch in pass {sample['pass']}: {field} {sample[field]} vs island {island[field]}")
+    return dict(zip(("before_entry", "arena", "after_return"), samples))
 
 
 def verify_venue_demolition(logs, rounds, all_buildings):
@@ -691,49 +742,57 @@ def summarize_party(logs, scenario):
     }
 
 
-def summarize_mud_contacts(host):
-    parts = re.split(r"MUD_QA_STEP stage=(\d+)\b", host)
-    stages = dict(zip(parts[1::2], parts[2::2]))
-    roster = re.search(r"MUD_QA_ROSTER first=(\S+) second=(\S+) target=(\S+)", stages["11"])
-    if not roster:
-        raise RuntimeError("Missing authoritative two-thrower roster")
-    first, second, victim = roster.groups()
-    pattern = re.compile(r"MUD_QA_CONTACT source=(\S+) target=(\S+) result=(\w+) stack=(\d+) time=([\d.]+)")
+def summarize_body_mud(logs):
+    expected = {2: (3, 0), 4: (3, 1), 23: (1, 1), 25: (2, 1), 26: (1, 1), 27: (0, 0)}
+    observations = {}
+    for stage, (clods, anchored) in expected.items():
+        agreed = re.search(rf"MUD_QA_AGREED stage={stage} peers=3 clods={clods} anchored={anchored} digest=(\w+)",
+                           logs["host"])
+        if not agreed:
+            raise RuntimeError(f"Missing three-peer clay agreement at stage {stage}")
+        digest = agreed[1]
+        for role, log in logs.items():
+            if f"MUD_QA_BODY_LOCAL stage={stage} clods={clods} anchored={anchored} digest={digest}" not in log:
+                raise RuntimeError(f"{role} did not reproduce the shape and support state at stage {stage}")
+        observations[stage] = dict(clods=clods, anchored=bool(anchored), digest=digest, peers=3)
+    return observations
 
-    def contacts(stage):
-        return [(source, result, int(stack), float(when)) for source, target, result, stack, when
-                in pattern.findall(stages[stage]) if target == victim]
 
-    pair = contacts("11")
-    if (len(pair) != 2 or {hit[0] for hit in pair} != {first, second}
-            or [(hit[1], hit[2]) for hit in pair] != [("accepted", 1), ("window", 1)]
-            or not 0 <= pair[1][3] - pair[0][3] < .4):
-        raise RuntimeError(f"Both teammates must physically hit the same capsule inside its 0.4 s gate: {pair}")
-    cleared = re.search(r"MUD_QA_STACK_CLEAR time=([\d.]+)", stages["12"])
-    if not cleared or not 1.45 <= float(cleared[1]) - pair[0][3] <= 1.78:
-        raise RuntimeError("Unrefreshed marks must expire at 1.5 s of server world time")
-    alternating = [(source, stack) for source, result, stack, _ in contacts("13") if result == "accepted"]
-    if alternating != [(first, 1), (second, 2), (first, 3)]:
-        raise RuntimeError(f"Three physical hits from alternating teammates must share one stack: {alternating}")
-    wake = re.search(r"MUD_QA_WAKE time=([\d.]+)", stages["14"])
-    end = re.search(r"MUD_QA_GROUP [^\n]*\bend_time=([\d.]+)", stages["15"])
-    if not wake or not end or not 3.8 <= float(end[1]) - float(wake[1]) <= 4.3:
-        raise RuntimeError("Wake immunity must last 4 s of authoritative world time")
-    protected = contacts("15")
-    if ({hit[0] for hit in protected} != {first, second} or any(hit[1:3] != ("immune", 0) for hit in protected)
-            or protected[-1][3] - float(wake[1]) < 2.4):
-        raise RuntimeError(f"Both teammates must hit the protected capsule without adding marks: {protected}")
-    restored = contacts("150")
-    if len(restored) != 1 or restored[0][:3] != (second, "accepted", 1) or restored[0][3] < float(end[1]):
-        raise RuntimeError(f"The first physical hit after immunity must start a fresh stack: {restored}")
-    return {"simultaneous_contact_gap_s": round(pair[1][3] - pair[0][3], 3),
-            "mark_expiry_s": round(float(cleared[1]) - pair[0][3], 3),
-            "protected_contacts": {seat: sum(hit[0] == name for hit in protected)
-                                   for seat, name in (("first", first), ("second", second))},
-            "wake_immunity_s": round(float(end[1]) - float(wake[1]), 3), "first_unprotected_stack": restored[0][2]}
+def verify_field_echoes(logs):
+    vector = r"(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)"
+    expected = re.findall(r"FIELD_QA_ECHO_EXPECT trial=(\d+) site=(\d+) decoy=([01]) candidates=(\d+) "
+                          r"distance_cm=([\d.]+) direction=" + vector, logs["host"])
+    end = re.search(r"FIELD_QA_ECHO_END trials=(\d+)", logs["host"])
+    if not end or len(expected) not in (3, 5) or len(expected) != int(end[1]):
+        raise RuntimeError("The search must compare three distances to a true lid and both distances to a configured decoy")
+    host_search = logs["host"].partition("FIELD_QA_ECHO_EXPECT")[2].partition("FIELD_QA_ECHO_END")[0]
+    if "ISLAND_EXCAVATION_ECHO strong=" in host_search or "ISLAND_EXCAVATION_ECHO strong=" in logs["guest2"]:
+        raise RuntimeError("A player other than the excavator received a treasure echo")
+    guest_search = logs["guest1"].partition("MUD_QA_BUTTON right=0 pressed=1")[0]
+    samples = []
+    previous_by_site = {}
+    for index, (trial, site, decoy, candidates, distance, *direction) in enumerate(expected):
+        segment = guest_search.partition(f"FIELD_QA_ECHO_STRIKE trial={trial}")[2].partition("FIELD_QA_ECHO_STRIKE")[0]
+        observed = re.findall(r"ISLAND_EXCAVATION_ECHO strong=([01]) distance_cm=([\d.]+) "
+                              r"proximity=([\d.]+) direction=" + vector, segment)
+        if int(trial) != index or bool(int(decoy)) != (index >= 3) or len(observed) != 1:
+            raise RuntimeError(f"Expected one directional echo for excavation trial {trial}, received {observed}")
+        level, actual_distance, proximity, *actual_dir = map(float, observed[0])
+        alignment = sum(float(a) * b for a, b in zip(direction, actual_dir))
+        if abs(float(distance) - actual_distance) > 8 or alignment < .995 or not 0 < proximity <= 1.:
+            raise RuntimeError(f"Echo did not describe the nearest eligible lid on trial {trial}: {observed[0]}")
+        if (index in (1, 2, 4) and
+                (site not in previous_by_site or proximity <= previous_by_site[site])):
+            raise RuntimeError(f"Approaching the same lid must strengthen its echo on trial {trial}")
+        previous_by_site[site] = proximity
+        samples.append(dict(site=int(site), decoy=bool(int(decoy)), audible_candidates=int(candidates),
+                            distance_cm=actual_distance, proximity=proximity, direction=actual_dir, strong=int(level)))
+    return samples
 
 
 def summarize_field(logs):
+    if "FIELD_QA_PEEL_AT_CHEST released=1 assisted=0" not in logs["host"]:
+        raise RuntimeError("A physical click over the lid must free the worker without rejoining the lock")
     shared = re.search(r"FIELD_QA_SHARED peers=3 seq=(\d+) crc=([0-9a-f]+) drop=(\d+) reference_delta=(-?\d+)", logs["host"])
     if (not shared or int(shared[1]) != 1 or not 28 <= int(shared[3]) <= 55 or abs(int(shared[4])) > 20
             or "FIELD_QA_PUNCH_INPUT" not in logs["guest1"]):
@@ -746,10 +805,10 @@ def summarize_field(logs):
     walk = re.search(r"FIELD_QA_WALK advance=(\d+) depth=(\d+)", logs["host"])
     if not walk or int(walk[1]) < 65 or int(walk[2]) < 12:
         raise RuntimeError("Guest did not walk into the newly excavated ground and stand on its lower floor")
-    dig_log = logs["host"].partition("FIELD_QA_ECHO_SEARCH predicted_gap=")[2].partition("ISLAND_LOCK start")[0]
-    echoes = re.findall(r"ISLAND_EXCAVATION_ECHO strong=([01])", dig_log)
-    if not echoes or echoes[0] != "0" or "1" not in echoes or "ISLAND_EXCAVATION_ECHO" in logs["guest2"]:
-        raise RuntimeError("Expected weak then strong echoes on the excavator, and silence on the distant observer")
+    echoes = verify_field_echoes(logs)
+    first_lid = re.search(r"FIELD_QA_FIRST_LID sight=1 body_covered=([01]) distance_cm=([\d.]+)", logs["host"])
+    if not first_lid:
+        raise RuntimeError("The first exposed chest must have a clear sightline before widening the pit for three players")
     for role, log in logs.items():
         if f"FIELD_QA_TERRAIN seq={shared[1]} crc={shared[2]} drop={shared[3]} reference_delta={shared[4]}" not in log:
             raise RuntimeError(f"{role} did not observe the same local dig, reference height and density")
@@ -768,8 +827,8 @@ def summarize_field(logs):
     if events != ["start", "assist", "handoff", "seize", "abandoned", "start", "assist", "abandoned"]:
         raise RuntimeError(f"Unexpected contested vault transitions: {events}")
     for worker, role in ((1, "leader"), (0, "helper")):
-        if f"FIELD_QA_TWO_HITS worker={worker}" not in logs["host"] or f"FIELD_QA_STUN_LOCK worker={role}" not in logs["host"]:
-            raise RuntimeError(f"The active {role} must keep working through two impacts and drop out on the third.")
+        if f"FIELD_QA_TWO_HITS worker={worker}" not in logs["host"] or f"FIELD_QA_ANCHORED_LOCK worker={role}" not in logs["host"]:
+            raise RuntimeError(f"The active {role} must be able to pry with unattached torso mud and drop out when the ankle connects to the floor.")
     if "FIELD_QA_HELD physical=1 held_edits=0 retargeted=1 released_edits=1" not in logs["host"]:
         raise RuntimeError("A physical punch must hold without editing, then strike once at the release aim.")
     if ("FIELD_QA_CHARGE_CANCEL reason=chart release_edits=0" not in logs["host"]
@@ -782,13 +841,16 @@ def summarize_field(logs):
             "ground_delta_cm_at_4m": int(shared[4]),
             "guest_walk_forward_cm": int(walk[1]), "guest_walk_depth_cm": int(walk[2]),
             "rally_delivered_to_crew_only": True,
-            "dig_echo_samples": [int(level) for level in echoes],
+            "dig_echo_samples": [sample["strong"] for sample in echoes],
+            "directional_echoes": echoes,
+            "visible_lid_at_reveal": {"body_still_covered": first_lid[1] == "1", "view_distance_cm": float(first_lid[2])},
             "agreed_terrain_crc": shared[2], "edit_sequence": int(shared[1]),
             "replicated_crew_role_views": sum(map(len, expected.values())),
             "chest_transitions": events, "protected_lock": True, "seize_limit": 1,
             "abandon_resets_work": True, "three_sites_with_key_rejected": True, "unspent_keys_preserved": True,
             "physical_held_retarget_and_release": True, "held_shovel_did_not_open_lid": True, "e_did_not_open_lid": True,
-            "two_hits_preserve_lock": True, "third_hit_leader_handoff": True, "third_hit_helper_removed": True}
+            "free_clay_preserves_lock": True, "anchored_leader_handoff": True, "anchored_helper_removed": True,
+            "self_peel_at_lid_without_rejoining": True}
 
 
 NEUTRAL_KINDS = ("Bridge", "Dam", "SandDepot", "WindTower")
@@ -918,7 +980,7 @@ def summarize_game_abort(logs):
         raise RuntimeError("Missing safe rollback and successful return from the retry")
     for role, log in logs.items():
         stages = re.findall(r"PARTY_VEIL stage=(\w+) round=1 direction=(\w+)", log)
-        if stages != [("close","in"), ("black","in"), ("close","out"), ("black","out"), ("open","out"), ("clear","out")]:
+        if stages != [("close","out"), ("black","out"), ("open","out"), ("clear","out")]:
             raise RuntimeError(f"{role} observed unexpected blackout stages during the cancelled load: {stages}")
     attempts = re.findall(r"PARTY_PREPARE round=[12] chest=(\d+)", host)
     settled = re.findall(r"PARTY_CHEST_SETTLED round=(\d+) site=(\d+) outcome=(\d+) opener=\d+ winner=\d+ rewarded=(\d+)", host)
@@ -931,6 +993,95 @@ def summarize_game_abort(logs):
     return dict(scenario="games-abort", processes=2, cancelled_before_pawn_swap=True,
                 guest_recovered_movement_cm=float(moved[1]), retried_chest=int(attempts[0]),
                 cancelled_rewards=0, successful_retry_settlements=1)
+
+
+def verify_party_briefings(logs, args, shot_output, directory, guests):
+    host = logs["host"]
+    pages = re.findall(r"PARTY_BRIEFING round=(\d+) feature=(\w+) players=(\d+)", host)
+    starts = re.findall(r"PARTY_BRIEFING_START round=(\d+) agreed=(\d+) players=(\d+) forced=([01])", host)
+    aborted = set(re.findall(r"PARTY_ABORT round=(\d+)", host))
+    pages = [row for row in pages if row[0] not in aborted]
+    if not pages or [row[0] for row in pages] != [row[0] for row in starts] or len(starts) != len({s[0] for s in starts}):
+        raise RuntimeError("Every completed briefing must lead to exactly one start")
+
+    def marker(log, text):
+        match = re.search(r"^\[([\d.\-:]+)\][^\n]*? " + re.escape(text) + r"(?=\s|$)", log, re.MULTILINE)
+        if not match:
+            raise RuntimeError(f"Missing briefing event {text}")
+        return datetime.strptime(match[1], "%Y.%m.%d-%H.%M.%S:%f")
+
+    results = []
+    for (round_id, feature, initial), (_, agreed, active, forced) in zip(pages, starts):
+        force = args.briefing == "force"
+        departed = args.briefing == "drop" and round_id == "1"
+        if int(active) != int(initial) - departed or int(forced) != int(force) or int(agreed) != (0 if force else int(active)):
+            raise RuntimeError(f"Unexpected briefing start: {round_id=} {agreed=} {active=} {initial=} {forced=}")
+        ready = marker(host, f"PARTY_BRIEFING_READY round={round_id}")
+        consent = marker(host, f"PARTY_BRIEFING_{'FORCE' if force else 'CONSENSUS'} round={round_id}")
+        swap = marker(host, f"PARTY_SWAP round={round_id} direction=in")
+        start = marker(host, f"PARTY_BRIEFING_START round={round_id}")
+        if start < max(ready, consent) or (args.slow_briefing_load and not departed and consent >= ready):
+            raise RuntimeError(f"Incorrect load/consent ordering in briefing {round_id}")
+        if args.long_read and round_id == "1" and (consent - ready).total_seconds() < 15:
+            raise RuntimeError("Host did not remain on the technically ready page past the asset timeout")
+        for role in ["host", *guests]:
+            if args.briefing == "drop" and role == guests[-1] and round_id != "1":
+                continue
+            log = logs[role]
+            if f"PARTY_BRIEFING_PAGE round={round_id} feature={feature} host={int(role == 'host')}" not in log:
+                raise RuntimeError(f"{role} missed briefing {round_id} for {feature}")
+            votes = re.findall(rf"PARTY_BRIEFING_INPUT round={round_id} forced=(\d) slate=(\d)", log)
+            should_press = (not force or role == "host") and not (departed and role == guests[-1])
+            rendered = not args.headless_host if role == "host" else args.render_guests
+            presented = marker(log, f"PARTY_BRIEFING_PRESENTED round={round_id} rendered={int(rendered)}")
+            if not (departed and role == guests[-1]):
+                loading = marker(log, f"PARTY_FEATURE_BEGIN round={round_id}")
+                if loading < presented or re.search(rf"PARTY_VEIL stage=\w+ round={round_id} direction=in\b", log):
+                    raise RuntimeError(f"{role} exposed an entry transition or loaded before the briefing in round {round_id}")
+            elif args.briefing == "drop" and f"PARTY_FEATURE_ACTIVE round={round_id} success=1" in log:
+                raise RuntimeError("Departing guest had already finished loading")
+            if votes != ([(str(int(force)), str(int(rendered)))] if should_press else []):
+                raise RuntimeError(f"{role} submitted an unexpected input in briefing {round_id}: {votes}")
+            if rendered:
+                paint = re.search(rf"PARTY_BRIEFING_PAINT round={round_id} feature={feature} screen=(\d+)x(\d+) viewport=(\d+)x(\d+)", log)
+                if not paint:
+                    raise RuntimeError(f"{role} missed the first painted briefing in round {round_id}")
+                w, h, vw, vh = map(int, paint.groups())
+                if min(w, h, vw, vh) < 1 or abs(w / vw - h / vh) > .01:
+                    raise RuntimeError(f"{role} briefing does not fit its viewport: {paint[0]}")
+                if f"PARTY_BRIEFING_VIDEO feature={feature} round={round_id} " not in log:
+                    raise RuntimeError(f"{role} did not decode the tutorial for {feature} in round {round_id}")
+                name = f"Brief-{round_id}-{feature}.png"
+                path = shot_output / name if role == "host" else shot_output / role / name
+                destination = directory / name if role == "host" else directory / role / name
+                if not path.is_file():
+                    raise RuntimeError(f"Missing {role} briefing screenshot: {path}")
+                from PIL import Image
+                with Image.open(path) as picture:
+                    rgb = picture.convert("RGB")
+                    # Both outside edges must show the same opaque page from top to bottom.
+                    edges = [rgb.getpixel((int(rgb.width*x), int(rgb.height*y)))
+                             for x in (.005, .995) for y in (.1, .4, .7, .95)]
+                    if any(max(channel) - min(channel) > 3 for channel in zip(*edges)):
+                        raise RuntimeError(f"{role} briefing leaves scenery or HUD visible along a viewport edge")
+                if path != destination:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, destination)
+                if args.slow_briefing_load and not departed and role == "host":
+                    waiting = path.with_name(f"Waiting-{round_id}-{feature}.png")
+                    if not waiting.is_file():
+                        raise RuntimeError(f"Host did not display the accepted start while the slow guest loaded: {waiting}")
+                    if waiting.parent != destination.parent:
+                        shutil.copy2(waiting, destination.parent / waiting.name)
+        voters = re.findall(rf"PARTY_BRIEFING_AGREE round={round_id} player=(\d+)", host)
+        waiting_votes = sum(marker(host, f"PARTY_BRIEFING_AGREE round={round_id} player={voter}") < ready for voter in voters)
+        results.append(dict(round=int(round_id), feature=feature, players=int(active), agreed=int(agreed), forced=force,
+                            votes_before_technical_readiness=waiting_votes,
+                            consent_to_start_ms=round((start-consent).total_seconds()*1000),
+                            scene_wait_after_consent_ms=round(max(0, (swap-consent).total_seconds())*1000),
+                            pawn_wait_after_consent_ms=round(max(0, (ready-max(consent, swap)).total_seconds())*1000),
+                            ready_to_start_ms=round((start-ready).total_seconds()*1000)))
+    return results
 
 
 def run(args, ip, mode, directory):
@@ -988,6 +1139,8 @@ def run(args, ip, mode, directory):
                 shared.append("-ExpeditionArenaTerrainQA")
             if args.arena_views:
                 shared.append("-ExpeditionArenaViewsQA")
+            if args.arena_controls:
+                shared.append("-ExpeditionArenaControlsQA")
             if args.game_only:
                 shared.append("-ExpeditionGameOnly=" + args.game_only)
             if args.scenario == "games-drop":
@@ -998,8 +1151,6 @@ def run(args, ip, mode, directory):
             shared.append("-CharacterSelectionQA")
         if args.scenario == "mud":
             shared.append("-ExpeditionMudQA")
-            if args.mud_exit:
-                shared.append(f"-MudExit={args.mud_exit}")
         if args.scenario == "neutral":
             shared.append("-ExpeditionNeutralQA")
             if args.structures:
@@ -1010,13 +1161,16 @@ def run(args, ip, mode, directory):
                 shared.append(f"-NeutralOnlyKind={tuple(k.lower() for k in NEUTRAL_KINDS).index(args.neutral_kind)}")
         if args.scenario == "field":
             # Keep the three lock participants in the same sightline fixture on both networks.
-            shared.extend(["-ExpeditionFieldQA", "-ExpeditionSeed=1872304730"])
+            shared.append("-ExpeditionFieldQA")
+            if args.seed is None:
+                shared.append("-ExpeditionSeed=1872304730")
     elif args.scenario != "hunt":
         shared.append("-IslandPartyQA")
     if args.scenario == "party-timeout":
         shared.append("-IslandPartyTimeout")
     shot_output = directory
-    if (args.scenario in ("field", "neutral", "mud") or args.scenario in GAME_CASES) and args.screenshot and not args.editor:
+    if (((args.scenario in ("field", "neutral", "mud") or args.scenario in GAME_CASES) and args.screenshot)
+            or args.briefing) and not args.editor:
         with (args.app / "Contents/Info.plist").open("rb") as stream:
             bundle = plistlib.load(stream)["CFBundleIdentifier"]
         shot_output = Path.home() / "Library/Containers" / bundle / "Data/tmp/ExpeditionField" / str(time.time_ns())
@@ -1039,6 +1193,22 @@ def run(args, ip, mode, directory):
                 if (args.scenario in ("field", "neutral", "mud") or args.scenario in GAME_CASES):
                     render.append(f"-FieldShotsDir={shot_output if role == 'host' else shot_output / role}")
             scenario_flags = ["-NeutralLayoutAudit"] if role == "host" and args.neutral_audit else []
+            if args.long_read and role == "host":
+                scenario_flags.append("-PartyBriefReadQA")
+            if (args.slow_briefing_load or args.briefing == "drop") and role == guests[-1]:
+                scenario_flags.append("-PartyBriefSlowLoadQA")
+            if args.briefing:
+                scenario_flags.extend(["-PartyBriefInspectQA", f"-PartyBriefShots={shot_output if role == 'host' else shot_output / role}"])
+                if role == "guest1" and args.render_guests:
+                    profile = shot_output / role / "profile"
+                    ini = profile / "Saved/Config" / ("MacEditor" if args.editor else "Mac") / "GameUserSettings.ini"
+                    ini.parent.mkdir(parents=True, exist_ok=True)
+                    ini.write_text("[/Script/ActDemo.IslandClientSettings]\nLanguage=en\n", encoding="utf-8")
+                    scenario_flags.append(f"-UserDir={profile}")
+                if args.briefing == "force":
+                    scenario_flags.append("-PartyBriefForceQA")
+                if args.briefing == "drop" and role == guests[-1]:
+                    scenario_flags.append("-PartyBriefHoldQA")
             if role == "host" and args.route_scenery_audit:
                 scenario_flags.append("-RouteSceneryAudit")
             if role == "host" and args.seed is not None:
@@ -1072,11 +1242,12 @@ def run(args, ip, mode, directory):
                 # in-game seat, so simultaneous slow editor starts do not affect their identity.
                 wait_for(processes, lambda logs: all("VOXEL_INITIAL crc=" in logs[g] for g in guests), load_timeout, "Neutral guests did not load the terrain")
             print(f"{mode}: {len(guests) + 1} independent processes joined {address}", flush=True)
-            if args.stall_before_black:
-                initial = wait_for(processes, lambda logs: all("PARTY_FEATURE_ACTIVE round=1 success=1" in log for log in logs.values()),
-                                   120, "Features were not ready for the host stall")
-                if "PARTY_VEIL stage=black round=1 direction=in" in initial["host"]:
-                    raise RuntimeError("Host already submitted blackout before the requested stall")
+            if args.stall_during_load:
+                intent = "FORCE" if args.briefing == "force" else "CONSENSUS"
+                logs = wait_for(processes, lambda current: f"PARTY_BRIEFING_{intent} round=1" in current["host"],
+                                150, "The host did not accept the early start")
+                if "PARTY_BRIEFING_READY round=1" in logs["host"]:
+                    raise RuntimeError("The guest was already ready before the planned server pause")
                 host = processes["host"][0]
                 os.kill(host.pid, signal.SIGSTOP)
                 try:
@@ -1092,7 +1263,12 @@ def run(args, ip, mode, directory):
             done_marker = "EXPEDITION_QA_DONE" if room else ("ISLAND_QA_DONE peers=6 reopened=1" if args.scenario == "hunt" else "PARTY_QA_DONE")
             if args.scenario in GAME_CASES:
                 if args.scenario == "games-drop":
-                    wait_for(processes, lambda logs: "EXPEDITION_GAMES_DROP_READY" in logs["host"], 150,
+                    def ready_to_drop(logs):
+                        if args.briefing == "drop":
+                            return ("PARTY_BRIEFING_PAGE round=1 " in logs[guests[-1]]
+                                    and all("PARTY_BRIEFING_INPUT round=1 " in logs[role] for role in ["host", *guests[:-1]]))
+                        return "EXPEDITION_GAMES_DROP_READY" in logs["host"]
+                    wait_for(processes, ready_to_drop, 150,
                              "The first arena did not open for the departing guest")
                     os.killpg(processes[guests[-1]][0].pid, signal.SIGTERM)
                     allow_exit = (guests[-1],)
@@ -1146,19 +1322,20 @@ def run(args, ip, mode, directory):
                 result = dict(scenario=args.scenario, processes=count, observations=observed, bound_meshes=physical)
             elif args.repro_dig:
                 result = {"scenario": "d-shaft-repro", "position_xy": [1830, -4673], "depth_below_surface_cm": 150, "exposed_and_opened": True}
-            elif args.scenario == "mud" and args.mud_exit:
-                cover = re.search(r"MUD_QA_COVER (.+)", logs["host"])
-                route = re.search(r"MUD_QA_ESCAPE_VARIANT (.+)", logs["host"])
-                if not cover or not route or f"route={args.mud_exit} " not in route[1]:
-                    raise RuntimeError("Missing closed shell or physical escape evidence")
-                result = dict(scenario="mud", cover=cover[1].strip(), escape=route[1].strip(), processes=3, teams=2)
             elif args.scenario == "mud":
-                result = {"scenario": "mud", "processes": 3, "teams": 2}
-                result["duel_contacts"] = summarize_mud_contacts(logs["host"])
-                for label in ("COVER", "ESCAPE", "PIT", "STEPS", "EXIT", "GROUP", "BUTTONS"):
+                result = {"scenario": "mud", "processes": 3, "teams": 2, "body_mud": summarize_body_mud(logs)}
+                for label in ("WALL_OCCLUSION", "CLIPPED", "RESCUE", "PIT", "STEPS", "EXIT", "BUTTONS"):
                     match = re.search(r"MUD_QA_" + label + r" (.*)", logs["host"])
-                    if not match: raise RuntimeError(f"Missing {label} evidence")
+                    if not match:
+                        raise RuntimeError(f"Missing {label} evidence")
                     result[label.lower()] = match[1].strip()
+                shaft = logs["host"].split("MUD_QA_STEP stage=7", 1)[1].split("MUD_QA_STEP stage=9", 1)[0]
+                launches = shaft.count("MUD_QA_THROW_POSE ")
+                pads = len(re.findall(r"VOXEL_SAMPLE side=host seq=\d+ action=2\b", shaft))
+                if not 0 < pads <= launches:
+                    raise RuntimeError(f"Missing physical throws or committed soil in the shaft: {launches} throws, {pads} pads")
+                result["shaft_throws"] = launches
+                result["shaft_placed_pads"] = pads
                 shared = logs["host"].split("MUD_QA_STEP stage=17", 1)[1].split("MUD_QA_STEP stage=18", 1)[0]
                 if shared.count("EXPEDITION_GAS_USE action=Expedition.Action.Throw ") < 2 or "EXPEDITION_GAS_USE action=Expedition.Action.Dig " in shared:
                     raise RuntimeError("A held punch must charge silently while right-button throws repeat")
@@ -1168,14 +1345,18 @@ def run(args, ip, mode, directory):
                 if continued.count("EXPEDITION_GAS_USE action=Expedition.Action.Throw ") < 2:
                     raise RuntimeError("Releasing dig interrupted held throw")
                 if args.screenshot:
-                    shots = ["MudDuel.png", "MudShell.png", "MudSteps.png"]
-                    for shot in shots:
-                        if not (shot_output/shot).is_file(): raise RuntimeError(f"Missing {shot}")
-                        if shot_output != directory: shutil.copy2(shot_output/shot, directory/shot)
-                    result["host_screenshots"] = shots
-                for role, log in logs.items():
-                    if "MUD_QA_LOCAL stage=3" not in log or "MUD_QA_LOCAL stage=8" not in log:
-                        raise RuntimeError(f"Missing actual collision observations from {role}")
+                    views = ["MudChest.png", "MudWall.png", "MudFoot.png", "MudDouble.png", "MudFreed.png"]
+                    for role in (["host", *guests] if args.render_guests else ["host"]):
+                        folder = Path() if role == "host" else Path(role)
+                        shots = views + (["MudSteps.png"] if role == "host" else [])
+                        (directory / folder).mkdir(parents=True, exist_ok=True)
+                        for shot in shots:
+                            source = shot_output / folder / shot
+                            if not source.is_file():
+                                raise RuntimeError(f"Missing {role} {shot}")
+                            if shot_output != directory:
+                                shutil.copy2(source, directory / folder / shot)
+                        result[f"{role}_screenshots"] = [str(folder / shot) for shot in shots]
             elif args.scenario == "crew-drop":
                 result = {"scenario": args.scenario, "launched_crews": 3, "remaining_players": 2, "original_berths_preserved": True}
             elif args.scenery_replay:
@@ -1439,6 +1620,8 @@ def run(args, ip, mode, directory):
                     result["charged_punch"] = verify_arena_punches(logs, rounds)
                 if args.arena_views:
                     result["arena_camera_distances_cm"] = {role: verify_arena_views(log, rounds) for role, log in logs.items()}
+                if args.arena_controls:
+                    result["control_parity"] = verify_arena_controls(logs["host"])
                 if args.venue_demolition or args.venue_smoke:
                     result["venue_demolition"] = verify_venue_demolition(logs, rounds, args.venue_demolition)
                 for role, log in logs.items():
@@ -1451,7 +1634,7 @@ def run(args, ip, mode, directory):
                     shots = (["MazeChasePlay.png", "PartyMazeChaseOverview.png", "MazePunchIntact.png",
                               "MazePunchDent.png", "MazePunchThrough.png", "MazePunchRepair.png"] if args.scenario == "games-maze" else
                              [game + suffix for game in sorted(games) for suffix in (".png", "Overview.png")])
-                    shots.append("PartyPull.png")
+                    shots.append("PartyEntry.png")
                     if args.arena_terrain:
                         shots.extend(terrain_shots(rounds))
                     if args.arena_views:
@@ -1461,7 +1644,7 @@ def run(args, ip, mode, directory):
                     if args.scenario != "games-maze" and not args.decoy_events and not (args.interaction and args.game_only):
                         shots.append("PartyTreasureHint.png")
                     if args.interaction:
-                        shots.extend(VEIL_SHOTS[1:])
+                        shots.extend(VEIL_SHOTS)
                         if any(row[5] == "decoy" for row in rounds):
                             shots.append("TreasureFalseChart.png")
                         if not args.game_only:
@@ -1525,10 +1708,13 @@ def run(args, ip, mode, directory):
                         result["performance_targets_met"] = result["host_frame_p95_ms"] <= 33.3 and max(result["edit_to_collision_p95_ms"].values()) <= 150
             else:
                 result = summarize(logs) if args.scenario == "hunt" else summarize_party(logs, args.scenario)
-            if args.stall_before_black:
-                if "PARTY_ABORT" in logs["host"] or "PARTY_START round=1" not in logs["host"]:
-                    raise RuntimeError("A ready minigame was cancelled during the host's display stall")
-                result["host_stall_after_assets_seconds"] = 17
+            if args.briefing:
+                result["briefings"] = verify_party_briefings(logs, args, shot_output, directory, guests)
+            if args.stall_during_load:
+                stalls = re.findall(r"PARTY_BRIEFING_HOST_STALL round=1 gap=([\d.]+)", logs["host"])
+                if not any(float(gap) >= 16 for gap in stalls):
+                    raise RuntimeError("The authority did not observe the requested long frame during preparation")
+                result["server_pause_during_load_seconds"] = 17
             if args.neutral_audit:
                 result["neutral_layout_audit"] = summarize_neutral_audit(logs["host"])
                 result["search_area_audit"] = summarize_search_audit(logs["host"])
@@ -1584,12 +1770,13 @@ def main():
     parser.add_argument("--game-only", choices=sorted(VOXEL_GAMES), help="Use a single trap game during expedition games QA")
     parser.add_argument("--arena-terrain", action="store_true", help="Dig and fill off-grid with the normal mouse controls, compare collision profiles on each peer")
     parser.add_argument("--arena-views", action="store_true", help="Toggle V in each arena and verify local camera, visible body, center aim and island return")
+    parser.add_argument("--arena-controls", action="store_true", help="Compare mouse response, turning, running, jumping and both camera views before entry, in an arena and after return. Use --headless-host to isolate the simulated mouse from desktop input")
     venue = parser.add_mutually_exclusive_group()
     venue.add_argument("--venue-demolition", action="store_true", help="Dig every building on each minigame map and compare geometry and collision after every strike on all three processes")
     venue.add_argument("--venue-smoke", action="store_true", help="Walk up to a building in each arena and compare the punched opening across all three players")
-    parser.add_argument("--mud-exit", choices=("under", "roof", "rescue"), help="Check a specific alternate escape from a sealed shell")
     parser.add_argument("--mode", choices=("normal", "emulated", "both"), default="both")
     parser.add_argument("--editor", action="store_true", help="Use editor game processes during iteration")
+    parser.add_argument("--briefing", choices=("all", "force", "drop"), help="Verify the mandatory pre-game page, votes and start route")
     parser.add_argument("--headless-host", action="store_true", help="Disable Metal for iteration only")
     parser.add_argument("--render-guests", action="store_true", help="Render the scenario in each guest's Metal viewport as well as the host's")
     parser.add_argument("--stress", action="store_true", help="Exercise 300 concurrent authoritative edits in an eight-player expedition")
@@ -1603,11 +1790,18 @@ def main():
     parser.add_argument("--repro-dig", action="store_true", help="Replay the recorded D excavation and trace actual cross-sections and occluders")
     parser.add_argument("--screenshot", action="store_true", help="Capture the completed chart or the party prompt on the host")
     parser.add_argument("--interaction", action="store_true", help="Exercise movement through both portal directions and capture private treasure feedback")
-    parser.add_argument("--stall-before-black", action="store_true", help="Suspend the ready host for 17 seconds before the first painted blackout")
+    parser.add_argument("--long-read", action="store_true", help="Keep the host reading the prepared first round for 50 seconds before consent")
+    parser.add_argument("--stall-during-load", "--stall-before-black", action="store_true", help="Pause the host for 17 seconds after early consent while a guest finishes loading")
+    parser.add_argument("--slow-briefing-load", action="store_true", help="Delay the last guest’s scene load by 8 seconds while its briefing stays interactive")
     parser.add_argument("--app", type=Path, default=APP)
     parser.add_argument("--map", help="Level package to host, defaults to the scenario's corresponding island")
     parser.add_argument("--output", type=Path, default=ROOT / "ActDemo/Saved/IslandQA")
     args = parser.parse_args()
+    if args.arena_controls:
+        if (args.scenario not in ("games", "games-solo", "games-crew") or args.game_only == MAZE or args.decoy_events
+                or args.interaction or args.arena_views or args.arena_terrain or args.venue_demolition or args.venue_smoke):
+            parser.error("--arena-controls needs a score-game round with exclusive control of the host's inputs")
+        args.game_only = args.game_only or "PartyReefRun"
     if args.expect_decoy_event and not args.decoy_events:
         parser.error("--expect-decoy-event requires --decoy-events")
     if args.decoy_events:
@@ -1623,15 +1817,28 @@ def main():
     if args.game_only == MAZE and (ROOM_CASES.get(args.scenario, (0, False))[1] or args.arena_views or
                                    args.venue_demolition or args.venue_smoke or args.arena_terrain or args.interaction):
         parser.error("Maze chase needs at least two crews and its own wall and spectator checks (--scenario games-maze)")
-    if args.stall_before_black and (args.scenario not in GAME_CASES or args.scenario == "games-abort"):
-        parser.error("--stall-before-black exercises a successfully loaded minigame")
+    if args.long_read:
+        if args.scenario not in GAME_CASES or args.scenario in ("games-abort", "games-drop"):
+            parser.error("--long-read requires an expedition minigame that will start successfully")
+        args.briefing = args.briefing or "all"
+    if args.stall_during_load:
+        if args.scenario not in GAME_CASES or args.scenario in ("games-solo", "games-drop", "games-abort"):
+            parser.error("--stall-during-load needs a multiplayer minigame that will start successfully")
+        args.slow_briefing_load = True
+        args.briefing = args.briefing or "all"
+    if args.slow_briefing_load and (not args.briefing or args.long_read or args.scenario == "games-solo"):
+        parser.error("--slow-briefing-load requires multiplayer --briefing without --long-read")
     if args.scenario == "games-abort":
         if args.decoys == 0 or args.interaction:
             parser.error("games-abort exercises one recoverable false chest and must be run independently of --interaction")
         args.game_only = args.game_only or "PartyReefRun"
     if (args.arena_views or args.arena_terrain) and args.scenario not in ("games", "games-crew", "games-solo"):
         parser.error("Arena view and terrain checks require a games, games-crew or games-solo scenario")
-    if args.render_guests and not ((args.interaction or args.arena_views or args.arena_terrain or args.scenery_replay or args.structures) and args.screenshot and not args.headless_host):
+    if args.briefing and args.scenario not in (*GAME_CASES, "party"):
+        parser.error("--briefing requires a games or party scenario")
+    if args.briefing == "drop" and args.scenario != "games-drop":
+        parser.error("--briefing drop requires --scenario games-drop")
+    if args.render_guests and not (args.briefing or ((args.interaction or args.arena_views or args.arena_terrain or args.scenery_replay or args.structures or args.scenario == "mud") and args.screenshot and not args.headless_host)):
         parser.error("--render-guests requires a visual scenario, --screenshot and a rendered host")
     if args.scenery_replay and (args.scenario != "neutral" or args.neutral_kind or args.structures):
         parser.error("--scenery-replay uses a separate neutral scenario")

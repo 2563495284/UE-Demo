@@ -193,7 +193,10 @@ bool AMazeChaseSession::ApplyStructureBrush(const FPartyVoxelChange& Brush)
     TArray<int32> Cells;
     const FVector Point=GetActorLocation()+FVector(Brush.Center);
     const FVector Normal=FVector(Brush.Normal).GetSafeNormal();
-    Field->SelectBrush(Point,Normal,62.*PartyPunch::RadiusScale(Brush.Power),Brush.bFill ? 64. : 33.,Brush.bFill,Cells);
+    // A 56 cm slab has six slices. A tap cuts three and a full punch cuts five,
+    // leaving a solid back until the player strikes the exposed face again.
+    const double Depth = Brush.bFill ? 64. : FMath::Lerp(30.,45.,double(PartyPunch::Alpha(Brush.Power)));
+    Field->SelectBrush(Point,Normal,62.*PartyPunch::RadiusScale(Brush.Power),Depth,Brush.bFill,Cells);
     // Authoritative repairs are accepted only after checking the actual capsules.
     // Peers replay that decision, independent of their interpolated positions.
     if (HasAuthority() && Brush.bFill && RepairIsOccupied(*Field,Cells))
@@ -241,8 +244,7 @@ void AMazeChaseSession::DefineBerths(const TArray<int32>& Seats, bool bMove)
         const FVector Center = RoomCenter({bRight ? Width-1 : 0,Lane});
         const FIntVector Feet = CellAt(GetActorLocation()+Center);
         const float Yaw = bRight ? 180.f : 0.f;
-        SetStart(Seat,Feet,Yaw);
-        const FVector Location = GetActorLocation()+Center+FVector(0,0,91.);
+        const FVector Location = SetStart(Seat,Feet,Yaw);
         Berths.Add(Seat,Location);
         if (APartyVoxelPawn* Pawn = Participant(Seat); bMove && Pawn)
         {
@@ -269,7 +271,6 @@ void AMazeChaseSession::StartParty()
         {
             Pawn->GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Visibility,ECR_Block);
             auto* Move = Pawn->GetCharacterMovement();
-            Move->MaxWalkSpeed = IsRunner(Seat) ? ChaseRunnerSpeed : ChaseHunterSpeed;
             Move->StopMovementImmediately();
             Move->DisableMovement();
         }

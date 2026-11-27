@@ -6,6 +6,7 @@
 class UProceduralMeshComponent;
 class AVoxelCharacter;
 class AVoxelTerrain;
+struct FVoxelDensity;
 
 UCLASS()
 class AIslandChest : public AActor
@@ -14,6 +15,7 @@ class AIslandChest : public AActor
 
 public:
     AIslandChest();
+    static bool IsLidExposed(const FVoxelDensity& Soil, FVector BuriedCenter);
     void SeatAtReveal(const AVoxelTerrain& Terrain);
     double GetInteractionDistanceSquared(FVector Origin) const;
     FVector GetDiscoveryPoint() const { return GetActorLocation() + FVector(0., 0., DiscoveryRise); }
@@ -22,7 +24,8 @@ public:
     bool IsPrize() const { return bPrize; }
     void MarkChallengeResolved();
     bool IsChallengeResolved() const { return bChallengeResolved; }
-    bool IsReachableFrom(const AVoxelCharacter& Hero) const;
+    bool IsReachableFrom(const AVoxelCharacter& Hero, FVector* VisiblePoint = nullptr) const;
+    bool FindInteractionPoint(FVector Eye, const AVoxelCharacter& Hero, FVector* VisiblePoint) const;
     void AnimateLock(double FinishAt, bool bAssisted);
     void RevealPrize(double ServerTime);
     bool IsPrizeRevealed() const { return PrizeOpenedAt >= 0.; }

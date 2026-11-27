@@ -7,6 +7,8 @@
 UVoxelInputConfig* UVoxelInputConfig::Create(UObject& Owner)
 {
     UVoxelInputConfig* Config = NewObject<UVoxelInputConfig>(&Owner);
+    UInputMappingContext* Character = NewObject<UInputMappingContext>(Config, TEXT("CharacterControls"));
+    Config->CharacterControls = Character;
     UInputMappingContext* Gameplay = NewObject<UInputMappingContext>(Config, TEXT("IslandGameplay"));
     Config->Gameplay = Gameplay;
 
@@ -14,12 +16,12 @@ UVoxelInputConfig* UVoxelInputConfig::Create(UObject& Owner)
     Config->Move->ValueType = EInputActionValueType::Axis2D;
     for (const FKey& Key : {EKeys::W, EKeys::A, EKeys::S, EKeys::D})
     {
-        FEnhancedActionKeyMapping& Mapping = Gameplay->MapKey(Config->Move, Key);
+        FEnhancedActionKeyMapping& Mapping = Character->MapKey(Config->Move, Key);
         if (Key == EKeys::A || Key == EKeys::S)
-            Mapping.Modifiers.Add(NewObject<UInputModifierNegate>(Gameplay));
+            Mapping.Modifiers.Add(NewObject<UInputModifierNegate>(Character));
         if (Key == EKeys::W || Key == EKeys::S)
         {
-            auto* Swizzle = NewObject<UInputModifierSwizzleAxis>(Gameplay);
+            auto* Swizzle = NewObject<UInputModifierSwizzleAxis>(Character);
             Swizzle->Order = EInputAxisSwizzle::YXZ;
             Mapping.Modifiers.Add(Swizzle);
         }
@@ -27,7 +29,9 @@ UVoxelInputConfig* UVoxelInputConfig::Create(UObject& Owner)
 
     Config->Look = NewObject<UInputAction>(Config, TEXT("Look"));
     Config->Look->ValueType = EInputActionValueType::Axis2D;
-    Gameplay->MapKey(Config->Look, EKeys::Mouse2D);
+    Character->MapKey(Config->Look, EKeys::Mouse2D);
+    Config->Jump = NewObject<UInputAction>(Config, TEXT("Jump"));
+    Character->MapKey(Config->Jump, EKeys::SpaceBar);
 
     auto BindButton = [&](const TCHAR* Name, const FKey& Key)
     {
@@ -35,7 +39,6 @@ UVoxelInputConfig* UVoxelInputConfig::Create(UObject& Owner)
         Gameplay->MapKey(Button, Key);
         return Button;
     };
-    Config->Jump = BindButton(TEXT("Jump"), EKeys::SpaceBar);
     Config->Dig = BindButton(TEXT("Dig"), EKeys::LeftMouseButton);
     Config->SecondaryTool = BindButton(TEXT("SecondaryTool"), EKeys::RightMouseButton);
     Config->Fill = BindButton(TEXT("Fill"), EKeys::Q);

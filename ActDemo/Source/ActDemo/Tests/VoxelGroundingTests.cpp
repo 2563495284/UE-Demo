@@ -102,10 +102,18 @@ bool FExpeditionFistRadiusTest::RunTest(const FString&)
         {
             Punch.PunchPower=Power;
             const int32 Radius=(bBoost ? 124 : 62) + (Power==0 ? 0 : Power==Half ? 31 : 62);
+            const int32 Depth=Power==0 ? 40 : Power==Half ? 60 : 80;
             TestEqual(TEXT("Light / half / full use linear radii"),Punch.PunchRadius(),Radius);
             Punch.SurfaceNormal={0,0,1000};
             TestEqual(TEXT("Floor edge matches the recorded radius"),PartyBrushDistance(Punch,{0,Radius,0}),0);
-            TestTrue(TEXT("A full footprint never cuts deeper than a light fist"),PartyBrushDistance(Punch,{0,0,-41})>0);
+            for (const FIntVector Axis : {FIntVector(0,0,1),FIntVector(1,0,0),FIntVector(0,0,-1)})
+            {
+                Punch.SurfaceNormal=Axis*1000;
+                TestEqual(TEXT("Charge places the far cut face at the expected depth"),PartyBrushDistance(Punch,Axis*(-Depth)),0);
+                TestTrue(TEXT("Material inside the new cut is removed"),PartyBrushDistance(Punch,Axis*(1-Depth))<0);
+                TestTrue(TEXT("Material just beyond the cut remains"),PartyBrushDistance(Punch,Axis*(-Depth-1))>0);
+                TestTrue(TEXT("The cut does not grow back toward the attacker"),PartyBrushDistance(Punch,Axis*41)>0);
+            }
             Punch.SurfaceNormal={1000,0,0};
             TestTrue(TEXT("Sideways punch carves same footprint on wall"),PartyBrushDistance(Punch,{-15,0,Radius-3})<0);
             TestTrue(TEXT("Material just outside wall footprint remains"),PartyBrushDistance(Punch,{-15,0,Radius+3})>0);
@@ -142,7 +150,7 @@ bool FExpeditionDecoyToolFootprintTest::RunTest(const FString& Parameters)
             Edit.bWideFootprint = bWide;
             const FIntVector Rim = Edit.Center + FIntVector(0,62 * Edit.FootprintScale(),0);
             TestEqual(TEXT("Cut radius is exact on the floor and the wall"), PartyBrushDistance(Edit,Rim), 0);
-            TestEqual(TEXT("Cut depth stays 40 cm along the surface normal"), PartyBrushDistance(Edit,Edit.Center - Normal*40/1000), 0);
+            TestEqual(TEXT("The footprint reward preserves light punch depth"), PartyBrushDistance(Edit,Edit.Center - Normal*40/1000), 0);
         }
     }
 

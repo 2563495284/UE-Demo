@@ -10,6 +10,7 @@
 
 class FIslandEOSGuest;
 class FIslandEOSLobby;
+class SIslandTravelScreen;
 
 enum class EIslandRoomNetwork : uint8 { Internet, LAN };
 
@@ -42,6 +43,9 @@ public:
     void UpdateAdvertisement(const FIslandRoomSettings& Settings, int32 Occupied, bool bLocked);
     bool IsBusy() const;
     bool IsManagedRoom() const { return bHosting; }
+    // Called after the destination's local HUD and camera have produced their first usable view.
+    void RevealTravelScreen(bool bImmediate = false);
+    bool IsTravelInputBlocked() const { return bTravelInputBlocked; }
 
     FIslandRoomSettings HostSettings;
     TArray<FIslandRoomListing> Rooms;
@@ -90,6 +94,14 @@ private:
     void FinishSearch();
     void UnbindSessionDelegates();
     void LoadFront();
+    void OpenHostedIsland();
+    bool ShowTravelScreen(const FText& Caption, float Opacity, bool bBehindMenu = false);
+    void ClearTravelScreen();
+    TSharedPtr<SIslandTravelScreen> TravelScreen;
+    TWeakObjectPtr<class UGameViewportClient> TravelViewport;
+    TWeakObjectPtr<UWorld> LoadedTravelWorld;
+    FTSTicker::FDelegateHandle TravelFade;
+    bool bTravelInputBlocked = false;
     void OnLoaded(UWorld* World);
     void UpdateDisplayForMap(const FString& Map, bool bGameWorld);
     void OnPreload(const FWorldContext& Context, const FString& Map);

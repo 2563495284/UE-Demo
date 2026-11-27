@@ -29,6 +29,15 @@ struct FVoxelProtectedBox
 };
 
 USTRUCT()
+struct FVoxelMudClearance
+{
+    GENERATED_BODY()
+    UPROPERTY() FIntVector Center = FIntVector::ZeroValue;
+    UPROPERTY() int32 Radius = 0;
+    UPROPERTY() int32 AxisHalfLength = 0;
+};
+
+USTRUCT()
 struct FVoxelEdit
 {
     GENERATED_BODY()
@@ -45,6 +54,9 @@ struct FVoxelEdit
     // Surface direction as fixed-point thousandths; all peers evaluate the same cut.
     UPROPERTY() FIntVector SurfaceNormal = FIntVector(0, 0, 1000);
     UPROPERTY() TArray<FVoxelProtectedBox> ProtectedBoxes;
+    // A pad stamps around bodies that could not be lifted. Record the exact voids
+    // with the edit so late clients rebuild it without consulting moving players.
+    UPROPERTY() TArray<FVoxelMudClearance> MudClearances;
     // All lobes of an environmental sand spill share one sequence and collision commit.
     UPROPERTY() TArray<FIntVector> ExtraFillCenters;
     static constexpr int32 MaxFillCenters = 128;
@@ -72,7 +84,6 @@ namespace VoxelPlayground
     constexpr uint8 LastBurialLayer = 6;
     inline bool IsBurial(uint8 Brush) { return Brush >= FirstBurialLayer && Brush <= LastBurialLayer; }
     FIntVector QuantizeNormal(const FVector& Normal);
-    bool IsBurialSurface(const FVector& FootAnchor, int32 CompletedLayers, const FVector& Point);
     FBox PartyBrushBounds(const FVoxelEdit& Edit);
     int32 PartyBrushDistance(const FVoxelEdit& Edit, FIntVector World);
     uint8 BrushFor(EVoxelAction Action);

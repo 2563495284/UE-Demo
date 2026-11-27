@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Containers/StaticArray.h"
+#include "PartyPunch.h"
 
 struct FProcMeshSection;
 
@@ -41,11 +42,12 @@ namespace VoxelSurfaceKernel
         return Low;
     }
 
-    inline int32 ToolDistanceWithRadius(FIntVector Local,FIntVector N,int32 RadiusCm,int32 DepthCm=40)
+    inline int32 ToolDistanceWithRadius(FIntVector Local,FIntVector N,int32 RadiusCm,int32 DepthCm)
     {
         const int32 Along=(Local.X*N.X+Local.Y*N.Y+Local.Z*N.Z)/1000;
         const int32 Radial=IntegerSqrt(FMath::Max(0,(Local.X*Local.X+Local.Y*Local.Y+Local.Z*Local.Z)-Along*Along));
-        return FMath::Max3(Radial-RadiusCm,-DepthCm-Along,Along-DepthCm);
+        // A charged fist penetrates the hit face. Its clearance on the player's side stays fixed.
+        return FMath::Max3(Radial-RadiusCm,-DepthCm-Along,Along-PartyPunch::LightDepthCm);
     }
 
     inline int32 ToolDistance(FIntVector Local, FIntVector N, bool bFill, int32 FootprintScale = 1)
@@ -54,7 +56,7 @@ namespace VoxelSurfaceKernel
         int32 Distance;
         if (!bFill)
         {
-            Distance = ToolDistanceWithRadius(Local,N,62*FootprintScale);
+            Distance = ToolDistanceWithRadius(Local,N,62*FootprintScale,PartyPunch::LightDepthCm);
         }
         else
         {

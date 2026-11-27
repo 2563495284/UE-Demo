@@ -8,11 +8,13 @@ class AIslandGameState;
 class AIslandPlayerState;
 class UIslandRoomSession;
 class SEditableTextBox;
+class SScrollBox;
 class SVerticalBox;
 class SIslandClientSettingsPanel;
+class SIslandPartyBriefPanel;
 enum class EIslandRoomNetwork : uint8;
 
-enum class EIslandPanel : uint8 { Home, Arriving, Create, Search, Lobby, Settings, Result, Pause, Hidden, ClientSettings, Character };
+enum class EIslandPanel : uint8 { Home, Arriving, Create, Search, Lobby, Settings, Result, Pause, Hidden, ClientSettings, Character, PartyBrief };
 
 class SIslandRoomPanel : public SCompoundWidget
 {
@@ -54,9 +56,11 @@ private:
     FString RoomStatus() const;
     TWeakObjectPtr<AIslandPlayerController> PC;
     TSharedPtr<SVerticalBox> Body, List;
+    TSharedPtr<SScrollBox> MenuScroll;
     TSharedPtr<SEditableTextBox> NameField, AddressField;
     TSharedPtr<SWidget> Primary, RefreshButton;
     TSharedPtr<SIslandClientSettingsPanel> ClientSettings;
+    TSharedPtr<SIslandPartyBriefPanel> PartyBrief;
     TSharedPtr<SWidget> ClientSettingsButton, CharacterButton;
     EIslandPanel SettingsOrigin = EIslandPanel::Home;
     TMap<FString, TSharedPtr<SWidget>> Entries;
@@ -68,7 +72,5 @@ private:
     bool bHostLayout = false;
     bool bChooseEmpty = false;
     uint32 Actions = 0;
-    FString LobbyName;
     int32 TeamRows = 0;
-    double TransitionAt = 0;
 };

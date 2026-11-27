@@ -90,10 +90,10 @@ public:
     void DrawPartyHUD(AHUD& HUD,const FVector2D& ViewportSize, bool bAnonymous) const override;
     APartyVoxelSession* GetSession() const { return Arena; }
     int32 GetSeat() const { return Seat; }
-    void SetLocalLookScale(FVector2D Scale) { LocalLookScale = Scale; }
+    bool CanMoveInArena() const;
+    bool CanLookInArena() const;
     void SetLocalFirstPersonView(bool bFirstPerson);
     bool IsInFirstPersonView() const { return bLocalFirstPerson && IsLocallyControlled(); }
-    FRotator GetViewRotation() const override;
     void CalcCamera(float DeltaSeconds, FMinimalViewInfo& OutView) override;
     FVector GetToolAimDirection() const;
     bool AimTerrain(FHitResult& Hit) const;
@@ -114,10 +114,11 @@ private:
     UFUNCTION(Server,Reliable) void ServerBeginPunch();
     UFUNCTION(Server,Reliable) void ServerEndPunch(bool bCancel,FVector_NetQuantizeNormal Direction,float ReportedHoldSeconds);
     UFUNCTION(NetMulticast,Reliable) void MulticastPunch(uint8 Power);
+    UFUNCTION(NetMulticast,Reliable) void MulticastPlace();
     UFUNCTION() void OnRep_PunchStart();
     UPROPERTY(ReplicatedUsing=OnRep_PunchStart) double ServerPunchStart=-1.;
     double LocalPunchStart=-1., ServerPunchRealStart=0.;
-    bool CanPunch() const;
+    bool CanActInRound() const;
     UFUNCTION(Server,Reliable) void ServerTool(bool bPlace,FVector_NetQuantizeNormal Direction);
     UPROPERTY(Replicated) TObjectPtr<APartyVoxelSession> Arena;
     UPROPERTY(Replicated) int32 Seat = INDEX_NONE;
@@ -134,7 +135,6 @@ private:
     UPROPERTY() TObjectPtr<UStaticMesh> UnpaintedFist;
     UPROPERTY() TObjectPtr<USceneComponent> OutfitRoot;
     FPartyCrewMotion CrewMotion;
-    double LastRenderedThrow=-1.;
     UPROPERTY() TObjectPtr<UStaticMeshComponent> CrewBadge;
     UPROPERTY() TObjectPtr<UMaterialInterface> BaseMaterial;
     UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> SuitPaint;
@@ -146,12 +146,8 @@ private:
     UPROPERTY(Replicated) bool bObservedFirstPerson = false;
     bool bSentFirstPerson = false;
     bool bSuitHiddenFromOwner = false;
-    bool bPlacingStroke = false;
-    double ToolStrokeAt = -1.;
-    FVector2D LocalLookScale = FVector2D(1., 1.);
     bool bWaitDigRelease = false;
     bool bWaitPlaceRelease = false;
-    bool bWaitJumpRelease = false;
 
     double NextLocalPlace = 0.;
     double NextServerDig = 0.;
@@ -165,8 +161,6 @@ class PARTYFRAMEWORK_API APartyVoxelSession : public APartySession
 public:
     APartyVoxelSession();
     static constexpr double StructureReach = 235., FillReach = 435.;
-    static constexpr float ChaseRunnerSpeed = 570.f;
-    static constexpr float ChaseHunterSpeed = 615.f;
     static constexpr double ChaseToolRecovery(bool bPlace) { return bPlace ? .85 : .55; }
     static FVector ArenaOrigin() { return FVector(150000.,150000.,18000.); }
     void SetArenaSeed(int32 Value) { Seed=Value; }
@@ -236,7 +230,7 @@ protected:
     void Box(FIntVector Min,FIntVector Max,EPartyBlock Kind);
     void Marker(FIntVector Cell,FColor Color);
     void SetBeacon(FIntVector Cell,FColor Color);
-    void SetStart(int32 Seat,FIntVector Feet,float Yaw=0.f);
+    FVector SetStart(int32 Seat,FIntVector Feet,float Yaw=0.f);
     TArray<int32> PlayingSeats() const;
     void SetScore(int32 Seat,int32 Points);
     void Finish(int32 Seat);

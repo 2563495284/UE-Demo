@@ -1,4 +1,5 @@
 #include "Voxel/VoxelPlayerController.h"
+#include "Island/IslandGameMode.h"
 
 #include "Island/IslandMessageText.h"
 #include "ExpeditionText.h"
@@ -7,9 +8,11 @@
 #include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
 #include "Island/IslandState.h"
+#include "Island/ExpeditionMudBall.h"
 #include "Island/IslandNeutralProp.h"
 #include "Island/IslandClientSettings.h"
 #include "PartyVoxelArena.h"
+#include "PartyCharacterControl.h"
 #include "PartyPunch.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -80,7 +83,10 @@ void AVoxelPlayerController::EndPlay(const EEndPlayReason::Type Reason)
 {
     if (InputConfig)
         if (auto* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
+        {
+            Subsystem->RemoveMappingContext(InputConfig->CharacterControls);
             Subsystem->RemoveMappingContext(InputConfig->Gameplay);
+        }
     Super::EndPlay(Reason);
 }
 
@@ -88,14 +94,15 @@ void AVoxelPlayerController::UpdateVoxelMapping()
 {
     if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()); Subsystem && InputConfig)
     {
-        if (bVoxelInputEnabled)
+        auto SetActive = [Subsystem](UInputMappingContext* Context, bool bActive)
         {
-            Subsystem->AddMappingContext(InputConfig->Gameplay, 0);
-        }
-        else
-        {
-            Subsystem->RemoveMappingContext(InputConfig->Gameplay);
-        }
+            if (Subsystem->HasMappingContext(Context) == bActive) return;
+            if (bActive) Subsystem->AddMappingContext(Context, 0);
+            else Subsystem->RemoveMappingContext(Context);
+        };
+        const bool bArena = Cast<APartyVoxelPawn>(GetPawn()) != nullptr;
+        SetActive(InputConfig->CharacterControls, bVoxelInputEnabled || bArena);
+        SetActive(InputConfig->Gameplay, bVoxelInputEnabled && !bArena);
     }
 }
 
@@ -162,6 +169,12 @@ void AVoxelPlayerController::Move(const FInputActionValue& Value)
 
 void AVoxelPlayerController::ApplyMove(const FVector2D& Input)
 {
+    if (auto* ArenaPawn = Cast<APartyVoxelPawn>(GetPawn()))
+    {
+        if (ArenaPawn->CanMoveInArena() && !IsMoveInputIgnored())
+            PartyCharacterControl::Move(*ArenaPawn, Input, GetControlRotation().Yaw);
+        return;
+    }
     if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && bVoxelInputEnabled)
     {
         Hero->MoveOnGrid(Input, GetControlRotation().Yaw);
@@ -179,7 +192,8 @@ FVector2D AVoxelPlayerController::GetLocalLookScale() const
 void AVoxelPlayerController::Look(const FInputActionValue& Value)
 {
     // Like movement, mouse look stays active while the island chart is held.
-    if (!bVoxelInputEnabled)
+    const auto* ArenaPawn = Cast<APartyVoxelPawn>(GetPawn());
+    if (ArenaPawn ? !ArenaPawn->CanLookInArena() : !bVoxelInputEnabled)
     {
         return;
     }
@@ -191,6 +205,11 @@ void AVoxelPlayerController::Look(const FInputActionValue& Value)
 
 void AVoxelPlayerController::Jump()
 {
+    if (auto* ArenaPawn = Cast<APartyVoxelPawn>(GetPawn()))
+    {
+        if (ArenaPawn->CanMoveInArena() && !IsMoveInputIgnored()) ArenaPawn->Jump();
+        return;
+    }
     if (AVoxelCharacter* Hero = GetHero(); Hero && bPlaying && IsVoxelInputEnabled())
     {
         if (UsesExpeditionAbilities())
@@ -234,7 +253,7 @@ void AVoxelPlayerController::SetExpeditionDigHeld(bool bHeld)
 {
     if (bDigHeld == bHeld) return;
     auto* Hero = GetHero();
-    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !Hero || Hero->IsMudStunned())) return;
+    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !Hero)) return;
     bDigHeld = bHeld;
     if (Hero) Hero->SetPunchChargePresentation(bHeld);
     if (bHeld)
@@ -244,7 +263,7 @@ void AVoxelPlayerController::SetExpeditionDigHeld(bool bHeld)
     }
     else
     {
-        const bool bCanPunch = Hero && bPlaying && IsVoxelInputEnabled() && !Hero->IsMudStunned();
+        const bool bCanPunch = Hero && bPlaying && IsVoxelInputEnabled();
         ServerFinishPunch(bCanPunch,bCanPunch ? GetExcavationAim(*Hero) : FVector::ForwardVector,float(FPlatformTime::Seconds()-LocalPunchStarted));
     }
 }
@@ -277,6 +296,7 @@ void AVoxelPlayerController::SetPawn(APawn* InPawn)
 {
     if (InPawn != GetPawn()) CancelPunchCharge();
     Super::SetPawn(InPawn);
+    UpdateVoxelMapping();
 }
 
 void AVoxelPlayerController::ClearServerPunch()
@@ -296,9 +316,9 @@ void AVoxelPlayerController::ServerFinishPunch_Implementation(bool bStrike,FVect
     if (!bServerDigHeld) return;
     const double Held = FPlatformTime::Seconds()-ServerPunchStarted;
     ClearServerPunch();
-    auto* Mode = GetWorld()->GetAuthGameMode<AVoxelGameMode>();
+    auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>();
     auto* Hero = GetHero();
-    if (!bStrike || !Hero || !Mode || !Mode->CanPlayerAct(*this) || Hero->IsMudStunned()
+    if (!bStrike || !Hero || !Mode || !Mode->CanPlayerPunch(*this) || bPeelingAtPress != Hero->IsMudAnchored()
         || Aim.ContainsNaN() || Aim.IsNearlyZero()) return;
     DigAim = Aim.GetSafeNormal();
     const float Ping=PlayerState && !IsLocalController() ? PlayerState->GetPingInMilliseconds() : -1.f;
@@ -314,7 +334,7 @@ void AVoxelPlayerController::ServerFinishPunch_Implementation(bool bStrike,FVect
 void AVoxelPlayerController::SetExpeditionThrowHeld(bool bHeld)
 {
     if (bThrowHeld == bHeld) return;
-    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !GetHero())) return;
+    if (bHeld && (!UsesExpeditionAbilities() || !bPlaying || !IsVoxelInputEnabled() || !GetHero() || GetHero()->IsMudAnchored())) return;
     bThrowHeld = bHeld;
     if (bHeld) DispatchExpeditionAction(EExpeditionAction::Throw, true, GetExpeditionThrowAim(*GetHero()));
     else ServerReleaseExpeditionAction(EExpeditionAction::Throw);
@@ -350,7 +370,10 @@ FVector AVoxelPlayerController::GetExcavationAim(const AVoxelCharacter& Hero) co
     FHitResult Hit;
     const bool bHit = UsesExpeditionAbilities() ? AIslandNeutralProp::TraceShovel(*GetWorld(),Hit,CameraLocation,End,Params)
         : GetWorld()->LineTraceSingleByChannel(Hit, CameraLocation, End, ECC_Visibility, Params);
-    const FVector Target = bHit ? Hit.ImpactPoint : End;
+    FVector Target = bHit ? Hit.ImpactPoint : End;
+    FHitResult CrewMud;
+    if (UsesExpeditionAbilities() && AIslandGameMode::TraceCrewMud(Hero, CameraLocation, Target, CrewMud))
+        Target = CrewMud.ImpactPoint;
     return (Target - Hero.GetAimOrigin()).GetSafeNormal();
 }
 
@@ -365,25 +388,48 @@ FVector AVoxelPlayerController::GetExpeditionThrowAim(const AVoxelCharacter& Her
     FVector Eye;
     FRotator View;
     GetPlayerViewPoint(Eye, View);
-    // Looking straight down in a shoulder camera otherwise hits well off to the side
-    // of the player's own capsule. In this limit the target is the ground at the toes.
-    if (!Hero.IsInFirstPersonView() && FRotator::NormalizeAxis(View.Pitch) < -72.f)
-        return (FRotator(0., View.Yaw, 0.).Vector() * .07f - FVector::UpVector).GetSafeNormal();
-
-    const FVector Far = Eye + View.Vector() * 1400.;
-    FHitResult WorldHit;
-    const FCollisionQueryParams Params(SCENE_QUERY_STAT(ExpeditionThrowCrosshair), false, &Hero);
-    FVector Target = AIslandNeutralProp::TraceShovel(*GetWorld(),WorldHit,Eye,Far,Params) ? WorldHit.ImpactPoint : Far;
-    // Pawn visibility deliberately ignores other players so chest traces stay clear.
-    // Intersect the actual capsules separately, clipped by the first scene obstruction.
-    for (TActorIterator<AVoxelCharacter> It(GetWorld()); It; ++It)
+    const FVector From = Hero.GetAimOrigin();
+    const FRotator Look = GetControlRotation();
+    // The shoulder boom centres above the head when looking down. In a shaft its
+    // ray can meet the rim above the thrower. Aim from the body along that same
+    // sightline so both an exposed ankle and the soil beneath the player are reachable.
+    const bool bAimUnderfoot = FRotator::NormalizeAxis(Look.Pitch) < -72.f;
+    if (bAimUnderfoot)
     {
-        const auto* Other = *It;
-        FHitResult BodyHit;
-        if (Other != &Hero && Other->GetCapsuleComponent()->LineTraceComponent(BodyHit, Eye, Target, Params))
-            Target = BodyHit.ImpactPoint;
+        Eye = From;
+        View = Look;
     }
-    return (Target - Hero.GetAimOrigin()).GetSafeNormal();
+    const FVector Far = Eye + View.Vector() * 1400.;
+    FHitResult Hit;
+    const bool bHit = AExpeditionMudBall::TraceContact(*GetWorld(), Hero, Eye, Far, 0.f, Hit);
+#if !UE_BUILD_SHIPPING
+    if (FParse::Param(FCommandLine::Get(),TEXT("ExpeditionMudQA")) && bThrowHeld)
+    {
+        static double NextSample = 0.;
+        const double Now = FPlatformTime::Seconds();
+        if (Now >= NextSample)
+        {
+            NextSample = Now + 1.;
+            UE_LOG(LogTemp,Display,TEXT("MUD_QA_AIM hero=%s from=%s pitch=%.1f hit=%s at=%s point=%s"),
+                *Hero.GetName(),*From.ToCompactString(),Look.Pitch,*GetNameSafe(Hit.GetActor()),
+                Hit.GetActor() ? *Hit.GetActor()->GetActorLocation().ToCompactString() : TEXT("-"),*Hit.ImpactPoint.ToCompactString());
+        }
+    }
+#endif
+    // Recenter shoulder-camera floor placement when looking straight down. A visible
+    // player, hanging clod or wall still receives the aimed shot at steep pitch.
+    if (bAimUnderfoot && (!bHit || (Hit.ImpactNormal.Z > .65 && !Cast<AVoxelCharacter>(Hit.GetActor()))))
+        return (FRotator(0., View.Yaw, 0.).Vector() * .07f - FVector::UpVector).GetSafeNormal();
+    if (!bHit)
+        return (Far - Hero.GetAimOrigin()).GetSafeNormal();
+    const FVector BallCenter = Hit.ImpactPoint + Hit.ImpactNormal * AExpeditionMudBall::Radius;
+    // At a start-overlap the physics contact can be behind the eye. Keep the
+    // throw pointed into the contacted surface and let its first sweep resolve it.
+    if (FVector::DotProduct(BallCenter - From, View.Vector()) <= 0.
+        || FVector::DotProduct(Hit.ImpactPoint - From, View.Vector()) <= 0.) return View.Vector();
+    if (FVector::DotProduct(BallCenter - From, Hit.ImpactPoint - From) <= 0.)
+        return (Hit.ImpactPoint - From).GetSafeNormal(UE_SMALL_NUMBER, View.Vector());
+    return AExpeditionMudBall::AimAtPoint(From, BallCenter);
 }
 
 FVector AVoxelPlayerController::GetExpeditionActionAim(EExpeditionAction Action) const
@@ -394,7 +440,7 @@ FVector AVoxelPlayerController::GetExpeditionActionAim(EExpeditionAction Action)
 void AVoxelPlayerController::DispatchExpeditionAction(EExpeditionAction Action, bool bHeld, FVector Aim)
 {
     if (bPlaying && IsVoxelInputEnabled() && UsesExpeditionAbilities() && GetHero())
-        ServerExpeditionAction(Action, bHeld, Aim.GetSafeNormal());
+        ServerExpeditionAction(Action, bHeld, Aim.GetSafeNormal(), GetHero()->IsMudAnchored());
 }
 
 void AVoxelPlayerController::SubmitExpeditionThrow(const FVector& Aim)
@@ -417,7 +463,7 @@ void AVoxelPlayerController::ServerUpdateExpeditionAim_Implementation(EExpeditio
     if (Action == EExpeditionAction::Throw && bServerThrowHeld) ThrowAim = Aim.GetSafeNormal();
 }
 
-void AVoxelPlayerController::ServerExpeditionAction_Implementation(EExpeditionAction Action, bool bHeld, FVector_NetQuantizeNormal Aim)
+void AVoxelPlayerController::ServerExpeditionAction_Implementation(EExpeditionAction Action, bool bHeld, FVector_NetQuantizeNormal Aim, bool bStartedAnchored)
 {
     auto* Hero = GetHero();
     const auto* Round = GetWorld()->GetGameState<AIslandGameState>();
@@ -428,17 +474,23 @@ void AVoxelPlayerController::ServerExpeditionAction_Implementation(EExpeditionAc
         if (Aim.ContainsNaN() || Aim.IsNearlyZero()) return;
         if (Action == EExpeditionAction::Dig)
         {
-            auto* Mode = GetWorld()->GetAuthGameMode<AVoxelGameMode>();
-            if (bServerDigHeld || !Mode || !Mode->CanPlayerAct(*this) || Hero->IsMudStunned()) return;
+            auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>();
+            if (bServerDigHeld || !Mode || !Mode->CanPlayerPunch(*this) || bStartedAnchored != Hero->IsMudAnchored()) return;
             DigAim = Aim.GetSafeNormal();
             if (bHeld)
             {
+                bPeelingAtPress = Hero->IsMudAnchored();
                 bServerDigHeld = true;
                 ServerPunchStarted = FPlatformTime::Seconds();
                 Hero->SetPunchChargePresentation(true);
             }
         }
-        else { ThrowAim = Aim.GetSafeNormal(); if (bHeld) bServerThrowHeld = true; }
+        else
+        {
+            if (Hero->IsMudAnchored()) return;
+            ThrowAim = Aim.GetSafeNormal();
+            if (bHeld) bServerThrowHeld = true;
+        }
     }
     if (Action != EExpeditionAction::Jump) TriggerExpeditionEvent(Action, bHeld);
 }
@@ -468,17 +520,12 @@ void AVoxelPlayerController::ServerReleaseExpeditionAction_Implementation(EExped
     }
 }
 
-void AVoxelPlayerController::OnMudStunChanged(bool bStunned)
+void AVoxelPlayerController::CancelMudInputs()
 {
-    if (bStunned)
-    {
-        RecoverStartedAt = -1.;
-        CancelPunchCharge();
-    }
-    if (!bStunned && HasAuthority() && UsesExpeditionAbilities())
-    {
-        if (bServerThrowHeld) TriggerExpeditionEvent(EExpeditionAction::Throw, true);
-    }
+    RecoverStartedAt = -1.;
+    CancelPunchCharge();
+    bThrowHeld = false;
+    bServerThrowHeld = false;
 }
 
 void AVoxelPlayerController::SubmitEdit(EVoxelAction Action, const FVector& Aim)
@@ -500,7 +547,7 @@ void AVoxelPlayerController::StopClimb() { if (!UsesExpeditionAbilities()) Serve
 
 void AVoxelPlayerController::StartRecover()
 {
-    if (bPlaying && IsVoxelInputEnabled() && GetHero() && !GetHero()->IsMudStunned() && RecoverStartedAt < 0.0)
+    if (bPlaying && IsVoxelInputEnabled() && GetHero() && !GetHero()->IsMudAnchored() && RecoverStartedAt < 0.0)
     {
         RecoverStartedAt = FPlatformTime::Seconds();
         if (UsesExpeditionAbilities()) DispatchExpeditionAction(EExpeditionAction::Recall, true);

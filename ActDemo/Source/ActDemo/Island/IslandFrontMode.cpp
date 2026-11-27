@@ -1,10 +1,11 @@
 #include "Island/IslandFrontMode.h"
 #include "Camera/CameraActor.h"
-#include "Camera/PlayerCameraManager.h"
+#include "Engine/GameInstance.h"
 #include "Engine/StaticMeshActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "EngineUtils.h"
 #include "Island/IslandHUD.h"
+#include "Island/IslandRoomSession.h"
 
 namespace
 {
@@ -29,12 +30,7 @@ void AIslandFrontController::UpdateCameraManager(float DeltaSeconds)
     if (HarbourCamera.IsValid() && GetViewTarget() != HarbourCamera.Get()) SetViewTarget(HarbourCamera.Get());
     if (PlayerCameraManager && !bHarbourPresented)
     {
-        const FLinearColor HarbourInk(.027f, .048f, .060f);
-        if (PresentationStartedAt < 0.)
-        {
-            PresentationStartedAt = FPlatformTime::Seconds();
-            PlayerCameraManager->SetManualCameraFade(1.f, HarbourInk, false);
-        }
+        if (PresentationStartedAt < 0.) PresentationStartedAt = FPlatformTime::Seconds();
         // On a cold Metal launch the sky can render before the dock's material pipelines.
         // Slate remains usable while the first visible authored meshes arrive.
         int32 VisibleProps = 0;
@@ -42,9 +38,9 @@ void AIslandFrontController::UpdateCameraManager(float DeltaSeconds)
         {
             if (It->GetStaticMeshComponent()->GetLastRenderTimeOnScreen() > 0.f) ++VisibleProps;
         }
-        if (VisibleProps >= 3 || FPlatformTime::Seconds() - PresentationStartedAt >= 3.)
+        if ((HarbourCamera.IsValid() && VisibleProps >= 3) || FPlatformTime::Seconds() - PresentationStartedAt >= 3.)
         {
-            PlayerCameraManager->StartCameraFade(1.f, 0.f, .32f, HarbourInk, false, false);
+            GetGameInstance()->GetSubsystem<UIslandRoomSession>()->RevealTravelScreen();
             bHarbourPresented = true;
         }
     }

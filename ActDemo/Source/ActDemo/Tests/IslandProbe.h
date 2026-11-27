@@ -7,6 +7,19 @@
 
 class AIslandGameMode;
 class AIslandChest;
+class AVoxelCharacter;
+class UIslandRouteVoxelComponent;
+
+// A repeatable wall and raised deck made from the same solid field as island scenery.
+UCLASS(NotPlaceable, Transient)
+class AIslandMudProbeSurface : public AActor
+{
+    GENERATED_BODY()
+public:
+    AIslandMudProbeSurface();
+    void BeginPlay() override;
+    UPROPERTY() TObjectPtr<UIslandRouteVoxelComponent> Field;
+};
 class AIslandNeutralProp;
 class AIslandPlayerController;
 
@@ -24,6 +37,7 @@ public:
 
     UFUNCTION(Client, Reliable) void ClientInspect(int32 Epoch, bool bDigest);
     UFUNCTION(Client, Reliable) void ClientOpenChest();
+    bool HasReleasedChestClick() const { return AimAtChestUntil == 0. && ReleaseChestClickFrame == 0; }
     UFUNCTION(Client, Reliable) void ClientWatchHeldLid();
     UFUNCTION(Server, Reliable) void ServerHeldLidObserved();
     UFUNCTION(Client, Reliable) void ClientJoinCrew(int32 Team, bool bReady);
@@ -37,11 +51,18 @@ public:
     UFUNCTION(Client, Reliable) void ClientStrike(FVector Target);
     UFUNCTION(Client, Reliable) void ClientMudStroke(bool bThrow, FVector Aim);
     UFUNCTION(Client, Reliable) void ClientMudHold(bool bThrow, bool bHeld, FRotator Look);
+    UFUNCTION(Client, Reliable) void ClientBodyMudInspect(int32 Stage, AVoxelCharacter* Subject, FName Photo);
+    UFUNCTION(Server, Reliable) void ServerBodyMudReport(int32 Stage, uint32 Digest, int32 Clods, bool bAnchored);
+    int32 BodyMudStage = INDEX_NONE;
+    uint32 BodyMudDigest = 0;
+    int32 BodyMudClods = 0;
+    bool bBodyMudAnchored = false;
     UFUNCTION(Client, Reliable) void ClientMudInspect(int32 Stage, FVector Origin);
     UFUNCTION(Server, Reliable) void ServerMudReport(int32 Stage, uint32 Sequence, uint32 Checksum, int32 Top);
     UFUNCTION(Client, Reliable) void ClientFieldAim(FVector Target);
     UFUNCTION(Client, Reliable) void ClientFieldKeepDigging(bool bKeep, FVector Target);
     UFUNCTION(Client, Reliable) void ClientFieldRally();
+    UFUNCTION(Client, Reliable) void ClientFieldEchoStrike(int32 Trial);
     UFUNCTION(Client, Reliable) void ClientNeutralInspect(int32 Stage);
     UFUNCTION(Client, Reliable) void ClientSceneryInspect(int32 Stage, AActor* Subject, FName Part, FVector Eye, FVector Aim);
     UFUNCTION(Client, Reliable) void ClientSceneryCamera(FName Clip, FVector View, FVector Focus, bool bUsePlayer);
@@ -156,7 +177,7 @@ class AIslandProbe : public AActor
 public:
     AIslandProbe();
     static AIslandChest* PrepareFilmPrize(AIslandGameMode&, AIslandPlayerController&, FVector Center);
-    static bool TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FVector& Target, bool& Exposed);
+    static bool TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FVector& Target, const AIslandChest*& Exposed);
     void Tick(float DeltaSeconds) override;
     void Record(int32 Seat, int32 Epoch, const FIslandClues& Clues, int32 Boxes, int32 Winner, uint32 Sequence, const FString& Digest);
     void RequestStress(int32 Seat, int32 Stage);
@@ -177,8 +198,22 @@ private:
     void PrepareOpen(int32 Team);
     void StartStress(int32 Stage);
     void TickParty(double Now);
+    void RetryLegacyBriefingChest(double Now);
     void TickExpedition(double Now);
     void TickExpeditionGame(double Now);
+    bool MeasureControlPass(AIslandPlayerController& Player, int32 Pass);
+    int32 ControlPassesDone = 0;
+    enum class EControlStep : uint8 { SetUp, Settle, MouseForward, MouseBack, AlignForWalk, SideStep, Jump, EyeView, Restore };
+    EControlStep ControlStep = EControlStep::SetUp;
+    double ControlStepAt = 0., ControlJumpBase = 0., ControlJumpHeight = 0.;
+    FTransform ControlOriginalPose;
+    FRotator ControlOriginalView, ControlMouseStart, ControlMouseDelta, ControlReverseDelta;
+    FVector ControlCameraOffset, ControlEyeOffset;
+    float ControlCameraFOV = 0.f, ControlEyeFOV = 0.f;
+    bool bControlOriginalFirst = false, bReleaseControlViewKey = false;
+    double ControlViewInputAt = -1.;
+    double ControlSideSpeed = 0., ControlBodyTurn = 0.;
+    UPROPERTY() TObjectPtr<class UBoxComponent> ControlPlatform;
     void TickCharacterSelection(double Now);
     int32 CharacterStage = INDEX_NONE;
     double CharacterStageAt = 0.;
@@ -284,8 +319,12 @@ private:
     void SetMudStep(int32 Next, double Now);
     bool bMudScenario = false;
     int32 MudStep = 0, MudShots = 0;
-    double MudKnockTime = 0., MudBase = 0.;
+    uint32 MudShaftSequence = 0;
+    double MudBase = 0.;
+    bool SharedBodyMud(int32 Stage, AVoxelCharacter& Victim, FName Photo, double Now);
+    TWeakObjectPtr<AIslandMudProbeSurface> MudWall;
     FVector MudFoot = FVector::ZeroVector, MudShaft = FVector::ZeroVector;
+    FVector MudExitLip = FVector::ZeroVector;
     bool bNeutralScenario = false;
     bool bEarlyPrizeCheck = false;
     bool bNeutralWaitingInput = false;
@@ -299,10 +338,13 @@ private:
     FString NeutralExpected;
     TWeakObjectPtr<class ACameraActor> NeutralCamera;
     void TickFieldCheck(double Now);
-    void BeginLockCheck(double Now);
-    enum class EFieldStep : uint8 { Aim, Strike, InspectDig, WalkToDig, EchoApproach, HearEcho, Gather, Open, Assist, Defend, TakeOver, Seize, PreventReseize, Award, Cancel, Reset, Verify, AimHeldDig, HoldFirst, HoldSecond, Released, HoldThroughReveal, ChargeInterrupted, ChargeIdle, PunchTrials };
+    bool BeginLockCheck(double Now);
+    void PlaceFieldEchoDig(double Now);
+    enum class EFieldStep : uint8 { Aim, Strike, InspectDig, WalkToDig, EchoApproach, HearEcho, Gather, Open, Assist, Defend, TakeOver, Seize, PreventReseize, Award, Cancel, Reset, Verify, AimHeldDig, HoldFirst, HoldSecond, Released, HoldThroughReveal, ChargeInterrupted, ChargeIdle, PunchTrials, CoatLeader, CoatHelper };
     void SetFieldStage(EFieldStep Stage, double Now);
-    bool bFieldScenario = false;
+    bool bFieldScenario = false, bFieldLidSighted = false;
+    int32 FieldEchoTrial = 0, FieldEchoTarget = INDEX_NONE;
+    uint32 FieldEchoSequence = 0;
     EFieldStep FieldStage = EFieldStep::Aim;
     FVector FieldStand = FVector::ZeroVector;
     FVector ReferenceFloor = FVector::ZeroVector;
@@ -310,6 +352,7 @@ private:
     FVector DigLanding = FVector::ZeroVector;
     FVector SecondFieldTarget = FVector::ZeroVector;
     uint32 HoldSequence = 0;
+    int32 FieldPeelInitial = 0, FieldPeelPrevious = INDEX_NONE;
     int32 FieldDrop = 0;
     int32 ReferenceDelta = 0;
     float FieldSoloRate = 0.f;
@@ -318,6 +361,7 @@ private:
     enum class ERoomCheck : uint8 { Join, Ready, Withdraw, Depart, Dig, Open, Inspect, Return, Stress, Drain, VerifyEdits, Field, Neutral, Mud, Games };
     ERoomCheck RoomCheck = ERoomCheck::Join;
     int32 ExpeditionOpener = 0;
+    int32 ChestApproachDigs = 0;
     TMap<FGuid, FTransform> DepartureBerths;
     TArray<int32> DepartureTeams;
     bool OnPrize() const { return NextDig == IslandRules::PrizeIndex; }

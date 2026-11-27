@@ -6,6 +6,7 @@
 #include "NativeGameplayTags.h"
 #include "TimerManager.h"
 #include "Island/IslandGameMode.h"
+#include "Island/ExpeditionBodyMud.h"
 #include "Island/IslandNeutralProp.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandState.h"
@@ -20,8 +21,6 @@ namespace ExpeditionTags
     UE_DEFINE_GAMEPLAY_TAG_STATIC(Interact, "Expedition.Action.Interact");
     UE_DEFINE_GAMEPLAY_TAG_STATIC(Rally, "Expedition.Action.Rally");
     UE_DEFINE_GAMEPLAY_TAG_STATIC(Recall, "Expedition.Action.Recall");
-    UE_DEFINE_GAMEPLAY_TAG_STATIC(Stun, "Expedition.State.Stunned");
-    UE_DEFINE_GAMEPLAY_TAG_STATIC(Immunity, "Expedition.State.StunImmune");
     UE_DEFINE_GAMEPLAY_TAG_STATIC(DigCooldown, "Expedition.Cooldown.Dig");
     UE_DEFINE_GAMEPLAY_TAG_STATIC(ThrowCooldown, "Expedition.Cooldown.Throw");
 }
@@ -40,8 +39,6 @@ FGameplayTag ExpeditionAbilities::ActionTag(EExpeditionAction Action)
     return FGameplayTag();
 }
 
-FGameplayTag ExpeditionAbilities::Stunned() { return ExpeditionTags::Stun; }
-FGameplayTag ExpeditionAbilities::Immune() { return ExpeditionTags::Immunity; }
 
 UExpeditionTimedEffect::UExpeditionTimedEffect()
 {
@@ -62,8 +59,6 @@ bool ExpeditionAbilities::ApplyTimedTag(UAbilitySystemComponent& ASC, FGameplayT
 void ExpeditionAbilities::ClearTimedTags(UAbilitySystemComponent& ASC)
 {
     FGameplayTagContainer Tags;
-    Tags.AddTag(ExpeditionTags::Stun);
-    Tags.AddTag(ExpeditionTags::Immunity);
     Tags.AddTag(ExpeditionTags::DigCooldown);
     Tags.AddTag(ExpeditionTags::ThrowCooldown);
     ASC.RemoveActiveEffects(FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(Tags));
@@ -83,7 +78,6 @@ UExpeditionAbility::UExpeditionAbility()
     InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
     NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
     NetSecurityPolicy = EGameplayAbilityNetSecurityPolicy::ServerOnly;
-    ActivationBlockedTags.AddTag(ExpeditionAbilities::Stunned());
 }
 
 void UExpeditionAbility::SetAction(EExpeditionAction InAction)
@@ -128,9 +122,9 @@ bool UExpeditionAbility::CanActivateAbility(const FGameplayAbilitySpecHandle Han
     if (Hero->HasAuthority())
     {
         const auto* Mode = Hero->GetWorld()->GetAuthGameMode<AIslandGameMode>();
-        return Mode && (Mode->CanPlayerAct(*PC) || (Action == EExpeditionAction::Jump && Mode->CanJumpBeforePartyBlack(*PC)));
+        return Mode && (Mode->CanPlayerAct(*PC) || (Action == EExpeditionAction::Dig && Mode->CanPlayerPunch(*PC)));
     }
-    return Action == EExpeditionAction::Jump && PC->IsPlaying() && PC->IsVoxelInputEnabled();
+    return Action == EExpeditionAction::Jump && !Hero->IsMudAnchored() && PC->IsPlaying() && PC->IsVoxelInputEnabled();
 }
 
 void UExpeditionAbility::ActivateAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* Info,
@@ -173,7 +167,8 @@ void UExpeditionRallyAbility::Perform(AVoxelCharacter& Hero, AIslandPlayerContro
 void UExpeditionDigAbility::UseTool(AVoxelCharacter& Hero, AIslandPlayerController& PC, AIslandGameMode& Mode, const FVector& Aim)
 {
     Hero.MulticastExpeditionDig(PC.GetReleasedPunchPower());
-    Mode.RequestEdit(PC, EVoxelAction::Punch, Aim, PC.GetReleasedPunchPower(), PC.IsPunchRelease());
+    if (Hero.IsMudAnchored()) Hero.GetBodyMud()->Peel();
+    else Mode.RequestEdit(PC, EVoxelAction::Punch, Aim, PC.GetReleasedPunchPower(), PC.IsPunchRelease());
 }
 
 void UExpeditionThrowAbility::UseTool(AVoxelCharacter& Hero, AIslandPlayerController& PC, AIslandGameMode& Mode, const FVector& Aim)
@@ -195,7 +190,7 @@ void UExpeditionToolAbility::Swing()
     auto* Hero = Cast<AVoxelCharacter>(GetAvatarActorFromActorInfo());
     auto* PC = Hero ? Cast<AIslandPlayerController>(Hero->GetController()) : nullptr;
     auto* Mode = Hero ? Hero->GetWorld()->GetAuthGameMode<AIslandGameMode>() : nullptr;
-    if (!PC || !Mode || !Mode->CanPlayerAct(*PC) || Hero->IsMudStunned())
+    if (!PC || !Mode || !(Action == EExpeditionAction::Dig ? Mode->CanPlayerPunch(*PC) : Mode->CanPlayerAct(*PC)))
     {
         K2_EndAbility();
         return;
@@ -248,7 +243,7 @@ void UExpeditionRecallAbility::CompleteRecall()
     auto* Hero = Cast<AVoxelCharacter>(GetAvatarActorFromActorInfo());
     auto* PC = Hero ? Cast<AIslandPlayerController>(Hero->GetController()) : nullptr;
     auto* Mode = Hero ? Hero->GetWorld()->GetAuthGameMode<AIslandGameMode>() : nullptr;
-    if (Mode && PC && Mode->CanPlayerAct(*PC) && !Hero->IsMudStunned()) Mode->RecoverPlayer(*PC);
+    if (Mode && PC && Mode->CanPlayerAct(*PC)) Mode->RecoverPlayer(*PC);
     if (IsActive()) K2_EndAbility();
 }
 
@@ -257,18 +252,6 @@ void UExpeditionAbility::EndAbility(const FGameplayAbilitySpecHandle Handle, con
 {
     if (GetWorld()) GetWorld()->GetTimerManager().ClearTimer(Timer);
     Super::EndAbility(Handle, Info, ActivationInfo, bReplicateEndAbility, bWasCancelled);
-}
-
-void UExpeditionCharacterMovement::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
-{
-    if (const auto* Hero = Cast<AVoxelCharacter>(CharacterOwner))
-    {
-        // Clients transmit crouch flags in saved moves. The stun is authoritative on both
-        // sides; afterwards UE itself tests the full capsule before expanding inside a tunnel.
-        if (Hero->IsMudStunned()) bWantsToCrouch = true;
-        else if (Hero->IsMudCompact()) bWantsToCrouch = false;
-    }
-    Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
 }
 
 float UExpeditionCharacterMovement::GetIslandJumpZVelocity() const
@@ -307,7 +290,7 @@ bool UExpeditionCharacterMovement::DoJump(bool bReplayingMoves, float DeltaTime)
 float UExpeditionCharacterMovement::GetMaxSpeed() const
 {
     const auto* Hero = Cast<AVoxelCharacter>(CharacterOwner);
-    if (Hero && Hero->IsMudStunned()) return 0.f;
+    if (Hero && Hero->IsMudAnchored()) return 0.f;
     const float Base = Super::GetMaxSpeed();
     return Hero && IsMovingOnGround() && !Hero->bIsCrouched
         ? AIslandNeutralProp::CurrentWalkSpeed(*Hero, GetCurrentAcceleration(), Base) : Base;

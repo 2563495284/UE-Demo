@@ -21,7 +21,7 @@ namespace IslandSceneryVoxels
     ACTDEMO_API UPrimitiveComponent* SurfaceFor(UPrimitiveComponent* Source);
     ACTDEMO_API bool IsExhausted(UPrimitiveComponent* Source);
     ACTDEMO_API void RefreshPart(UPrimitiveComponent& Source);
-    ACTDEMO_API bool Strike(const FHitResult& Hit,float RadiusScale = 1.f);
+    ACTDEMO_API bool Strike(const FHitResult& Hit,float RadiusScale = 1.f,float DepthScale = 1.f);
     void PlayMechanismStrike(const FHitResult& Hit);
     ACTDEMO_API void CheckFoundations(UWorld& World,const FBox& Area);
 }
@@ -50,7 +50,7 @@ public:
     void GetCellNeighbors(int32 Index,TArray<int32>& Out) const;
     void FindOccupiedNear(FVector World,double Radius,TArray<int32>& Out) const;
     bool RemoveCells(TConstArrayView<int32> Ids);
-    bool Cut(FVector World,FVector Normal,float RadiusScale);
+    bool Cut(FVector World,FVector Normal,float RadiusScale,float DepthScale = 1.f);
     void PackRemoved(TArray<uint8>& Data) const;
     void ApplyRemoved(const TArray<uint8>& Data);
 private:

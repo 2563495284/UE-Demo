@@ -145,6 +145,79 @@ namespace
         return true;
     }
 
+    enum class EChestApproach { Ready, Dig, Blocked };
+
+    EChestApproach ApproachExposedChest(AIslandPlayerController& Player, const AIslandChest& Chest,
+        AVoxelTerrain& Terrain, bool bCanDig)
+    {
+        auto& Hero = *Player.GetHero();
+        auto* Movement = Hero.GetCharacterMovement();
+        auto& World = *Hero.GetWorld();
+        const auto& Capsule = *Hero.GetCapsuleComponent();
+        const auto Shape = FCollisionShape::MakeCapsule(Capsule.GetScaledCapsuleRadius(),Capsule.GetScaledCapsuleHalfHeight());
+        const FCollisionResponseParams Responses(Capsule.GetCollisionResponseToChannels());
+        const FCollisionQueryParams Query(SCENE_QUERY_STAT(ExpeditionChestApproach),false,&Hero);
+        const auto AimFromCurrentStand = [&]
+        {
+            FVector Visible;
+            if (Player.GetReachableChest()!=&Chest || !Chest.IsReachableFrom(Hero,&Visible)) return false;
+            const FVector Aim = Visible-Hero.GetAimOrigin();
+            if (Player.GetChestAlongAim(Aim.GetSafeNormal())!=&Chest) return false;
+            Movement->StopMovementImmediately();
+            Player.ClientResetView(Aim.Rotation());
+            UE_LOG(LogTemp,Display,TEXT("EXPEDITION_QA_CHEST_REACH target=%s distance=%.1f stand=%s"),
+                *Visible.ToCompactString(),Aim.Size(),*Hero.GetActorLocation().ToCompactString());
+            return true;
+        };
+        if (Movement->IsMovingOnGround() && AimFromCurrentStand()) return EChestApproach::Ready;
+
+        const FVector Lid = Chest.GetActorLocation() + IslandRules::ClosedLidCenter;
+        const FVector EyeOffset = Hero.GetAimOrigin()-Hero.GetActorLocation();
+        TOptional<FVector> DigStand;
+        FVector DigAim;
+        double NearestCut = MAX_dbl;
+        for (double Radius : {0.,35.,65.,95.,125.,155.,180.})
+        {
+            const int32 Steps = Radius==0. ? 1 : 24;
+            for (int32 Heading=0; Heading<Steps; ++Heading)
+            {
+                const double Angle = Heading*UE_TWO_PI/Steps;
+                const FVector Column = Lid + Radius*FVector(FMath::Cos(Angle),FMath::Sin(Angle),0.);
+                FHitResult Floor;
+                if (!World.SweepSingleByChannel(Floor,Column+FVector(0.,0.,1500.),Column-FVector(0.,0.,1100.),
+                    FQuat::Identity,Capsule.GetCollisionObjectType(),Shape,Query,Responses)
+                    || Floor.bStartPenetrating || !Movement->IsWalkable(Floor)) continue;
+                const FVector Stand = Floor.Location + FVector(0.,0.,3.);
+                if (World.OverlapBlockingTestByChannel(Stand,FQuat::Identity,Capsule.GetCollisionObjectType(),Shape,Query,Responses)) continue;
+                const FVector Eye = Stand + EyeOffset;
+                FVector Visible;
+                if (Chest.FindInteractionPoint(Eye,Hero,&Visible) && Hero.TeleportTo(Stand,FRotator(0.,(Visible-Eye).Rotation().Yaw,0.))
+                    && AimFromCurrentStand()) return EChestApproach::Ready;
+
+                if (!bCanDig || Stand.Z<Lid.Z-90.) continue;
+                // Remove a real obstruction, or deepen the walkable rim to bring the lid into reach.
+                for (FVector Aim : {(Lid-Eye).GetSafeNormal(),-FVector::UpVector})
+                {
+                    FHitResult Rock;
+                    if (!Terrain.TraceRock(Eye,Eye+Aim*AVoxelGameMode::AimReach,&Hero,Rock)) continue;
+                    const double Score = FVector::DistSquared(Rock.ImpactPoint,Lid)+.1*FVector::DistSquared(Eye,Lid);
+                    if (Score < NearestCut)
+                    {
+                        NearestCut = Score;
+                        DigStand = Stand;
+                        DigAim = Aim;
+                    }
+                }
+            }
+        }
+        if (!DigStand || !Hero.TeleportTo(*DigStand,FRotator::ZeroRotator)) return EChestApproach::Blocked;
+        Movement->StopMovementImmediately();
+        Player.SubmitEdit(EVoxelAction::Punch,DigAim);
+        UE_LOG(LogTemp,Display,TEXT("EXPEDITION_QA_CHEST_APPROACH stand=%s aim=%s"),
+            *DigStand->ToCompactString(),*DigAim.ToCompactString());
+        return EChestApproach::Dig;
+    }
+
     FString TerrainDigest(const AVoxelTerrain& Terrain)
     {
         if (Terrain.Layout == EVoxelLayout::Expedition)
@@ -332,11 +405,9 @@ void AIslandProbePeer::Tick(float DeltaSeconds)
         {
             const auto* Hero = Controller->GetHero();
             const auto* Chest = Controller->GetReachableChest();
-            if (Hero && Chest)
+            FVector Target;
+            if (Hero && Chest && Chest->IsReachableFrom(*Hero,&Target))
             {
-                FVector Target = Chest->GetActorLocation();
-                const FVector Found = Chest->GetDiscoveryPoint();
-                if (FVector::DistSquared(Hero->GetAimOrigin(), Found) < FVector::DistSquared(Hero->GetAimOrigin(), Target)) Target = Found;
                 // In a narrow pit a chest can be nearer than the shoulder offset.
                 // Use the ordinary first-person shortcut for a clear look at its lid.
                 if (Controller->UsesExpeditionAbilities() && !Hero->IsInFirstPersonView())
@@ -345,7 +416,11 @@ void AIslandProbePeer::Tick(float DeltaSeconds)
                     Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::V,IE_Released,0.f));
                 }
                 Controller->SetControlRotation(Hero->GetViewRotationForTarget(Target, Hero->GetActorLocation()));
-                const bool bAimed = Controller->GetAimedChest() == Chest;
+                // A bound player can still look straight at the lid. The gameplay action
+                // deliberately masks the chest here so that a physical click peels clay.
+                const bool bAimed = Hero->IsMudAnchored()
+                    ? FVector::DotProduct(Controller->GetControlRotation().Vector(), (Target-Hero->GetAimOrigin()).GetSafeNormal())>.998
+                    : Controller->GetAimedChest() == Chest;
                 if (bWatchHeldLid)
                 {
                     const double Now = FPlatformTime::Seconds();
@@ -426,7 +501,7 @@ void AIslandProbePeer::ServerStress_Implementation(int32 Stage)
     }
 }
 
-bool AIslandProbe::TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FVector& Target, bool& Exposed)
+bool AIslandProbe::TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FVector& Target, const AIslandChest*& Exposed)
 {
 #if !UE_BUILD_SHIPPING
     if (Mode && Mode->HasAuthority() && Mode->IsPlaying()
@@ -434,7 +509,7 @@ bool AIslandProbe::TryGetWalkTarget(const AIslandGameMode* Mode, int32 Index, FV
         && Index>=0 && Index<=IslandRules::PrizeIndex && Mode->Exposed.IsValidIndex(Index))
     {
         Target = Mode->HiddenLayout.GetCenter(Index);
-        Exposed = IsValid(Mode->Exposed[Index]);
+        Exposed = IsValid(Mode->Exposed[Index]) ? Mode->Exposed[Index].Get() : nullptr;
         return true;
     }
 #endif
@@ -487,6 +562,7 @@ void AIslandProbe::Place(int32 Seat, const FVector& Center)
 void AIslandProbe::PrepareDig(int32 Index)
 {
     NextDig = Index;
+    ChestApproachDigs = 0;
     const FVector Point = Mode->HiddenLayout.GetCenter(Index);
     const double Top = Mode->GetTerrain()->GetDensity()->SurfaceAt(FVector2D(Point)).Get(
         VoxelPlayground::IslandSurfaceHeight(FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y)));
@@ -744,6 +820,7 @@ void AIslandProbe::TickExpedition(double Now)
     }
     if (RoomCheck == ERoomCheck::Depart && Mode->IsPlaying())
     {
+        if (FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaControlsQA")) && !MeasureControlPass(*Host, 0)) return;
         Require(Round->ActiveTeams == ExpeditionTeamForSeat(Players.Num() - 1) + 1
             && Mode->HiddenLayout.Num() == IslandRules::ClueCount + 1 + Round->RoomSettings.DecoyCount
             && Mode->HiddenLayout.Decoys.Num() == Round->RoomSettings.DecoyCount,
@@ -973,77 +1050,17 @@ void AIslandProbe::TickExpedition(double Now)
         {
             Mode->RecoverPlayer(*Host);
         }
-        auto* Opener = Players[ExpeditionOpener]->GetHero();
-        Opener->GetCharacterMovement()->StopMovementImmediately();
-        if (OnPrize())
+        auto& Controller = *CastChecked<AIslandPlayerController>(Players[ExpeditionOpener]);
+        const auto Approach = ApproachExposedChest(Controller,*Mode->Exposed[NextDig],*Mode->GetTerrain(),ChestApproachDigs<16);
+        if (Approach==EChestApproach::Dig)
         {
-            auto* Controller = CastChecked<AIslandPlayerController>(Players[ExpeditionOpener]);
-            auto* Vault = Mode->Exposed[NextDig].Get();
-            const FVector Chest = Vault->GetActorLocation();
-            const auto* Capsule = Opener->GetCapsuleComponent();
-            const FCollisionShape Shape = FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight());
-            const FCollisionResponseParams Responses(Capsule->GetCollisionResponseToChannels());
-            const FCollisionQueryParams Query(SCENE_QUERY_STAT(ExpeditionVaultApproach), false, Opener);
-            const FVector EyeOffset = Opener->GetAimOrigin() - Opener->GetActorLocation();
-            FHitResult PreviousHit;
-            GetWorld()->LineTraceSingleByChannel(PreviousHit, Chest + FVector(-30.,52.,62.) + EyeOffset, Chest, ECC_Visibility, Query);
-            UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_VAULT_RAY actor=%s component=%s distance=%.1f"),
-                *GetNameSafe(PreviousHit.GetActor()), *GetNameSafe(PreviousHit.GetComponent()), PreviousHit.Distance);
-            TOptional<FVector> DigStand;
-            FVector DigAim = -FVector::UpVector;
-            double BestDistance = MAX_dbl;
-            bool bInReach = false;
-            for (double Radius : {0., 35., 65., 95., 125., 155., 180.})
-            {
-                const int32 Steps = Radius == 0. ? 1 : 24;
-                for (int32 Heading = 0; Heading < Steps; ++Heading)
-                {
-                    const double Angle = Heading * UE_TWO_PI / Steps;
-                    const FVector Column = Chest + Radius * FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.);
-                    FHitResult Floor;
-                    if (!GetWorld()->SweepSingleByChannel(Floor, Column + FVector(0.,0.,1500.), Column - FVector(0.,0.,1100.),
-                        FQuat::Identity, Capsule->GetCollisionObjectType(), Shape, Query, Responses)
-                        || !Opener->GetCharacterMovement()->IsWalkable(Floor)) continue;
-                    const FVector Stand = Floor.Location + FVector(0.,0.,3.);
-                    const FVector Eye = Stand + EyeOffset;
-                    FHitResult Sight;
-                    GetWorld()->LineTraceSingleByChannel(Sight, Eye, Chest, ECC_Visibility, Query);
-                    const double Distance = FVector::Dist(Eye, Chest);
-                    if (Distance <= IslandRules::OpenReach && Sight.GetActor() == Vault
-                        && Opener->TeleportTo(Stand, FRotator(0., (Chest - Eye).Rotation().Yaw, 0.))
-                        && Controller->GetReachableChest() == Vault)
-                    {
-                        Controller->ClientResetView((Chest - Opener->GetAimOrigin()).Rotation());
-                        UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_VAULT_REACH actor=%s component=%s distance=%.1f stand=%s"),
-                            *GetNameSafe(Sight.GetActor()), *GetNameSafe(Sight.GetComponent()), Distance, *Stand.ToCompactString());
-                        bInReach = true;
-                        break;
-                    }
-                    // A cleared chest volume can still have a high rim. Use another normal
-                    // punch from a walkable surface to lower the rim or break the intervening wall.
-                    if (Distance >= BestDistance || Stand.Z < Chest.Z - 90.) continue;
-                    BestDistance = Distance;
-                    DigStand = Stand;
-                    DigAim = Sight.GetActor() == Mode->GetTerrain() && Sight.Distance < 220.
-                        ? (Chest - Eye).GetSafeNormal() : -FVector::UpVector;
-                }
-                if (bInReach) break;
-            }
-            if (!bInReach && DigStand && Now - StepAt < 60. && Opener->TeleportTo(*DigStand, FRotator::ZeroRotator))
-            {
-                UE_LOG(LogTemp, Display, TEXT("EXPEDITION_QA_VAULT_APPROACH distance=%.1f stand=%s aim=%s"),
-                    BestDistance, *DigStand->ToCompactString(), *DigAim.ToCompactString());
-                Controller->SubmitEdit(EVoxelAction::Punch, DigAim);
-                LastAction = Now;
-                return;
-            }
-            Require(bInReach, TEXT("final vault is within legal reach of the key holder"));
-            Opener->GetCharacterMovement()->DisableMovement();
+            ++ChestApproachDigs;
+            LastAction = Now;
+            return;
         }
-        else
-        {
-            Opener->TeleportTo(Mode->HiddenLayout.GetCenter(NextDig) + FVector(0, 0, 98), FRotator::ZeroRotator, false, true);
-        }
+        Require(Approach==EChestApproach::Ready,TEXT("an exposed chest is visible and clickable from a walkable stand"));
+        if (Approach!=EChestApproach::Ready) return;
+        if (OnPrize()) Controller.GetHero()->GetCharacterMovement()->DisableMovement();
         const bool bGameChest = !OnPrize();
         if (bGameChest)
         {
@@ -1282,6 +1299,9 @@ void AIslandProbe::Tick(float DeltaSeconds)
         if (Mode->Exposed[NextDig] && Now - LastAction > .50)
         {
             Require(true, TEXT("player dug down and uncovered a chest"));
+            if (bPartyScenario && FParse::Param(FCommandLine::Get(), TEXT("PartyBriefInspectQA")))
+                ApproachExposedChest(*CastChecked<AIslandPlayerController>(Mode->GetPlayers()[0]),
+                    *Mode->Exposed[NextDig], *Mode->GetTerrain(), false);
             if (OnPrize())
             {
                 PrizePose = Mode->GetPlayers()[0]->GetHero()->GetActorLocation();
@@ -1311,6 +1331,7 @@ void AIslandProbe::Tick(float DeltaSeconds)
             Peers[OpeningTeam + 3]->ClientOpenChest();
             bIssued = true;
         }
+        if (bIssued && !(Mode->TeamClues[OpeningTeam].Mask & Bit)) RetryLegacyBriefingChest(Now);
         if ((Mode->TeamClues[OpeningTeam].Mask & Bit) != 0)
         {
             if (bPartyScenario)
@@ -1498,6 +1519,19 @@ void AIslandProbe::Tick(float DeltaSeconds)
     }
 }
 
+void AIslandProbe::RetryLegacyBriefingChest(double Now)
+{
+    // This regression exercises the real chest-to-party server path even when
+    // the legacy shoulder camera can't frame the lid inside the scripted shaft.
+    if (!bPartyScenario || !FParse::Param(FCommandLine::Get(), TEXT("PartyBriefInspectQA"))
+        || Now - LastAction < 2.5 || !IsValid(Mode->Exposed[NextDig])) return;
+    LastAction = Now;
+    UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_QA_CHEST_ENTRY chest=%d mode=server-open"), NextDig);
+    const auto* Chest = Mode->Exposed[NextDig].Get();
+    for (int32 Seat : {OpeningTeam, OpeningTeam + IslandRules::TeamCount})
+        Mode->TryOpen(*CastChecked<AIslandPlayerController>(Mode->GetPlayers()[Seat]), *Chest);
+}
+
 void AIslandProbe::TickParty(double Now)
 {
     const EIslandPhase Phase = Mode->GetGameState<AIslandGameState>()->Phase;
@@ -1522,6 +1556,11 @@ void AIslandProbe::TickParty(double Now)
     }
     else if (Step == EStep::PartyPlay)
     {
+        if (Phase == EIslandPhase::Hunting && Mode->PartyRoundId < static_cast<uint32>(PartyAttempts))
+        {
+            RetryLegacyBriefingChest(Now);
+            return; // Starting the fallback can synchronously leave Hunting.
+        }
         if (Phase == EIslandPhase::PartyPlaying && PartyStartedAt == 0.0)
         {
             PartyStartedAt = Now;

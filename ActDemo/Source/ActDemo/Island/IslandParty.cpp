@@ -6,10 +6,10 @@
 #include "GameFramework/GameSession.h"
 #include "Island/IslandPlayerController.h"
 #include "Island/IslandNeutralProp.h"
-#include "Abilities/ExpeditionMudEffect.h"
 #include "Island/IslandState.h"
 #include "Island/IslandWorld.h"
 #include "Misc/SecureHash.h"
+#include "PartyBriefing.h"
 #include "PartyMinigame.h"
 #include "PartyVoxelArena.h"
 #include "Voxel/VoxelCharacter.h"
@@ -19,6 +19,7 @@ namespace
 {
 constexpr double PartyAssetTimeout = 15.;
 constexpr double PartyDisplayTimeout = 45.;
+constexpr double MaxBriefingServiceStep = 1.;
 const FName MazeChaseFeature(TEXT("PartyMazeChase"));
 }
 
@@ -54,17 +55,23 @@ void AIslandGameMode::PrepareExpeditionParties(int32 Seed)
     bPartyUnavailable = false;
 }
 
+bool AIslandGameMode::HasOpposingCrews(const AVoxelPlayerController* Leaving) const
+{
+    int32 TeamMask = 0;
+    for (const AVoxelPlayerController* Player : GetPlayers())
+    {
+        if (Player == Leaving) continue;
+        const auto* Member = Player->GetPlayerState<AIslandPlayerState>();
+        if (Member && TeamClues.IsValidIndex(Member->Team)) TeamMask |= 1 << Member->Team;
+    }
+    return FPlatformMath::CountBits(uint32(TeamMask)) >= 2;
+}
+
 FName AIslandGameMode::PartyFeatureForChest(int32 Index) const
 {
     if (!bExpeditionRoom) return DecoyMinigameFeature;
     if (Index < 0 || Index >= HiddenLayout.Num() || Index == IslandRules::PrizeIndex) return NAME_None;
-    int32 TeamMask = 0;
-    for (const AVoxelPlayerController* Player : GetPlayers())
-    {
-        const auto* Member = Player->GetPlayerState<AIslandPlayerState>();
-        if (Member && TeamClues.IsValidIndex(Member->Team)) TeamMask |= 1 << Member->Team;
-    }
-    const bool bTwoCrews = FPlatformMath::CountBits(uint32(TeamMask)) >= 2;
+    const bool bTwoCrews = HasOpposingCrews();
     TArray<FName,TInlineAllocator<8>> Eligible;
     for (FName Feature : ExpeditionPartyDeck)
         if ((Feature != MazeChaseFeature || bTwoCrews) && !UnavailablePartyFeatures.Contains(Feature))
@@ -200,8 +207,6 @@ void AIslandGameMode::ScatterLosingCrews()
         const FVector Hint(Radius * FMath::Cos(Angle), Radius * FMath::Sin(Angle), 0.);
         const FTransform Target = FindSafeReturn(Player, Hint, KeepAwayFrom);
         KeepAwayFrom.Add(Target.GetLocation());
-        BurialSites.Remove(&Player);
-        UExpeditionMudMarkEffect::Clear(*Hero);
         Hero->ReturnToStart(Target);
         Player.ClientResetView(Target.Rotator());
     }
@@ -222,12 +227,20 @@ void AIslandGameMode::BeginParty(int32 ChestIndex, int32 OpeningTeam)
     Round->PartyRewardMask = 0;
     PartyOpenerTeam = OpeningTeam;
     CurrentPartyFeature = PartyFeatureForChest(ChestIndex);
-    SetPhase(EIslandPhase::PartyLoading);
     ++PartyRoundId;
+    Round->PartyBriefingRound = PartyRoundId;
+    Round->PartyBriefingFeature = CurrentPartyFeature;
+    Round->PartyBriefingMembers.Reset();
+    Round->bPartyForceStartRequested = false;
     PartyChestIndex = ChestIndex;
-    PartyDeadline = FPlatformTime::Seconds() + PartyAssetTimeout;
-    bPartyPrepareFailed = false;
-    bPartyAwaitingBlack = false;
+    LastBriefingServiceAt = FPlatformTime::Seconds();
+    PartyDeadline = LastBriefingServiceAt + PartyDisplayTimeout;
+    bPartyPrepareFailed = !PartyBriefings::Find(CurrentPartyFeature).IsSet();
+    if (bPartyPrepareFailed)
+        UE_LOG(LogTemp, Warning, TEXT("PARTY_BRIEFING_MISSING feature=%s"), *CurrentPartyFeature.ToString());
+    bPartyCoversReady = false;
+    bPartyTechnicalReady = false;
+    bPartyConsensusReached = false;
     bPartyRestored = false;
     bPartyRevealSent = false;
     bPartyCompleted = false;
@@ -239,15 +252,23 @@ void AIslandGameMode::BeginParty(int32 ChestIndex, int32 OpeningTeam)
         Entry.Seat = Seat;
         Entry.Original = Player->GetHero();
         if (!Entry.Original.IsValid()) bPartyPrepareFailed = true;
-        if (!bExpeditionRoom)
+        if (const auto* Member = Player->GetPlayerState<AIslandPlayerState>())
         {
-            PartyScreenBlack(*Player, PartyRoundId, false);
+            Entry.PlayerId = Member->GetPlayerId();
+            auto& Row = Round->PartyBriefingMembers.AddDefaulted_GetRef();
+            Row.PlayerId = Entry.PlayerId;
+            Row.Name = Member->GetPlayerName();
+            Row.bHost = Member->bHost;
         }
+        else bPartyPrepareFailed = true;
     }
+    SetPhase(EIslandPhase::PartyBriefing);
     UE_LOG(LogTemp, Display, TEXT("PARTY_PREPARE round=%u chest=%d players=%d"), PartyRoundId, ChestIndex, PartyPlayers.Num());
+    UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING round=%u feature=%s players=%d"),
+        PartyRoundId, *CurrentPartyFeature.ToString(), PartyPlayers.Num());
     for (const auto& Pair : PartyPlayers)
     {
-        Pair.Key->ClientPrepareParty(PartyRoundId, CurrentPartyFeature, bExpeditionRoom);
+        Pair.Key->ClientPrepareParty(PartyRoundId, CurrentPartyFeature, bExpeditionRoom, Round->PartyBriefingMembers);
     }
 }
 
@@ -256,29 +277,27 @@ AIslandGameMode::FPartyPlayer* AIslandGameMode::FindPartyPlayer(AIslandPlayerCon
     return RoundId == PartyRoundId ? PartyPlayers.Find(&Player) : nullptr;
 }
 
-bool AIslandGameMode::CanJumpBeforePartyBlack(const AIslandPlayerController& Player) const
+FIslandPartyBriefingMember* AIslandGameMode::FindBriefingMember(const FPartyPlayer* Participant)
 {
-    const auto* Hero = Player.GetHero();
-    return bExpeditionRoom && GetGameState<AIslandGameState>()->Phase == EIslandPhase::PartyLoading
-        && Super::CanPlayerAct(Player) && Hero && !Hero->IsMudStunned()
-        && Hero->GetCharacterMovement()->MovementMode != MOVE_None;
+    auto* Round = GetGameState<AIslandGameState>();
+    if (!Participant || Round->Phase != EIslandPhase::PartyBriefing) return nullptr;
+    return Round->PartyBriefingMembers.FindByPredicate(
+        [Participant](const auto& Member) { return Member.PlayerId == Participant->PlayerId; });
 }
 
 void AIslandGameMode::PartyAssetsReady(AIslandPlayerController& Player, uint32 RoundId, bool bSuccess)
 {
-    if (GetGameState<AIslandGameState>()->Phase == EIslandPhase::PartyLoading)
+    if (auto* Member = FindBriefingMember(FindPartyPlayer(Player, RoundId)); Member && !Member->bAssetsReady)
     {
-        if (FPartyPlayer* Entry = FindPartyPlayer(Player, RoundId); Entry && !Entry->bAssetsReady)
-        {
-            Entry->bAssetsReady = bSuccess;
-            bPartyPrepareFailed |= !bSuccess;
-        }
+        Member->bAssetsReady = bSuccess;
+        bPartyPrepareFailed |= !bSuccess;
+        GetGameState<AIslandGameState>()->ForceNetUpdate();
     }
 }
 
 void AIslandGameMode::PartyScreenBlack(AIslandPlayerController& Player, uint32 RoundId, bool bReturning)
 {
-    const auto Expected = bReturning ? EIslandPhase::PartyReturning : EIslandPhase::PartyLoading;
+    const auto Expected = bReturning ? EIslandPhase::PartyReturning : EIslandPhase::PartyBriefing;
     if (GetGameState<AIslandGameState>()->Phase != Expected) return;
     FPartyPlayer* Entry = FindPartyPlayer(Player, RoundId);
     if (!Entry) return;
@@ -310,20 +329,19 @@ void AIslandGameMode::PartyScreenBlack(AIslandPlayerController& Player, uint32 R
 
 void AIslandGameMode::PartyScreenClear(AIslandPlayerController& Player, uint32 RoundId, bool bReturning)
 {
-    const auto Expected = bReturning ? EIslandPhase::PartyReturning : EIslandPhase::PartyLoading;
-    if (bPartyRevealSent && GetGameState<AIslandGameState>()->Phase == Expected)
+    if (bReturning && bPartyRevealSent && GetGameState<AIslandGameState>()->Phase == EIslandPhase::PartyReturning)
         if (auto* Entry = FindPartyPlayer(Player, RoundId)) Entry->bArrivalVisible = true;
 }
 
 void AIslandGameMode::PartyPawnReady(AIslandPlayerController& Player, uint32 RoundId)
 {
-    if (GetGameState<AIslandGameState>()->Phase == EIslandPhase::PartyLoading)
+    const auto* Entry = FindPartyPlayer(Player, RoundId);
+    auto* Member = FindBriefingMember(Entry);
+    if (Member && !Member->bGameReady && Entry->Temporary.IsValid() && Entry->Temporary.Get() == Player.GetPawn())
     {
-        if (FPartyPlayer* Entry = FindPartyPlayer(Player, RoundId); Entry && Entry->Temporary.IsValid()
-            && Entry->Temporary.Get() == Player.GetPawn())
-        {
-            Entry->bPawnReady = true;
-        }
+        Member->bGameReady = true;
+        GetGameState<AIslandGameState>()->ForceNetUpdate();
+        TryStartBriefedParty();
     }
 }
 
@@ -409,7 +427,7 @@ void AIslandGameMode::UpdateParty()
         }
         return;
     }
-    if (Phase != EIslandPhase::PartyLoading)
+    if (Phase != EIslandPhase::PartyBriefing)
     {
         return;
     }
@@ -419,30 +437,49 @@ void AIslandGameMode::UpdateParty()
         ReturnFromParty();
         return;
     }
-    const auto WaitFor = [this](const TCHAR* Gate)
+    // Reading and voting have no timeout once all participants can play.
+    if (bPartyTechnicalReady) return;
+    const double Now = FPlatformTime::Seconds();
+    const bool bExpiredOnPreviousTick = LastBriefingServiceAt >= PartyDeadline;
+    const double ServiceGap = Now - LastBriefingServiceAt;
+    if (ServiceGap > MaxBriefingServiceStep)
     {
-        if (FPlatformTime::Seconds() < PartyDeadline) return;
+        // While the host was blocked it couldn't service connection traffic.
+        // Still charge one second per long tick so an unresponsive peer eventually times out.
+        PartyDeadline += ServiceGap - MaxBriefingServiceStep;
+        UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_HOST_STALL round=%u gap=%.2f"), PartyRoundId, ServiceGap);
+    }
+    LastBriefingServiceAt = Now;
+    const auto WaitFor = [this, Now, bExpiredOnPreviousTick](const TCHAR* Gate)
+    {
+        // Allow a network dispatch after the first tick which observes expiration.
+        if (Now < PartyDeadline || !bExpiredOnPreviousTick) return;
         UE_LOG(LogTemp, Display, TEXT("PARTY_ABORT round=%u timeout=1 gate=%s"), PartyRoundId, Gate);
         ReturnFromParty();
     };
 
     if (!PartySession)
     {
-        if (!Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bAssetsReady; }))
+        // Each client can load as soon as its own page paints. A slow viewport
+        // gets the full presentation allowance without spending its asset deadline.
+        if (!bPartyCoversReady)
+        {
+            if (!Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bEntryBlack; }))
+            {
+                WaitFor(TEXT("briefing-cover"));
+                return;
+            }
+            bPartyCoversReady = true;
+            PartyDeadline = Now + PartyAssetTimeout;
+        }
+        if (!Algo::AllOf(GetGameState<AIslandGameState>()->PartyBriefingMembers, [](const auto& Member) { return Member.bAssetsReady; }))
         {
             WaitFor(TEXT("assets"));
             return;
         }
-        // Loading can complete long before a busy or occluded viewport presents
-        // solid black. Give the renderer its own deadline once every asset is ready.
-        if (!bPartyAwaitingBlack)
+        if (GetTerrain()->IsBusy())
         {
-            bPartyAwaitingBlack = true;
-            PartyDeadline = FPlatformTime::Seconds() + PartyDisplayTimeout;
-        }
-        if (!Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bEntryBlack; }) || GetTerrain()->IsBusy())
-        {
-            WaitFor(TEXT("blackout-or-terrain"));
+            WaitFor(TEXT("terrain"));
             return;
         }
         UClass* SessionClass = nullptr;
@@ -474,7 +511,8 @@ void AIslandGameMode::UpdateParty()
             return;
         }
         PartySession->OnPartyFinished.BindUObject(this, &AIslandGameMode::ReturnFromParty);
-        PartyDeadline = FPlatformTime::Seconds() + PartyAssetTimeout;
+        LastBriefingServiceAt = FPlatformTime::Seconds();
+        PartyDeadline = LastBriefingServiceAt + PartyAssetTimeout;
         UE_LOG(LogTemp, Display, TEXT("PARTY_SWAP round=%u direction=in players=%d"), PartyRoundId, PartyPlayers.Num());
         for (auto& Pair : PartyPlayers)
         {
@@ -492,38 +530,77 @@ void AIslandGameMode::UpdateParty()
         return;
     }
 
-    if (Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bPawnReady; }))
+    WaitFor(TEXT("pawn-ready"));
+}
+
+void AIslandGameMode::PartyBriefingResponse(AIslandPlayerController& Player, uint32 RoundId, bool bForceStart)
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    auto* Member = FindBriefingMember(FindPartyPlayer(Player, RoundId));
+    if (!Member) return;
+    if (bForceStart)
     {
-        if (bExpeditionRoom && !bPartyRevealSent)
-        {
-            bPartyRevealSent = true;
-            PartyDeadline = FPlatformTime::Seconds() + PartyDisplayTimeout;
-            for (const auto& Pair : PartyPlayers) Pair.Key->ClientRevealParty(PartyRoundId, false);
-            return;
-        }
-        if (bExpeditionRoom && !Algo::AllOf(PartyPlayers, [](const auto& Pair) { return Pair.Value.bArrivalVisible; }))
-        {
-            WaitFor(TEXT("arrival"));
-            return;
-        }
-        if (!bExpeditionRoom)
-        {
-            Exposed[PartyChestIndex]->Destroy();
-            Exposed[PartyChestIndex] = nullptr;
-            ConsumedDecoys.Add(PartyChestIndex);
-        }
-        GetGameState<AIslandGameState>()->ClearDecoyEffect();
-        SetPhase(EIslandPhase::PartyPlaying);
-        PartySession->StartParty();
-        UE_LOG(LogTemp, Display, TEXT("PARTY_START round=%u chest=%d players=%d"), PartyRoundId, PartyChestIndex, PartyPlayers.Num());
+        if (!Member->bHost || !Player.IsLocalController() || Round->bPartyForceStartRequested) return;
+        Round->bPartyForceStartRequested = true;
+        UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_FORCE round=%u"), RoundId);
     }
-    else WaitFor(TEXT("pawn-ready"));
+    else
+    {
+        if (Member->bAgreed) return;
+        Member->bAgreed = true;
+        UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_AGREE round=%u player=%d"), RoundId, Member->PlayerId);
+    }
+    Round->ForceNetUpdate();
+    TryStartBriefedParty();
+}
+
+void AIslandGameMode::TryStartBriefedParty()
+{
+    auto* Round = GetGameState<AIslandGameState>();
+    if (Round->Phase != EIslandPhase::PartyBriefing || bPartyPrepareFailed) return;
+    const int32 Participants = PartyPlayers.Num();
+    if (Participants == 0 || Round->PartyBriefingMembers.Num() != Participants)
+    {
+        ReturnFromParty();
+        return;
+    }
+    int32 Agreed = 0;
+    int32 Ready = 0;
+    for (const auto& Member : Round->PartyBriefingMembers)
+    {
+        Agreed += Member.bAgreed;
+        Ready += Member.bGameReady;
+    }
+    if (Agreed == Participants && !bPartyConsensusReached)
+    {
+        bPartyConsensusReached = true;
+        UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_CONSENSUS round=%u players=%d"), PartyRoundId, Participants);
+    }
+    if (PartySession && Ready == Participants && !bPartyTechnicalReady)
+    {
+        bPartyTechnicalReady = true;
+        UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_READY round=%u players=%d"), PartyRoundId, Participants);
+    }
+    if (!bPartyTechnicalReady || (!Round->bPartyForceStartRequested && !bPartyConsensusReached)) return;
+
+    UE_LOG(LogTemp, Display, TEXT("PARTY_BRIEFING_START round=%u agreed=%d players=%d forced=%d"),
+        PartyRoundId, Agreed, Participants, Round->bPartyForceStartRequested);
+    if (!bExpeditionRoom)
+    {
+        Exposed[PartyChestIndex]->Destroy();
+        Exposed[PartyChestIndex] = nullptr;
+        ConsumedDecoys.Add(PartyChestIndex);
+    }
+    Round->ClearDecoyEffect();
+    SetPhase(EIslandPhase::PartyPlaying);
+    PartySession->StartParty();
+    UE_LOG(LogTemp, Display, TEXT("PARTY_START round=%u chest=%d players=%d"), PartyRoundId, PartyChestIndex, Participants);
 }
 
 void AIslandGameMode::ReturnFromParty()
 {
     auto* Round = GetGameState<AIslandGameState>();
-    if (Round->Phase != EIslandPhase::PartyPlaying && Round->Phase != EIslandPhase::PartyLoading) return;
+    if (Round->Phase != EIslandPhase::PartyPlaying && Round->Phase != EIslandPhase::PartyBriefing) return;
     const bool bFinishedGame = Round->Phase == EIslandPhase::PartyPlaying;
     if (bDecoySandPending) return;
     if (bFinishedGame && bExpeditionRoom && PartySession)
@@ -537,6 +614,10 @@ void AIslandGameMode::ReturnFromParty()
 void AIslandGameMode::CompletePartyReturn(bool bFinishedGame)
 {
     auto* Round = GetGameState<AIslandGameState>();
+    Round->PartyBriefingMembers.Reset();
+    Round->PartyBriefingFeature = NAME_None;
+    Round->PartyBriefingRound = 0;
+    Round->bPartyForceStartRequested = false;
     if (bFinishedGame && bExpeditionRoom)
     {
         Round->ForceNetUpdate();
@@ -588,8 +669,6 @@ void AIslandGameMode::RestorePartyPlayers()
                 ? FindStandingFloor(Hero, RallyTarget->GetLocation() + FVector(0,0,20.), 200.) : TOptional<FVector>{};
             if (Landing && FMath::Abs(Landing->Z - RallyTarget->GetLocation().Z) < 40.)
             {
-                BurialSites.Remove(&Player);
-                UExpeditionMudMarkEffect::Clear(*Hero);
                 Hero->ReturnToStart(FTransform(RallyTarget->GetRotation(), Landing.GetValue()));
                 Player.SetControlRotation(Entry.View);
                 Player.ClientResetView(Entry.View);
@@ -659,5 +738,19 @@ void AIslandGameMode::RemovePartyPlayer(AIslandPlayerController& Player)
     if (AVoxelCharacter* Hero = Entry.Original.Get(); Hero && !Hero->GetController())
     {
         Hero->Destroy();
+    }
+    auto* Round = GetGameState<AIslandGameState>();
+    if (CurrentPartyFeature == MazeChaseFeature
+        && Round->Phase == EIslandPhase::PartyBriefing
+        && !HasOpposingCrews(&Player))
+    {
+        ReturnFromParty();
+        return;
+    }
+    if (Round->Phase == EIslandPhase::PartyBriefing)
+    {
+        Round->PartyBriefingMembers.RemoveAll([&Entry](const auto& Row) { return Row.PlayerId == Entry.PlayerId; });
+        Round->ForceNetUpdate();
+        TryStartBriefedParty();
     }
 }
