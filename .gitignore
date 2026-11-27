@@ -4,6 +4,7 @@
 /ActDemo/Intermediate/
 /ActDemo/Saved/
 /ActDemo/Config/Mac/MacEngine.ini
+/ActDemo/Config/Windows/WindowsEngine.ini
 /Builds/
 /ActDemo/Build/*/FileOpenOrder/
 /ActDemo/Build/*/*.PackageVersionCounter

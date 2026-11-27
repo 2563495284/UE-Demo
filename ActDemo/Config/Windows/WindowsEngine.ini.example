@@ -1,0 +1,7 @@
+; Copy to WindowsEngine.ini. Use the game's public client policy and playtest deployment.
+[EOSSDK.Platform.ExpeditionIsland]
+ProductId=
+SandboxId=
+DeploymentId=
+ClientId=
+ClientSecret=
