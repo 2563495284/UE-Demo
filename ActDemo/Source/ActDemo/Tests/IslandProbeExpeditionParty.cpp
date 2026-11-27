@@ -7,6 +7,7 @@
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/HUD.h"
 #include "HAL/FileManager.h"
@@ -17,6 +18,7 @@
 #include "Island/IslandState.h"
 #include "Island/IslandWorld.h"
 #include "PartyCrewRig.h"
+#include "PartyMudBall.h"
 #include "PartyVoxelArena.h"
 #include "Voxel/VoxelCharacter.h"
 #include "Voxel/VoxelTerrain.h"
@@ -624,6 +626,68 @@ void AIslandProbePeer::ClientGameTool_Implementation(FVector Target, bool bPlace
     GameToolHoldSeconds=HoldSeconds;
 }
 
+void AIslandProbePeer::ClientWatchArenaThrow_Implementation(int32 Round, FName Feature, int32 Shooter)
+{
+    WatchingThrowRound = Round;
+    ThrowFeature = Feature;
+    ThrowShooter = Shooter;
+    WatchedBall.Reset();
+    ServerArenaThrowReport(Round, false);
+}
+
+void AIslandProbePeer::ServerArenaThrowReport_Implementation(int32 Round, bool bSawFlight)
+{
+    if (bSawFlight) SeenThrowRound = Round;
+    else ReadyThrowRound = Round;
+}
+
+void AIslandProbePeer::TickArenaThrowObservation()
+{
+    for (TActorIterator<APartyMudBall> It(GetWorld()); It; ++It)
+    {
+        const auto* Shooter = Cast<APartyVoxelPawn>(It->GetInstigator());
+        if (!Shooter || Shooter->GetSeat() != ThrowShooter) continue;
+        const auto* Clod = It->FindComponentByClass<UStaticMeshComponent>();
+        if (!Clod || !Clod->GetStaticMesh() || !Clod->IsVisible() || It->IsHidden()) continue;
+        const FVector Position = Clod->GetComponentLocation();
+        if (WatchedBall.Get() != *It)
+        {
+            WatchedBall = *It;
+            FirstClodLocation = Position;
+            continue;
+        }
+        const double Rise = Position.Z - FirstClodLocation.Z;
+        if (Rise < 75.) continue;
+        UE_LOG(LogTemp, Display, TEXT("ARENA_THROW_FLIGHT round=%d game=%s shooter=%d rise_cm=%.1f"),
+            WatchingThrowRound, *ThrowFeature.ToString(), ThrowShooter, Rise);
+        ServerArenaThrowReport(WatchingThrowRound, true);
+        WatchingThrowRound = 0;
+        return;
+    }
+}
+
+bool AIslandProbe::TickArenaThrowTrial()
+{
+    const int32 Round = GameCount + 1;
+    const int32 Shooter = Peers.Num() > 1 ? 1 : 0;
+    if (ThrowWatchRound != Round)
+    {
+        ThrowWatchRound = Round;
+        for (auto& Peer : Peers) Peer->ClientWatchArenaThrow(Round, Mode->CurrentPartyFeature, Shooter);
+        return false;
+    }
+    if (ThrowSentRound != Round)
+    {
+        for (auto& Peer : Peers) if (Peer->ReadyThrowRound != Round) return false;
+        const auto* Pawn = CastChecked<APartyVoxelPawn>(Mode->GetPlayers()[Shooter]->GetPawn());
+        const FVector Sky = Pawn->GetPawnViewLocation() + FRotator(64., 0., 0.).Vector() * 10000.;
+        Peers[Shooter]->ClientGameTool(Sky, true, -1.f);
+        ThrowSentRound = Round;
+    }
+    for (auto& Peer : Peers) if (Peer->SeenThrowRound != Round) return false;
+    return true;
+}
+
 void AIslandProbePeer::TickGameTool(AIslandPlayerController& Player)
 {
     auto* Pawn = Cast<APartyVoxelPawn>(Player.GetPawn());
@@ -654,6 +718,9 @@ void AIslandProbePeer::TickGameTool(AIslandPlayerController& Player)
     }
     FHitResult Surface;
     const bool bHit = Pawn->AimTerrain(Surface);
+    if (WatchingThrowRound && bGameToolPlaces)
+        UE_LOG(LogTemp, Display, TEXT("ARENA_THROW_CLICK round=%d game=%s shooter=%d hit=%d"),
+            WatchingThrowRound, *ThrowFeature.ToString(), Pawn->GetSeat(), bHit);
     const FIntVector Cell = bHit ? Pawn->GetSession()->CellAt(Surface.ImpactPoint-Surface.ImpactNormal*2.) : FIntVector::ZeroValue;
     UE_LOG(LogTemp, Display, TEXT("EXPEDITION_GAME_TOOL seat=%d place=%d hit=%d cell=%s view=%s"),
         Pawn->GetSeat(), bGameToolPlaces, bHit, *Cell.ToString(), *Camera.ToCompactString());
@@ -974,6 +1041,7 @@ void AIslandProbe::TickExpeditionGame(double Now)
     const bool bAbort = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionAbortQA"));
     const bool bViews = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaViewsQA"));
     const bool bTerrain = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaTerrainQA"));
+    const bool bThrows = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionArenaThrowQA"));
     const bool bDecoyQA = FParse::Param(FCommandLine::Get(), TEXT("ExpeditionDecoyQA"));
     const bool bZeroScore = bDecoyQA && GameCount == 1;
     if (bGamesDrop && GameCount == 0 && (Round->Phase == EIslandPhase::PartyBriefing || Round->Phase == EIslandPhase::PartyPlaying))
@@ -1078,6 +1146,7 @@ void AIslandProbe::TickExpeditionGame(double Now)
         if (Session->GetPhase() == EPartyVoxelPhase::Playing)
         {
             if (bViews && Peers.ContainsByPredicate([this](const auto& Peer){ return Peer->ReadyArenaViewRound != GameCount+1; })) return;
+            if (bThrows && !TickArenaThrowTrial()) return;
             if (bTerrain && !TickArenaTerrain(*Session)) return;
             if (bVenueProof && !TickVenueProof(*Session, bShots)) return;
             if (bShots && bMazeProof && GameCount == 0 &&
@@ -1107,6 +1176,9 @@ void AIslandProbe::TickExpeditionGame(double Now)
         }
         else if (Session->GetPhase() == EPartyVoxelPhase::Results)
         {
+            if (bThrows)
+                for (const auto& Peer : Peers)
+                    Require(Peer->SeenThrowRound == GameCount + 1, TEXT("every participant saw the right-click mud ball fly"));
             if (bVenueProof) Require(VenueStep == EVenueStep::Restored, TEXT("every peer inspected each removed building before settlement"));
             if (Session->IsChaseGame())
             {

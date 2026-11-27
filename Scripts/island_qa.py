@@ -401,6 +401,24 @@ def terrain_shots(rounds):
     return [f"{game}-R{n}-{stage}.png" for n, game, *_ in rounds for stage in ("Before", "Cut", "Mound")]
 
 
+def verify_arena_throws(logs, rounds):
+    expected = {(n, game) for n, game, *_ in rounds}
+    shooter = "guest1" if "guest1" in logs else "host"
+    seat = "1" if shooter == "guest1" else "0"
+    heights = {}
+    for role, log in logs.items():
+        clicks = re.findall(r"ARENA_THROW_CLICK round=(\d+) game=(\w+) shooter=(\d+) hit=(\d)", log)
+        if sorted(clicks) != (sorted((n, game, seat, "0") for n, game in expected) if role == shooter else []):
+            raise RuntimeError(f"{role}: each arena needs exactly one untargeted right-click from {shooter}; saw {clicks}")
+        flights = re.findall(r"ARENA_THROW_FLIGHT round=(\d+) game=(\w+) shooter=(\d+) rise_cm=([\d.]+)", log)
+        if sorted((n, game) for n, game, *_ in flights) != sorted(expected):
+            raise RuntimeError(f"{role}: missing or duplicate flying mud in a visited arena")
+        if any(owner != seat or float(rise) < 75. for _, _, owner, rise in flights):
+            raise RuntimeError(f"{role}: the shooter's visible clay never rose 75 cm")
+        heights[role] = {n: float(rise) for n, _, _, rise in flights}
+    return {"shooter": shooter, "visible_rise_cm_by_round": heights}
+
+
 def verify_arena_terrain(logs, rounds):
     records = {}
     sightings = {}
@@ -1127,7 +1145,7 @@ def run(args, ip, mode, directory):
             shared.append("-ExpeditionGamesQA")
             if args.scenario == "games-maze":
                 shared.append("-ExpeditionMazeQA")
-            if args.interaction or args.venue_demolition or args.venue_smoke or args.arena_terrain or args.arena_views:
+            if args.interaction or args.venue_demolition or args.venue_smoke or args.arena_terrain or args.arena_throws or args.arena_views:
                 shared.append("-ExpeditionScoreGamesQA")
             if args.interaction:
                 shared.append("-ExpeditionInteractionQA")
@@ -1137,6 +1155,8 @@ def run(args, ip, mode, directory):
                 shared.append("-ExpeditionVenueSmokeQA")
             if args.arena_terrain:
                 shared.append("-ExpeditionArenaTerrainQA")
+            if args.arena_throws:
+                shared.append("-ExpeditionArenaThrowQA")
             if args.arena_views:
                 shared.append("-ExpeditionArenaViewsQA")
             if args.arena_controls:
@@ -1618,6 +1638,8 @@ def run(args, ip, mode, directory):
                 if args.arena_terrain:
                     result["continuous_terrain"] = verify_arena_terrain(logs, rounds)
                     result["charged_punch"] = verify_arena_punches(logs, rounds)
+                if args.arena_throws:
+                    result["mud_flight"] = verify_arena_throws(logs, rounds)
                 if args.arena_views:
                     result["arena_camera_distances_cm"] = {role: verify_arena_views(log, rounds) for role, log in logs.items()}
                 if args.arena_controls:
@@ -1769,6 +1791,7 @@ def main():
     parser.add_argument("--expect-decoy-event", choices=DECOY_EVENTS[1:], help="Require this result from the first natural draw in --decoy-events")
     parser.add_argument("--game-only", choices=sorted(VOXEL_GAMES), help="Use a single trap game during expedition games QA")
     parser.add_argument("--arena-terrain", action="store_true", help="Dig and fill off-grid with the normal mouse controls, compare collision profiles on each peer")
+    parser.add_argument("--arena-throws", action="store_true", help="Right-click into empty sky and observe visible mud moving on every peer in each score game")
     parser.add_argument("--arena-views", action="store_true", help="Toggle V in each arena and verify local camera, visible body, center aim and island return")
     parser.add_argument("--arena-controls", action="store_true", help="Compare mouse response, turning, running, jumping and both camera views before entry, in an arena and after return. Use --headless-host to isolate the simulated mouse from desktop input")
     venue = parser.add_mutually_exclusive_group()
@@ -1799,7 +1822,7 @@ def main():
     args = parser.parse_args()
     if args.arena_controls:
         if (args.scenario not in ("games", "games-solo", "games-crew") or args.game_only == MAZE or args.decoy_events
-                or args.interaction or args.arena_views or args.arena_terrain or args.venue_demolition or args.venue_smoke):
+                or args.interaction or args.arena_views or args.arena_terrain or args.arena_throws or args.venue_demolition or args.venue_smoke):
             parser.error("--arena-controls needs a score-game round with exclusive control of the host's inputs")
         args.game_only = args.game_only or "PartyReefRun"
     if args.expect_decoy_event and not args.decoy_events:
@@ -1815,7 +1838,7 @@ def main():
             parser.error("games-maze plays two maze rounds using one genuine chest and one decoy")
         args.game_only = MAZE
     if args.game_only == MAZE and (ROOM_CASES.get(args.scenario, (0, False))[1] or args.arena_views or
-                                   args.venue_demolition or args.venue_smoke or args.arena_terrain or args.interaction):
+                                   args.venue_demolition or args.venue_smoke or args.arena_terrain or args.arena_throws or args.interaction):
         parser.error("Maze chase needs at least two crews and its own wall and spectator checks (--scenario games-maze)")
     if args.long_read:
         if args.scenario not in GAME_CASES or args.scenario in ("games-abort", "games-drop"):
@@ -1832,8 +1855,8 @@ def main():
         if args.decoys == 0 or args.interaction:
             parser.error("games-abort exercises one recoverable false chest and must be run independently of --interaction")
         args.game_only = args.game_only or "PartyReefRun"
-    if (args.arena_views or args.arena_terrain) and args.scenario not in ("games", "games-crew", "games-solo"):
-        parser.error("Arena view and terrain checks require a games, games-crew or games-solo scenario")
+    if (args.arena_views or args.arena_terrain or args.arena_throws) and args.scenario not in ("games", "games-crew", "games-solo"):
+        parser.error("Arena view, terrain and throw checks require a games, games-crew or games-solo scenario")
     if args.briefing and args.scenario not in (*GAME_CASES, "party"):
         parser.error("--briefing requires a games or party scenario")
     if args.briefing == "drop" and args.scenario != "games-drop":

@@ -4,6 +4,7 @@
 #include "GameFramework/GameStateBase.h"
 #include "PartyCrewAppearance.h"
 #include "PartyCrewRig.h"
+#include "PartyMudBall.h"
 #include "Engine/SkeletalMesh.h"
 #include "GameFramework/PlayerState.h"
 
@@ -288,7 +289,20 @@ void APartyVoxelPawn::ReleaseLocalPartyInput()
     bAimingAtVenue = false;
 }
 
-FVector APartyVoxelPawn::GetToolAimDirection() const
+bool APartyVoxelPawn::GetThrowHandLocation(FVector& OutLocation) const
+{
+    if (IsInFirstPersonView())
+    {
+        OutLocation = EyePaws[0]->GetComponentLocation();
+        return true;
+    }
+    static const FName Hand(TEXT("hand_l"));
+    OutLocation = CrewRig->IsVisible() && CrewRig->DoesSocketExist(Hand)
+        ? CrewRig->GetSocketLocation(Hand) : Gloves[0]->GetComponentLocation();
+    return true;
+}
+
+FVector APartyVoxelPawn::GetToolAimDirection(bool bThrowMud) const
 {
     const auto* PC = Cast<APlayerController>(Controller);
     if (!PC || !PC->IsLocalController() || PC->GetViewTarget() != this)
@@ -298,12 +312,18 @@ FVector APartyVoxelPawn::GetToolAimDirection() const
     FRotator View;
     PC->GetPlayerViewPoint(Camera, View);
     const FVector EyePosition = GetPawnViewLocation();
+    if (bThrowMud && FRotator::NormalizeAxis(GetControlRotation().Pitch) < -72.f)
+    {
+        Camera = EyePosition;
+        View = GetControlRotation();
+    }
     const FVector Crosshair = View.Vector();
-    const double Range = APartyVoxelSession::FillReach + FVector::Distance(Camera, EyePosition);
+    const double Range = (bThrowMud ? 1400. : APartyVoxelSession::FillReach) + FVector::Distance(Camera, EyePosition);
     const FVector End = Camera + Crosshair * Range;
     FHitResult Hit;
     const FCollisionQueryParams Query(SCENE_QUERY_STAT(PartyCrosshair), false, this);
     const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Camera, End, ECC_Visibility, Query);
+    if (bThrowMud && bHit) return APartyMudBall::AimAtSurface(EyePosition, Crosshair, Hit);
     // The camera selects the point under the reticle. The tool still reaches it from the character.
     return ((bHit ? Hit.ImpactPoint : End) - EyePosition).GetSafeNormal(UE_SMALL_NUMBER, Crosshair);
 }
@@ -400,7 +420,7 @@ void APartyVoxelPawn::UseTool(bool bPlace)
     if (!HasLocalPartyInput() || !CanActInRound()) return;
     if (!bPlace) { BeginPunchInput(); ReleasePunchInput(); return; }
     CrewMotion.Throw(GetWorld()->GetTimeSeconds());
-    ServerTool(true,GetToolAimDirection());
+    ServerTool(true,GetToolAimDirection(!Arena->IsChaseGame()));
 }
 
 void APartyVoxelPawn::ServerTool_Implementation(bool bPlace,FVector_NetQuantizeNormal Direction)

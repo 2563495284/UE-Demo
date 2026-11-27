@@ -462,6 +462,7 @@ void AIslandProbePeer::Tick(float DeltaSeconds)
         if (GameToolTarget && !HeldArenaKey.IsValid()) TickGameTool(*Controller);
         if (TerrainSampleStage != INDEX_NONE) TickArenaTerrainSample(*Controller);
         if (ArenaPunchTrial != INDEX_NONE) TickArenaPunchInput(*Controller);
+        if (WatchingThrowRound) TickArenaThrowObservation();
     }
     if (Controller && Controller->IsLocalController() && GameWalkTarget) TickGameWalk();
     if (Controller && Controller->IsLocalController() && FParse::Param(FCommandLine::Get(), TEXT("ExpeditionFieldQA")))

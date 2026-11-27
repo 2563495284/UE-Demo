@@ -422,14 +422,7 @@ FVector AVoxelPlayerController::GetExpeditionThrowAim(const AVoxelCharacter& Her
         return (FRotator(0., View.Yaw, 0.).Vector() * .07f - FVector::UpVector).GetSafeNormal();
     if (!bHit)
         return (Far - Hero.GetAimOrigin()).GetSafeNormal();
-    const FVector BallCenter = Hit.ImpactPoint + Hit.ImpactNormal * AExpeditionMudBall::Radius;
-    // At a start-overlap the physics contact can be behind the eye. Keep the
-    // throw pointed into the contacted surface and let its first sweep resolve it.
-    if (FVector::DotProduct(BallCenter - From, View.Vector()) <= 0.
-        || FVector::DotProduct(Hit.ImpactPoint - From, View.Vector()) <= 0.) return View.Vector();
-    if (FVector::DotProduct(BallCenter - From, Hit.ImpactPoint - From) <= 0.)
-        return (Hit.ImpactPoint - From).GetSafeNormal(UE_SMALL_NUMBER, View.Vector());
-    return AExpeditionMudBall::AimAtPoint(From, BallCenter);
+    return AExpeditionMudBall::AimAtSurface(From, View.Vector(), Hit);
 }
 
 FVector AVoxelPlayerController::GetExpeditionActionAim(EExpeditionAction Action) const

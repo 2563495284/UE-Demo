@@ -77,6 +77,9 @@ public:
     UFUNCTION(Client, Reliable) void ClientInspectArenaView(int32 Round, FName Feature);
     UFUNCTION(Server, Reliable) void ServerArenaViewReady(int32 Round);
     int32 ReadyArenaViewRound = 0;
+    UFUNCTION(Client, Reliable) void ClientWatchArenaThrow(int32 Round, FName Feature, int32 Shooter);
+    UFUNCTION(Server, Reliable) void ServerArenaThrowReport(int32 Round, bool bSawFlight);
+    int32 ReadyThrowRound = 0, SeenThrowRound = 0;
     UFUNCTION(Client, Reliable) void ClientTryArenaPunch(int32 Round, int32 Trial, FVector Target);
     UFUNCTION(Server, Reliable) void ServerTriedArenaPunch(int32 Round, int32 Trial);
     int32 TriedPunchRound = 0, TriedPunchTrial = INDEX_NONE;
@@ -143,6 +146,11 @@ private:
     double ArenaPunchPressedAt = -1.;
     FVector ArenaPunchTarget = FVector::ZeroVector;
     bool bPunchViewWasFirst = false;
+    void TickArenaThrowObservation();
+    FName ThrowFeature;
+    int32 WatchingThrowRound = 0, ThrowShooter = INDEX_NONE;
+    TWeakObjectPtr<class APartyMudBall> WatchedBall;
+    FVector FirstClodLocation = FVector::ZeroVector;
     void TickArenaViews(AIslandPlayerController& Player);
     enum class EViewStep : uint8 { Idle, Photo, LookAtFloor, Aim, Toggle, Return };
     EViewStep ViewStep = EViewStep::Idle;
@@ -229,6 +237,8 @@ private:
     int32 MazePhotoStage=INDEX_NONE;
     bool CaptureMazeStage(class APartyVoxelSession& Arena,int32 Phase,const TCHAR* Label);
     bool TickArenaTerrain(class APartyVoxelSession& Arena);
+    bool TickArenaThrowTrial();
+    int32 ThrowWatchRound = 0, ThrowSentRound = 0;
     bool TickArenaPunchTrials(APartyVoxelSession& Arena);
     bool FindArenaPunchSite(APartyVoxelSession& Arena, class APartyVoxelPawn& Pawn, FVector& Point);
     FVector TerrainSamplePoint = FVector::ZeroVector;

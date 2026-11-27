@@ -180,6 +180,6 @@ void APartyVoxelPawn::DrawPartyHUD(AHUD& HUD, const FVector2D& ViewportSize, boo
         Center(Result,H*.38f,1.55f,Ink);
         Center(EXPEDITION_TEXT("回到海岛揭晓宝箱", "The chest will be revealed back on the island"),H*.48f,.93f,Ink);
     }
-    else Center(EXPEDITION_TEXT("WASD 移动    V 切换视角    左键蓄力，松开出拳    长按右键堆土    空格跳跃", "WASD move    V change view    Hold LMB to charge, release to punch    Hold RMB to pile soil    Space jump"),H-43*S,.86f,Ink);
+    else Center(EXPEDITION_TEXT("WASD 移动    V 切换视角    左键蓄力，松开出拳    右键扔泥，按住连扔    空格跳跃", "WASD move    V change view    Hold LMB to charge, release to punch    RMB throw mud, hold to repeat    Space jump"),H-43*S,.86f,Ink);
     HUD.DrawRect(Accent,13*S,15*S,3*S,31*S);
 }

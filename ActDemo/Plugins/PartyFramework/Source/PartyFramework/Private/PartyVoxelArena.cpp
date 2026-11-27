@@ -4,6 +4,7 @@
 
 #include "Components/CapsuleComponent.h"
 #include "PartyDensityTerrain.h"
+#include "PartyMudBall.h"
 #include "VoxelSurfaceKernel.h"
 #include "Engine/GameInstance.h"
 #include "Engine/StaticMesh.h"
@@ -506,10 +507,22 @@ void APartyVoxelSession::ProtectParticipants(FPartyVoxelChange& Brush, TMap<APar
 bool APartyVoxelSession::UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVector Direction,uint8 Power)
 {
     if (!HasAuthority() || Phase!=EPartyVoxelPhase::Playing || Participants.FindRef(Pawn.Seat).Get()!=&Pawn) return false;
+    if (bPlace)
+    {
+        FActorSpawnParameters Params;
+        Params.Owner = this;
+        Params.Instigator = &Pawn;
+        Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        auto* Ball = GetWorld()->SpawnActor<APartyMudBall>(APartyMudBall::StaticClass(),
+            Pawn.GetPawnViewLocation(), Direction.Rotation(), Params);
+        if (!Ball) return false;
+        Ball->Launch(Direction.GetSafeNormal());
+        return true;
+    }
+
     FHitResult Hit;
     if (!TraceTerrain(Pawn.GetPawnViewLocation(),Direction,&Pawn,Hit))
     {
-        if (bPlace) return false;
         const int32 Structure = TraceVenueStructure(Pawn.GetPawnViewLocation(), Direction, &Pawn);
         if (Structure == INDEX_NONE) return false;
         FHitResult Face;
@@ -522,7 +535,18 @@ bool APartyVoxelSession::UseTerrainTool(APartyVoxelPawn& Pawn,bool bPlace,FVecto
         Stroke.Normal=VoxelSurfaceKernel::QuantizeNormal(Face.ImpactNormal);
         return CommitBrush(Stroke);
     }
-    if (!bPlace && Hit.Distance>PartyPunch::Reach) return false;
+    return Hit.Distance <= PartyPunch::Reach && EditTerrainAtHit(Pawn, Hit, false, Power);
+}
+
+void APartyVoxelSession::ResolveMudImpact(APartyVoxelPawn& Pawn, const FHitResult& Hit)
+{
+    if (!HasAuthority() || Phase != EPartyVoxelPhase::Playing || Participants.FindRef(Pawn.Seat).Get() != &Pawn
+        || !Terrain->OwnsSurface(Hit.GetComponent())) return;
+    EditTerrainAtHit(Pawn, Hit, true, 0);
+}
+
+bool APartyVoxelSession::EditTerrainAtHit(APartyVoxelPawn& Pawn, const FHitResult& Hit, bool bPlace, uint8 Power)
+{
     const FIntVector Cell = CellAt(Hit.ImpactPoint-Hit.ImpactNormal*2.);
     if (bPlace && (Cell.X<MinCell.X || Cell.X>MaxCell.X || Cell.Y<MinCell.Y || Cell.Y>MaxCell.Y
         || Cell.Z<MinCell.Z-1 || Cell.Z>MaxCell.Z+6)) return false;

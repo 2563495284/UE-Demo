@@ -95,7 +95,8 @@ public:
     void SetLocalFirstPersonView(bool bFirstPerson);
     bool IsInFirstPersonView() const { return bLocalFirstPerson && IsLocallyControlled(); }
     void CalcCamera(float DeltaSeconds, FMinimalViewInfo& OutView) override;
-    FVector GetToolAimDirection() const;
+    FVector GetToolAimDirection(bool bThrowMud = false) const;
+    bool GetThrowHandLocation(FVector& OutLocation) const;
     bool AimTerrain(FHitResult& Hit) const;
     void UseTool(bool bPlace);
     void BeginPunchInput();
@@ -193,6 +194,7 @@ public:
     float TerrainDensityAt(FVector WorldPoint) const;
     int32 GetAppliedEditCount() const { return AppliedEdits; }
     bool TraceTerrain(FVector From, FVector Direction, const AActor* Ignore, FHitResult& Hit) const;
+    void ResolveMudImpact(APartyVoxelPawn& Pawn, const FHitResult& Hit);
     FIntVector FeetCell(int32 Seat) const;
     FVector FeetLocation(int32 Seat) const;
     bool IsGrounded(int32 Seat) const;
@@ -241,6 +243,7 @@ private:
     void EnsureGrid();
     void ReplayBrushes(TArrayView<const int32> Indices);
     bool ApplyBrushLocally(const FPartyVoxelChange& Brush);
+    bool EditTerrainAtHit(APartyVoxelPawn& Pawn, const FHitResult& Hit, bool bPlace, uint8 Power);
     void ProtectParticipants(FPartyVoxelChange& Brush, TMap<APartyVoxelPawn*,FVector>& Lifts) const;
     void ApplyBeacon(FIntVector Cell,FColor Color);
     UFUNCTION() void OnRep_Beacons();

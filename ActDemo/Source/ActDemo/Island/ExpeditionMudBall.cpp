@@ -1,26 +1,17 @@
 #include "Island/ExpeditionMudBall.h"
 
 #include "Components/CapsuleComponent.h"
-#include "Components/StaticMeshComponent.h"
-#include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
-#include "GameFramework/GameStateBase.h"
 #include "Island/ExpeditionAnimalComponent.h"
 #include "Island/ExpeditionBodyMud.h"
 #include "Island/IslandAttachedMud.h"
 #include "Island/IslandNeutralProp.h"
 #include "Island/IslandGameMode.h"
 #include "Island/IslandPlayerController.h"
-#include "Materials/MaterialInstanceDynamic.h"
-#include "Net/UnrealNetwork.h"
-#include "UObject/ConstructorHelpers.h"
 #include "Voxel/VoxelCharacter.h"
 
 namespace
 {
-    constexpr double MaxFlightAge = 1.3;
-    constexpr double SplatDuration = .24;
-
     bool TraceMudSurface(UWorld& World, const FVector& Start, const FVector& End, float SweepRadius,
         const FCollisionQueryParams& Query, FHitResult& Hit)
     {
@@ -43,79 +34,6 @@ namespace
         }
         return false;
     }
-}
-
-AExpeditionMudBall::AExpeditionMudBall()
-{
-    bReplicates = true;
-    bAlwaysRelevant = true;
-    SetReplicateMovement(false);
-    PrimaryActorTick.bCanEverTick = true;
-    SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("FlightPath")));
-    Clod = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("FlyingClay"));
-    Clod->SetupAttachment(GetRootComponent());
-    Clod->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    Clod->SetGenerateOverlapEvents(false);
-    Clod->SetCastShadow(true);
-    Clod->SetReceivesDecals(false);
-    Clod->SetCanEverAffectNavigation(false);
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(TEXT("/Game/TreasureIsland/Art/Neutral/SM_ReefStone"));
-    static ConstructorHelpers::FObjectFinder<UMaterialInterface> Clay(TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-    Clod->SetStaticMesh(Sphere.Object);
-    ClayBase = Clay.Object;
-}
-
-void AExpeditionMudBall::BeginPlay()
-{
-    Super::BeginPlay();
-    Clod->SetVisibility(false);
-    Clod->SetWorldScale3D(FVector(.24,.19,.18));
-    if (GetNetMode() != NM_DedicatedServer)
-    {
-        if (UMaterialInstanceDynamic* Clay = UMaterialInstanceDynamic::Create(ClayBase, this))
-        {
-            Clay->SetVectorParameterValue(TEXT("Color"), FLinearColor(FColor(181,109,64)));
-            Clod->SetMaterial(0, Clay);
-        }
-    }
-}
-
-double AExpeditionMudBall::ServerNow() const
-{
-    const AGameStateBase* State = GetWorld()->GetGameState();
-    return State ? State->GetServerWorldTimeSeconds() : GetWorld()->GetTimeSeconds();
-}
-
-void AExpeditionMudBall::Launch(const FVector& Aim)
-{
-    Flight.Start = GetActorLocation();
-    Flight.Velocity = LaunchVelocity(Aim);
-    Flight.LaunchedAt = ServerNow();
-    UpdateFlyingClod(0.);
-    ForceNetUpdate();
-}
-
-FVector AExpeditionMudBall::LaunchVelocity(const FVector& Aim)
-{
-    return Aim * ThrowSpeed + FVector::UpVector * (ArcLift * Aim.Size2D());
-}
-
-FVector AExpeditionMudBall::PositionAt(double Age) const
-{
-    return Flight.Start + Flight.Velocity * Age - FVector::UpVector * (.5 * FallAcceleration * Age * Age);
-}
-
-FVector AExpeditionMudBall::AimAtPoint(const FVector& From, const FVector& BallCenter)
-{
-    const FVector Delta = BallCenter - From;
-    const double Run = Delta.Size2D();
-    if (Run < 1.) return Delta.GetSafeNormal();
-    const double K = FallAcceleration * Run / (2. * FMath::Square(ThrowSpeed));
-    const double C = Delta.Z / Run - ArcLift / ThrowSpeed + K;
-    const double Discriminant = 1. - 4. * K * C;
-    if (Discriminant < 0.) return Delta.GetSafeNormal();
-    const double Tangent = 2. * C / (1. + FMath::Sqrt(Discriminant));
-    return (Delta.GetSafeNormal2D() + FVector::UpVector * Tangent).GetSafeNormal();
 }
 
 bool AExpeditionMudBall::TraceContact(UWorld& World, const AVoxelCharacter& Thrower, const FVector& Start,
@@ -185,79 +103,22 @@ bool AExpeditionMudBall::TraceContact(UWorld& World, const AVoxelCharacter& Thro
     return bBody || bSurface;
 }
 
-void AExpeditionMudBall::Tick(float DeltaSeconds)
+bool AExpeditionMudBall::SweepFlight(const FVector& Start, const FVector& End, FHitResult& Hit) const
 {
-    Super::Tick(DeltaSeconds);
-    if (Flight.LaunchedAt < 0.) return;
-    const double Now = ServerNow();
-    if (Stop.Time >= 0.)
-    {
-        DrawStop(Now);
-        return;
-    }
-    const double Age = FMath::Clamp(Now - Flight.LaunchedAt, 0., MaxFlightAge);
-    if (HasAuthority())
-    {
-        while (SimulatedAge + UE_DOUBLE_SMALL_NUMBER < Age)
-        {
-            const double Next = FMath::Min(Age, SimulatedAge + 1./60.);
-            FHitResult Hit;
-            const FVector From = PositionAt(SimulatedAge);
-            SimulatedAge = Next;
-            auto* Source = Cast<AVoxelCharacter>(GetInstigator());
-            if (!Source || !TraceContact(*GetWorld(), *Source, From, PositionAt(Next), Radius, Hit)) continue;
-            Stop.Time = Now;
-            Stop.Point = Hit.ImpactPoint;
-            Stop.Normal = Hit.ImpactNormal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
-            AIslandGameMode* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>();
-            AIslandPlayerController* Thrower = Cast<AIslandPlayerController>(GetOwner());
-            if (Mode && Thrower) Mode->ResolveMudImpact(*Thrower, Hit);
-            ForceNetUpdate();
-            DrawStop(Now);
-            SetLifeSpan(SplatDuration + .15);
-            return;
-        }
-        if (Age >= MaxFlightAge)
-        {
-            Destroy();
-            return;
-        }
-    }
-    const FVector At = PositionAt(Age);
-    SetActorLocationAndRotation(At, (Flight.Velocity - FVector::UpVector * (FallAcceleration * Age)).Rotation());
-    UpdateFlyingClod(Age);
+    const auto* Thrower = Cast<AVoxelCharacter>(GetInstigator());
+    return Thrower && TraceContact(*GetWorld(), *Thrower, Start, End, Radius, Hit);
 }
 
-void AExpeditionMudBall::UpdateFlyingClod(double Age)
+void AExpeditionMudBall::ApplyImpact(const FHitResult& Hit)
 {
-    // The sweep follows the reticle from frame one. The visible clay leaves the palm and joins that arc.
-    if (GetNetMode() == NM_DedicatedServer) return;
-    constexpr double HandBlendSeconds = .13;
-    if (!HandOffset.IsSet() && Age < HandBlendSeconds && GetInstigator())
-    {
-        const auto* Animal = GetInstigator()->FindComponentByClass<UExpeditionAnimalComponent>();
-        FVector Hand;
-        if (Animal && Animal->GetThrowHandLocation(Hand))
-            HandOffset = Hand - FVector(Flight.Start);
-    }
-    if (HandOffset.IsSet())
-        Clod->SetWorldLocation(GetActorLocation() + HandOffset.GetValue() * FMath::Square(FMath::Max(0., 1. - Age / HandBlendSeconds)));
-    Clod->SetVisibility(true);
+    auto* Mode = GetWorld()->GetAuthGameMode<AIslandGameMode>();
+    auto* Thrower = Cast<AIslandPlayerController>(GetOwner());
+    if (Mode && Thrower) Mode->ResolveMudImpact(*Thrower, Hit);
 }
 
-void AExpeditionMudBall::DrawStop(double Now)
+bool AExpeditionMudBall::GetThrowHandLocation(FVector& OutLocation) const
 {
-    const double Fraction = FMath::Clamp((Now - Stop.Time) / SplatDuration, 0., 1.);
-    SetActorLocationAndRotation(Stop.Point + Stop.Normal * 1.5, FRotationMatrix::MakeFromZ(Stop.Normal).Rotator());
-    Clod->SetRelativeLocation(FVector::ZeroVector);
-    const double Width = (.22 + Fraction * .28) * (1. - FMath::Pow(Fraction, 4.));
-    Clod->SetWorldScale3D(FVector(Width, Width, .035 * (1. - Fraction)));
-    Clod->SetVisibility(Fraction < 1.);
-}
-
-void AExpeditionMudBall::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
-{
-    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-    DOREPLIFETIME_CONDITION(AExpeditionMudBall, Flight, COND_InitialOnly);
-    DOREPLIFETIME(AExpeditionMudBall, Stop);
+    const auto* Thrower = GetInstigator();
+    const auto* Animal = Thrower ? Thrower->FindComponentByClass<UExpeditionAnimalComponent>() : nullptr;
+    return Animal && Animal->GetThrowHandLocation(OutLocation);
 }
